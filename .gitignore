@@ -1,0 +1,14 @@
+/target
+.env
+.env.*
+!.env.example
+
+# Books and generated output never belong in the repository
+/data
+*.pdf
+*.epub
+!tests/fixtures/**/*.pdf
+!tests/fixtures/**/*.epub
+
+# Downloaded native libraries (pdfium)
+/vendor
