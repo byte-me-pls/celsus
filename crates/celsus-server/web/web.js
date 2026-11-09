@@ -2,7 +2,8 @@
    No inline scripts or styles anywhere, so the strict Content-Security-Policy holds. Every value from the server
    is escaped before it becomes HTML. */
 
-const T = uiStrings("web");
+// The desktop app's texts (pictures, estimates, usage, settings) are shared; the web's own come on top.
+const T = { ...uiStrings("app"), ...uiStrings("web") };
 
 // The full list (about 130 languages) comes from the backend; these are shown until it arrives.
 let LANGUAGES = [
@@ -273,6 +274,8 @@ function routeToHash(view, p) {
   return `#/${view}`;
 }
 function hashToRoute() {
+  // An app asking for access (OAuth): the request is in the address after "#/oauth?".
+  if (location.hash.startsWith("#/oauth?")) return { view: "oauth", query: location.hash.slice("#/oauth?".length) };
   const parts = location.hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent);
   switch (parts[0]) {
     case "book": return { view: "book", id: parts[1] };
@@ -280,6 +283,7 @@ function hashToRoute() {
     case "jobs": return { view: "jobs" };
     case "account": return { view: "account" };
     case "admin": return { view: "admin", tab: parts[1] || "members" };
+    case "connect": return { view: "connect" };
     default: return { view: "library" };
   }
 }
@@ -300,7 +304,7 @@ function route(r) {
   for (const b of $$("[data-go]")) b.classList.toggle("active", b.dataset.go === r.view || ((r.view === "book" || r.view === "reader") && b.dataset.go === "library"));
   main.className = r.view === "reader" ? "reader-host" : "";
   main.scrollTop = 0;
-  setCrumbs({ library: T.navLibrary, book: T.navLibrary, reader: T.navLibrary, jobs: T.navJobs, account: T.navAccount, admin: T.navAdmin }[r.view]);
+  setCrumbs({ library: T.navLibrary, book: T.navLibrary, reader: T.navLibrary, jobs: T.navJobs, account: T.navAccount, admin: T.navAdmin, connect: T.navConnect, oauth: T.navConnect }[r.view]);
   render();
 }
 
@@ -313,6 +317,8 @@ async function render() {
     else if (r.view === "jobs") await renderJobs();
     else if (r.view === "account") await renderAccount();
     else if (r.view === "admin") await renderAdmin(r.tab);
+    else if (r.view === "connect") await renderConnect();
+    else if (r.view === "oauth") await renderOAuth(r.query);
   } catch (e) {
     if (e.status === 401) return;
     main.innerHTML = `<div class="empty-results"><h2>:(</h2><p>${esc(e.message)}</p></div>`;
@@ -476,10 +482,11 @@ async function renderBook(id) {
             <label>${esc(T.firstPage)}<input id="b-first" type="number" min="1" max="${book.pages}" value="${bookForm.first}"></label>
             <label>${esc(T.lastPage)}<input id="b-last" type="number" min="1" max="${book.pages}" value="${bookForm.last}"></label>
           </div>
+          <div class="estimate" id="b-estimate"><div><b>–</b><small>${esc(T.estChars)}</small></div><div><b>–</b><small>${esc(T.estTokens)}</small></div><div><b>–</b><small>${esc(T.estTime)}</small></div></div>
           <button class="primary-button wide" id="b-enqueue">${esc(T.enqueue)}</button>
         </section>
         <section class="card stack">
-          <div class="section-heading"><h2>${esc(T.detailsTitle)}</h2></div>
+          <div class="section-heading"><h2>${esc(T.detailsTitle)}</h2>${editable ? `<button class="text-button spark" id="b-recognise"><svg viewBox="0 0 24 24"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/></svg>${esc(T.recognise)}</button>` : ""}</div>
           ${editable ? "" : `<p class="hint">${esc(T.readOnly)}</p>`}
           <label>${esc(T.bookTitle)}<input id="b-title" value="${esc(book.title)}" ${editable ? "" : "disabled"}></label>
           <label>${esc(T.author)}<input id="b-author" value="${esc(book.author)}" ${editable ? "" : "disabled"}></label>
@@ -492,6 +499,17 @@ async function renderBook(id) {
       </div>
       <div>
         <section class="card" id="b-translations"></section>
+        <section class="card stack" id="b-pictures">
+          <div class="section-heading"><h2>${esc(T.picturesTitle)}</h2><span class="caption" id="pic-lang"></span></div>
+          <p class="hint">${esc(T.picturesHint)}</p>
+          <div class="row pic-toolbar">
+            <label class="page-jump">${esc(T.picPage)}<input id="pic-page" type="number" min="1" max="${book.pages}" value="1"></label>
+            <button class="quiet-button" id="pic-show">${esc(T.picShow)}</button>
+            <input id="pic-note" class="grow" placeholder="${esc(T.picNotePh)}" title="${esc(T.picNote)}">
+          </div>
+          <div id="pic-list"></div>
+          <input type="file" id="pic-file" accept="image/png,image/jpeg" hidden>
+        </section>
         <section class="card" id="b-history"></section>
         ${editable ? `<div class="danger-zone"><div><b>${esc(T.deleteTitle)}</b><p class="hint">${esc(T.deleteText)}</p></div><button class="quiet-button danger" id="b-delete">${esc(T.deleteButton)}</button></div>` : ""}
       </div>
@@ -506,9 +524,29 @@ async function renderBook(id) {
   };
   for (const b of $$("#b-mode button")) b.onclick = () => setMode(b.dataset.mode);
   setMode(bookForm.mode);
-  $("#b-first").oninput = () => (bookForm.first = Number($("#b-first").value));
-  $("#b-last").oninput = () => (bookForm.last = Number($("#b-last").value));
-  $("#b-target").oninput = () => { bookForm.lang = $("#b-target").value.trim().toLowerCase(); renderBookStatus(book); };
+  for (const b of $$("#b-mode button")) b.addEventListener("click", () => estimate(book));
+  $("#b-first").oninput = () => { bookForm.first = Number($("#b-first").value); estimate(book); };
+  $("#b-last").oninput = () => { bookForm.last = Number($("#b-last").value); estimate(book); };
+  $("#b-target").oninput = () => { bookForm.lang = $("#b-target").value.trim().toLowerCase(); renderBookStatus(book); estimate(book); renderPictures(book); };
+  $("#pic-show").onclick = () => renderPictures(book);
+  $("#pic-page").onchange = () => renderPictures(book);
+  if ($("#b-recognise")) $("#b-recognise").onclick = async () => {
+    const btn = $("#b-recognise");
+    btn.disabled = true;
+    const label = btn.lastChild.textContent;
+    btn.lastChild.textContent = T.recognising;
+    try {
+      const info = await apiCall("POST", `/api/books/${book.id}/recognise`, { lang: UI_LANG });
+      if (info.title) $("#b-title").value = info.title;
+      if (info.author) $("#b-author").value = info.author;
+      if (info.subject) $("#b-subject").value = info.subject;
+      if (info.language) $("#b-source").value = info.language;
+      toast(info.recognised ? T.recognised : T.notRecognised);
+    } catch {} finally {
+      btn.disabled = false;
+      btn.lastChild.textContent = label;
+    }
+  };
   $("#b-enqueue").onclick = async () => {
     const lang = $("#b-target").value.trim().toLowerCase();
     const done = new Set((await api("GET", `/api/books/${book.id}/pages/${encodeURIComponent(lang)}`).catch(() => ({ pages: [] }))).pages.map(([p]) => p));
@@ -541,6 +579,128 @@ async function renderBook(id) {
     go("library");
   };
   renderBookStatus(book);
+  estimate(book);
+  renderPictures(book);
+}
+
+/** The pages the translate card would queue (the "missing" choice needs the pages already done). */
+async function chosenPages(book) {
+  const all = Array.from({ length: book.pages }, (_, i) => i + 1);
+  if (bookForm.mode === "all") return all;
+  if (bookForm.mode === "missing") {
+    const lang = ($("#b-target")?.value || "").trim().toLowerCase();
+    const done = new Set((await api("GET", `/api/books/${book.id}/pages/${encodeURIComponent(lang)}`).catch(() => ({ pages: [] }))).pages.map(([p]) => p));
+    return all.filter((p) => !done.has(p));
+  }
+  const a = Math.max(1, Math.min(book.pages, Number($("#b-first")?.value) || 1));
+  const b = Math.max(a, Math.min(book.pages, Number($("#b-last")?.value) || a));
+  return all.slice(a - 1, b);
+}
+
+/** Pages as "1-5,9" for the server. */
+function pageRanges(pages) {
+  const out = [];
+  for (let i = 0; i < pages.length; i++) {
+    let j = i;
+    while (j + 1 < pages.length && pages[j + 1] === pages[j] + 1) j++;
+    out.push(i === j ? `${pages[i]}` : `${pages[i]}-${pages[j]}`);
+    i = j;
+  }
+  return out.join(",");
+}
+
+let estimateTimer;
+function estimate(book) {
+  clearTimeout(estimateTimer);
+  estimateTimer = setTimeout(async () => {
+    const pages = await chosenPages(book);
+    const cells = $$("#b-estimate b");
+    if (!cells.length) return;
+    if (!pages.length) { cells.forEach((c) => (c.textContent = "0")); return; }
+    const { chars } = await api("GET", `/api/books/${book.id}/estimate?pages=${encodeURIComponent(pageRanges(pages.slice(0, 2000)))}`).catch(() => ({ chars: 0 }));
+    // About 3.5 characters per token each way, plus the prompt and context sent with every request.
+    const tokens = Math.round((chars / 3.5) * 2.2 + pages.length * 600);
+    cells[0].textContent = num(chars);
+    cells[1].textContent = num(tokens);
+    cells[2].textContent = T.minutes((pages.length * 16) / 60);
+  }, 250);
+}
+
+const drawing = new Set();
+async function renderPictures(book) {
+  const list = $("#pic-list");
+  if (!list) return;
+  const lang = ($("#b-target")?.value.trim() || state.settings.target_lang || "tr").toLowerCase();
+  const page = Math.max(1, Math.min(book.pages, Number($("#pic-page").value) || 1));
+  $("#pic-lang").textContent = langName(lang);
+  const base = `/api/books/${encodeURIComponent(book.id)}/pictures`;
+  let images;
+  try {
+    images = (await api("GET", `${base}?page=${page}&lang=${encodeURIComponent(lang)}`)).pictures;
+  } catch (e) {
+    list.innerHTML = `<p class="caption">${esc(e.message)}</p>`;
+    return;
+  }
+  if (!images.length) {
+    list.innerHTML = `<p class="caption">${esc(T.picNone)}</p>`;
+    return;
+  }
+  const stamp = state.picStamp || 0;
+  const q = (im) => `page=${page}&image=${encodeURIComponent(im.image)}&lang=${encodeURIComponent(lang)}`;
+  list.innerHTML = images.map((im) => {
+    const busy = drawing.has(`${book.id}/${lang}/${page}/${im.image}`);
+    return `<div class="pic-row" data-image="${esc(im.image)}">
+      <figure><div class="pic-frame"><img src="${esc(`${base}/original?${q(im)}`)}" alt=""></div><figcaption>${esc(T.picOriginal)} · ${im.width}×${im.height}</figcaption></figure>
+      <span class="pic-arrow">→</span>
+      <figure><div class="pic-frame ${im.redrawn ? "" : "empty"}">${im.redrawn ? `<img src="${esc(`${base}/redrawn?${q(im)}&v=${stamp}`)}" alt="">` : ""}${busy ? `<span class="pic-busy">${esc(T.picDrawing)}</span>` : ""}</div>
+        <figcaption>${esc(im.redrawn ? T.picRedrawn : langName(lang))}</figcaption></figure>
+      <div class="pic-actions">
+        <button class="primary-button" data-redraw ${busy ? "disabled" : ""}>${esc(busy ? T.picDrawing : im.redrawn ? T.picAgain : T.picRedraw(langName(lang)))}</button>
+        <button class="quiet-button" data-upload>${esc(T.picUpload)}</button>
+        ${im.redrawn && !busy ? `<button class="quiet-button" data-restore>${esc(T.picRestore)}</button>` : ""}
+      </div>
+    </div>`;
+  }).join("");
+  for (const row of $$(".pic-row", list)) {
+    const image = row.dataset.image;
+    const key = `${book.id}/${lang}/${page}/${image}`;
+    const redraw = $("[data-redraw]", row);
+    if (redraw) redraw.onclick = async () => {
+      drawing.add(key);
+      renderPictures(book);
+      try {
+        await apiCall("POST", `${base}/redraw`, { lang, page, image, note: $("#pic-note")?.value || null });
+        state.picStamp = Date.now();
+        toast(T.picDone);
+      } catch {} finally {
+        drawing.delete(key);
+        if (state.route.view === "book" && state.route.id === book.id) { renderPictures(book); renderBookStatus(book); }
+      }
+    };
+    const upload = $("[data-upload]", row);
+    if (upload) upload.onclick = () => {
+      const input = $("#pic-file");
+      input.value = "";
+      input.onchange = async () => {
+        const file = input.files[0];
+        if (!file) return;
+        try {
+          await api("PUT", `${base}/own?page=${page}&image=${encodeURIComponent(image)}&lang=${encodeURIComponent(lang)}`, file, { "Content-Type": file.type || "image/png" });
+          state.picStamp = Date.now();
+          toast(T.picUploaded);
+          renderPictures(book);
+          renderBookStatus(book);
+        } catch (e) { toast(e.message, true); }
+      };
+      input.click();
+    };
+    const restore = $("[data-restore]", row);
+    if (restore) restore.onclick = async () => {
+      await apiCall("DELETE", `${base}/own?page=${page}&image=${encodeURIComponent(image)}&lang=${encodeURIComponent(lang)}`);
+      toast(T.picRestored);
+      renderPictures(book);
+    };
+  }
 }
 
 async function renderBookStatus(book) {
@@ -648,6 +808,7 @@ async function renderAccount() {
           <div class="form-actions"><button class="primary-button" type="submit">${esc(T.save)}</button></div>
         </form>
       </section>
+      <section class="card stack" id="acc-usage"></section>
       <section class="card stack" id="acc-two-step"></section>
       <section class="card stack" id="acc-sessions"></section>
       <section class="card stack wide-card" id="acc-keys"></section>
@@ -666,6 +827,12 @@ async function renderAccount() {
     } catch {}
     location.reload();
   };
+  api("GET", "/api/usage").then((u) => {
+    const box = $("#acc-usage");
+    if (box) box.innerHTML = `<div class="section-heading"><h2>${esc(T.usageTitle)}</h2></div>
+      <dl class="kv"><dt>${esc(T.sBooks)}</dt><dd>${num(u.books)}</dd><dt>${esc(T.sPages)}</dt><dd>${num(u.pages)}</dd>
+      <dt>${esc(T.sTokens)}</dt><dd>${num(u.tokens)}</dd><dt>${esc(T.sMonth)}</dt><dd>${esc(T.pagesN(u.month_pages))} · ${num(u.month_tokens)}</dd></dl>`;
+  }).catch(() => {});
   drawTwoStep(me);
   drawSessions();
   drawKeys(me);
@@ -761,13 +928,14 @@ async function drawKeys(me) {
 
 async function renderAdmin(tab = "members") {
   if (!(state.me?.role === "owner" || state.me?.role === "admin")) return go("library");
-  const tabs = [["members", T.tMembers], ["connections", T.tConnections], ["audit", T.tAudit]];
+  const tabs = [["members", T.tMembers], ["connections", T.tConnections], ["settings", T.tTranslation], ["audit", T.tAudit]];
   main.innerHTML = `<div class="page-heading"><h1>${esc(T.adminTitle)}</h1></div>
     <div class="settings-layout"><nav class="settings-tabs">${tabs.map(([k, l]) => `<button data-tab="${k}" class="${k === tab ? "active" : ""}">${esc(l)}</button>`).join("")}</nav><div id="tab"></div></div>`;
   for (const b of $$("[data-tab]")) b.onclick = () => go("admin", { tab: b.dataset.tab });
   const box = $("#tab");
   if (tab === "members") await adminMembers(box);
   if (tab === "connections") await adminConnections(box);
+  if (tab === "settings") await adminSettings(box);
   if (tab === "audit") await adminAudit(box);
 }
 
@@ -819,7 +987,8 @@ async function adminConnections(box) {
         return `<div class="task-row" data-task="${k}"><div class="task-head"><h3>${esc(label)}</h3></div>
           <div class="task-fields"><select data-conn><option value="">${esc(T.none)}</option>${providers.map((p) => `<option value="${p.id}" ${m.provider_id === p.id ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select>
           <input data-model list="dl-${k}" placeholder="${esc(T.model)}" value="${esc(m.model || "")}"><datalist id="dl-${k}"></datalist>
-          <button class="quiet-button" data-fetch>${esc(T.fetchModels)}</button><button class="primary-button" data-save>${esc(T.save)}</button></div></div>`;
+          <button class="quiet-button" data-fetch>${esc(T.fetchModels)}</button><button class="quiet-button" data-test>${esc(T.testShort)}</button><button class="primary-button" data-save>${esc(T.save)}</button></div>
+          <div class="task-result" data-result></div></div>`;
       }).join("")}
     </section>`;
   $("#p-add").onclick = () => providerForm(box, { id: 0, name: "", url: "https://api.openai.com/v1", has_key: false, allow_local: false });
@@ -841,6 +1010,18 @@ async function adminConnections(box) {
     $("[data-save]", row).onclick = async () => {
       await apiCall("PUT", "/api/admin/models", { task: row.dataset.task, provider_id: conn.value ? Number(conn.value) : null, model: input.value });
       toast(T.saved);
+    };
+    $("[data-test]", row).onclick = async () => {
+      const out = $("[data-result]", row);
+      out.innerHTML = `<div class="test-result">${esc(T.testing)}</div>`;
+      try {
+        const r = await api("POST", "/api/admin/models/test", { task: row.dataset.task });
+        out.innerHTML = r.ok
+          ? `<div class="test-result ok"><b>${esc(T.testOk(r.millis))}</b>${r.sample ? ` <span>${esc(r.sample)}</span>` : ""}</div>`
+          : `<div class="test-result bad">${esc(r.error)}</div>`;
+      } catch (e) {
+        out.innerHTML = `<div class="test-result bad">${esc(e.message)}</div>`;
+      }
     };
   }
 }
@@ -868,6 +1049,29 @@ function providerForm(box, p) {
   };
 }
 
+async function adminSettings(box) {
+  const s = await api("GET", "/api/admin/settings");
+  box.innerHTML = `<section class="card stack">
+      <div class="setting-row"><div><h3>${esc(T.batchChars)}</h3><p>${esc(T.batchCharsHint)}</p></div>
+        <div class="row"><input id="s-batch" type="number" min="500" max="50000" step="500" value="${s.batch_chars}"><button class="primary-button" id="s-save">${esc(T.save)}</button></div></div>
+      <div class="setting-row"><div><h3>${esc(T.readable)}</h3><p>${esc(T.readableHint)}</p></div><span class="caption">70% · 6 pt</span></div>
+    </section>
+    <section class="card stack">
+      <div class="setting-row"><div><h3>${esc(T.cache)}</h3><p>${esc(T.cacheText(s.cached_translations, s.cached_chars))}</p></div>
+        <button class="quiet-button danger" id="s-clear">${esc(T.clearCache)}</button></div>
+    </section>`;
+  $("#s-save").onclick = async () => {
+    await apiCall("PUT", "/api/admin/settings", { batch_chars: Number($("#s-batch").value) });
+    toast(T.saved);
+  };
+  $("#s-clear").onclick = async () => {
+    if (!confirm(T.confirmClear)) return;
+    await apiCall("POST", "/api/admin/cache/clear", {});
+    toast(T.cleared);
+    adminSettings(box);
+  };
+}
+
 async function adminAudit(box, before) {
   const { entries } = await api("GET", `/api/admin/audit?limit=100${before ? `&before=${before}` : ""}`);
   const rows = entries.map((e) => `<tr><td>${esc(fmtDate(e.at))}</td><td>${esc(e.user || "—")}</td><td><code>${esc(e.event)}</code>${e.target ? ` <small>${esc(e.target)}</small>` : ""}</td><td>${esc(e.ip)}</td></tr>`).join("");
@@ -879,6 +1083,82 @@ async function adminAudit(box, before) {
   const more = $("#audit-more");
   more.hidden = entries.length < 100;
   more.onclick = () => adminAudit(box, entries[entries.length - 1].id);
+}
+
+/* ============================== chat apps (MCP) ============================== */
+
+async function renderConnect() {
+  const [{ url, https }, { apps }] = await Promise.all([api("GET", "/api/mcp"), api("GET", "/api/oauth/apps")]);
+  const json = JSON.stringify({ mcpServers: { celsus: { type: "http", url, headers: { Authorization: "Bearer YOUR_API_KEY" } } } }, null, 2);
+  const codex = `[mcp_servers.celsus]\nurl = "${url}"\nbearer_token_env_var = "CELSUS_API_KEY"`;
+  const claude = `claude mcp add --transport http celsus ${url} --header "Authorization: Bearer YOUR_API_KEY"`;
+  main.innerHTML = `<div class="page-heading"><h1>${esc(T.mcpWebTitle)}</h1></div>
+    <div class="account-grid">
+      <section class="card stack wide-card">
+        <p class="hint">${esc(T.mcpWebText)}</p>
+        <label>${esc(T.mcpUrl)}<div class="row"><input id="mcp-url" value="${esc(url)}" readonly><button class="quiet-button" data-copy="${esc(url)}">${esc(T.copy)}</button></div></label>
+      </section>
+      <section class="card stack">
+        <div class="section-heading"><h2>${esc(T.mcpOAuthTitle)}</h2></div>
+        <p class="hint">${esc(T.mcpOAuthText)}</p>
+        ${https ? "" : `<p class="hint warn">${esc(T.mcpHttpsNote)}</p>`}
+      </section>
+      <section class="card stack">
+        <div class="section-heading"><h2>${esc(T.mcpKeyTitle)}</h2></div>
+        <p class="hint">${esc(T.mcpKeyText)}</p>
+        <b>Claude Code</b><pre class="snippet">${esc(claude)}</pre>
+        <b>OpenAI Codex · ~/.codex/config.toml</b><pre class="snippet">${esc(codex)}</pre>
+        <b>Cursor, VS Code, ${esc(T.custom)}</b><pre class="snippet">${esc(json)}</pre>
+        <div class="form-actions"><button class="quiet-button" id="mcp-keys">${esc(T.keysTitle)}</button></div>
+      </section>
+      <section class="card stack wide-card">
+        <div class="section-heading"><h2>${esc(T.appsTitle)}</h2></div>
+        ${apps.length ? `<div class="list">${apps.map((a) => `<div class="list-row"><div><b>${esc(a.name)}</b>
+          <small>${esc(T.appsConnected(fmtDate(a.connected_at)))} · ${esc(T.lastSeen)} ${esc(a.last_used ? fmtDate(a.last_used) : T.never)} · ${esc(a.scopes.join(", "))}</small></div>
+          <span class="row-actions"><button class="quiet-button danger" data-app="${esc(a.id)}">${esc(T.disconnect)}</button></span></div>`).join("")}</div>`
+          : `<p class="caption">${esc(T.appsNone)}</p>`}
+      </section>
+    </div>`;
+  for (const b of $$("[data-copy]")) b.onclick = async () => { await navigator.clipboard.writeText(b.dataset.copy); toast(T.copied); };
+  $("#mcp-keys").onclick = () => { go("account"); setTimeout(() => $("#acc-keys")?.scrollIntoView({ block: "start" }), 300); };
+  for (const b of $$("[data-app]")) b.onclick = async () => {
+    const app = apps.find((a) => a.id === b.dataset.app);
+    await apiCall("DELETE", `/api/oauth/apps/${encodeURIComponent(app.id)}`);
+    toast(T.disconnected(app.name));
+    renderConnect();
+  };
+}
+
+/** An app asks for access to the library: show who, what and where it returns, and let the person decide. */
+async function renderOAuth(query) {
+  const params = Object.fromEntries(new URLSearchParams(query));
+  let info;
+  try {
+    info = await api("GET", `/api/oauth/request?${query}`);
+  } catch (e) {
+    main.innerHTML = `<div class="empty-results"><h2>${esc(T.oauthInvalid)}</h2><p>${esc(e.message)}</p></div>`;
+    return;
+  }
+  const scopeText = { read: T.oauthScopeRead, translate: T.oauthScopeTranslate };
+  main.innerHTML = `<section class="card stack consent">
+      <h1>${esc(T.oauthTitle)}</h1>
+      <p>${esc(T.oauthText(info.client, info.redirect_host))}</p>
+      <ul class="scope-list">${info.scopes.map((s) => `<li>${esc(scopeText[s] || s)}</li>`).join("")}</ul>
+      <p class="hint">${esc(T.signedInAs(state.me.name, state.me.email))}</p>
+      <div class="form-actions"><button class="quiet-button" id="oa-deny">${esc(T.oauthDeny)}</button><button class="primary-button" id="oa-allow">${esc(T.oauthAllow)}</button></div>
+    </section>`;
+  const decide = async (allow) => {
+    for (const b of $$(".consent button")) b.disabled = true;
+    try {
+      const r = await api("POST", "/api/oauth/approve", { ...params, allow });
+      location.href = r.redirect;
+    } catch (e) {
+      toast(e.message, true);
+      for (const b of $$(".consent button")) b.disabled = false;
+    }
+  };
+  $("#oa-allow").onclick = () => decide(true);
+  $("#oa-deny").onclick = () => decide(false);
 }
 
 /* ============================== start ============================== */

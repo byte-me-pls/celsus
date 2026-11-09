@@ -355,8 +355,12 @@ impl FromRequestParts<AppState> for Auth {
                 .to_str()
                 .ok()
                 .and_then(|v| v.strip_prefix("Bearer "))
-                .ok_or_else(ApiError::unauthorized)?;
-            return from_key(state, key.trim(), client).await;
+                .ok_or_else(ApiError::unauthorized)?
+                .trim();
+            if key.starts_with(crate::routes::oauth::ACCESS_PREFIX) {
+                return crate::routes::oauth::from_access_token(state, key, client).await;
+            }
+            return from_key(state, key, client).await;
         }
         let token =
             cookie_value(&parts.headers, cookie_name()).ok_or_else(ApiError::unauthorized)?;

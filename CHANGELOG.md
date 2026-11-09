@@ -15,5 +15,8 @@ First release.
   recognition, cover and picture redrawing, interface in 17 languages.
 - MCP server: translate books from Claude, Codex, Gemini CLI, Cursor, VS Code and other MCP clients; assistants that
   can draw redraw covers themselves.
-- Server edition: accounts, two-step sign-in, API keys, audit log, PostgreSQL, web interface, Docker image for amd64
-  and arm64, install script.
+- Server edition: everything the desktop app does (covers and pictures, book recognition, estimates, usage,
+  translation settings, model tests), accounts, two-step sign-in, API keys, audit log, PostgreSQL, web interface,
+  Docker image for amd64 and arm64, install script.
+- MCP on the server (`/mcp`): ChatGPT and Claude connect with OAuth 2.1 (registration, PKCE, rotating refresh
+  tokens), other apps with API keys; connected apps can be disconnected.

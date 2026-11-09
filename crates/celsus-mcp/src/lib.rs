@@ -452,7 +452,9 @@ fn call_text_tool(name: &str, args: &Value) -> Result<Value, String> {
                 .unwrap_or(4000)
                 .clamp(500, 20000) as usize;
             let p = assistant::pending(&conn, &lib, book, &lang, &pages, max)?;
-            Ok(serde_json::to_value(p).map_err(|e| e.to_string())?)
+            let mut v = serde_json::to_value(p).map_err(|e| e.to_string())?;
+            v["book_id"] = json!(book);
+            Ok(v)
         }
         "submit_translations" => {
             let book = arg_i64(args, "book_id")?;

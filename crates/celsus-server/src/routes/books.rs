@@ -76,18 +76,8 @@ fn book_json(r: &tokio_postgres::Row, me: &Auth) -> Value {
 
 pub async fn list(State(state): State<AppState>, auth: Auth) -> ApiResult<Json<Value>> {
     auth.require("read")?;
-    let db = state.pool.get().await?;
-    let rows = db
-        .query(
-            &format!(
-                "SELECT {BOOK_FIELDS} FROM books b JOIN users u ON u.id = b.owner_id
-                      WHERE b.owner_id = $1 OR b.visibility = 'shared' ORDER BY b.added_at DESC"
-            ),
-            &[&auth.user.id],
-        )
-        .await?;
     Ok(Json(
-        json!({ "books": rows.iter().map(|r| book_json(r, &auth)).collect::<Vec<_>>() }),
+        json!({ "books": visible_books(&state, &auth).await? }),
     ))
 }
 
@@ -130,6 +120,19 @@ pub async fn upload(
         .map(|n| clean(&n.replace(['/', '\\'], "_"), 200))
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| "book.pdf".into());
+    let book = add_book(&state, &auth, body, name, visibility).await?;
+    Ok(Json(json!({ "book": book })))
+}
+
+/// Store a new book for `auth`'s user: read the PDF, keep it and its cover, record it. Returns the book as the
+/// API shows it.
+pub async fn add_book(
+    state: &AppState,
+    auth: &Auth,
+    body: Bytes,
+    name: String,
+    visibility: String,
+) -> ApiResult<Value> {
     let bytes = body.to_vec();
     let size = bytes.len() as i64;
     let parse_name = name.clone();
@@ -179,7 +182,19 @@ pub async fn upload(
     let r = db
         .query_one(&format!("SELECT {BOOK_FIELDS} FROM books b JOIN users u ON u.id = b.owner_id WHERE b.id = $1"), &[&id])
         .await?;
-    Ok(Json(json!({ "book": book_json(&r, &auth) })))
+    Ok(book_json(&r, auth))
+}
+
+/// Books the caller may see, newest first, as the API shows them.
+pub async fn visible_books(state: &AppState, auth: &Auth) -> ApiResult<Vec<Value>> {
+    let db = state.pool.get().await?;
+    let rows = db
+        .query(
+            &format!("SELECT {BOOK_FIELDS} FROM books b JOIN users u ON u.id = b.owner_id WHERE b.owner_id = $1 OR b.visibility = 'shared' ORDER BY b.added_at DESC"),
+            &[&auth.user.id],
+        )
+        .await?;
+    Ok(rows.iter().map(|r| book_json(r, auth)).collect())
 }
 
 fn percent_decode(s: &str) -> String {

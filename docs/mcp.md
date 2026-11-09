@@ -36,6 +36,32 @@ OpenAI side use Codex.
 The server works on the same library as the desktop app (`CELSUS_DATA_DIR` if set). It speaks JSON-RPC over
 standard input and output and never opens a network port.
 
+## On a Celsus server
+
+The server edition offers the same tools over the network at `https://your-server/mcp` (Streamable HTTP). In the
+web interface, **Chat apps** shows the exact address, ready-made settings and the apps you have connected.
+
+- **ChatGPT and Claude** (web, desktop and mobile): add a custom connector with the address. The app opens a Celsus
+  page where you sign in and allow it; no key is needed. These apps reach the server over the internet, so it needs
+  an https address (see [server-setup.md](server-setup.md)).
+- **Codex, Claude Code, Cursor, VS Code and others**: use the address with an API key that may read and translate
+  (**Account → API keys**), sent as `Authorization: Bearer <key>`:
+
+```sh
+claude mcp add --transport http celsus https://your-server/mcp --header "Authorization: Bearer celsus_..."
+```
+
+```toml
+# ~/.codex/config.toml
+[mcp_servers.celsus]
+url = "https://your-server/mcp"
+bearer_token_env_var = "CELSUS_API_KEY"
+```
+
+On the server the assistant works as you: it sees the books you can see, and what it translates counts for you.
+`add_book` takes the PDF as base64, `replace_picture` the picture as base64, and `get_output` gives the address the
+translated PDF can be downloaded from with the same credentials.
+
 ## Translating text
 
 Ask in plain words, for example *"Translate pages 10–12 of Domain-Driven Design in my Celsus library into

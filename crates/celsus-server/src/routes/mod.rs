@@ -3,7 +3,10 @@
 pub mod account;
 pub mod admin;
 pub mod books;
+pub mod extras;
 pub mod keys;
+pub mod mcp;
+pub mod oauth;
 pub mod providers;
 pub mod setup;
 
@@ -20,6 +23,8 @@ pub const BODY_LIMIT: usize = 1 << 20;
 
 pub fn router(state: AppState) -> Router {
     let upload_limit = state.config.max_upload;
+    // A book or a picture sent over MCP comes as base64, a third larger than the file.
+    let mcp_limit = upload_limit / 3 * 4 + (1 << 20);
     let shared = tower_http::services::ServeDir::new(&state.config.ui_dir);
     let web = tower_http::services::ServeDir::new(&state.config.web_dir)
         .append_index_html_on_directories(true)
@@ -27,6 +32,32 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(|| async { Json(json!({"ok": true})) }))
         .route("/api/version", get(version))
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(oauth::protected_resource),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/mcp",
+            get(oauth::protected_resource),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(oauth::server_metadata),
+        )
+        .route("/oauth/register", post(oauth::register))
+        .route("/oauth/authorize", get(oauth::authorize))
+        .route("/oauth/token", post(oauth::token))
+        .route("/api/oauth/request", get(oauth::request_info))
+        .route("/api/oauth/approve", post(oauth::approve))
+        .route("/api/oauth/apps", get(oauth::apps))
+        .route("/api/oauth/apps/{id}", delete(oauth::disconnect))
+        .route(
+            "/mcp",
+            post(mcp::post)
+                .get(mcp::other)
+                .delete(mcp::other)
+                .layer(DefaultBodyLimit::max(mcp_limit)),
+        )
         .route("/api/languages", get(languages))
         .route("/api/setup", get(setup::status).post(setup::create))
         .route("/api/auth/login", post(account::login))
@@ -78,6 +109,35 @@ pub fn router(state: AppState) -> Router {
         .route("/api/books/{id}/pages/{lang}", get(books::pages))
         .route("/api/books/{id}/jobs", post(books::create_job))
         .route("/api/jobs", get(books::jobs))
+        .route("/api/books/{id}/pictures", get(extras::pictures))
+        .route(
+            "/api/books/{id}/pictures/original",
+            get(extras::picture_original),
+        )
+        .route(
+            "/api/books/{id}/pictures/redrawn",
+            get(extras::picture_redrawn),
+        )
+        .route(
+            "/api/books/{id}/pictures/redraw",
+            post(extras::picture_redraw),
+        )
+        .route(
+            "/api/books/{id}/pictures/own",
+            put(extras::picture_place)
+                .delete(extras::picture_restore)
+                .layer(DefaultBodyLimit::max(extras::picture_limit())),
+        )
+        .route("/api/books/{id}/recognise", post(extras::recognise))
+        .route("/api/books/{id}/estimate", get(extras::estimate))
+        .route("/api/usage", get(extras::usage))
+        .route("/api/mcp", get(extras::mcp_info))
+        .route(
+            "/api/admin/settings",
+            get(extras::settings).put(extras::set_settings),
+        )
+        .route("/api/admin/cache/clear", post(extras::clear_cache))
+        .route("/api/admin/models/test", post(extras::test_model))
         .route("/api/jobs/{id}/cancel", post(books::cancel_job))
         .route("/api/jobs/{id}/retry", post(books::retry_job))
         .route(

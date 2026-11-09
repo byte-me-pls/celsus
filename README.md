@@ -31,8 +31,9 @@ It is named after the Library of Celsus in Ephesus.
   translation.
 - **Interface in 17 languages:** English, Türkçe, Deutsch, Français, Español, Italiano, Português, Nederlands,
   Polski, Русский, Українська, العربية, हिन्दी, Bahasa Indonesia, 简体中文, 日本語, 한국어.
-- **Server edition.** A shared library on a home server or Raspberry Pi, with accounts, two-step sign-in, API keys
-  and an audit log, in a Docker image.
+- **Server edition.** A shared library on a home server or Raspberry Pi, with everything the desktop app has, plus
+  accounts, two-step sign-in, API keys, an audit log, and MCP over the network for ChatGPT, Claude and coding apps,
+  in a Docker image.
 
 ## Get started
 
@@ -61,6 +62,9 @@ The desktop app adds Celsus to the MCP settings of the chat and coding apps it f
 > Translate pages 10–12 of Domain-Driven Design in my Celsus library into Turkish.
 >
 > Translate the cover of that book into Turkish. Draw it yourself.
+
+On a server, the same tools are at `https://your-server/mcp`: ChatGPT and Claude connect with a sign-in (OAuth),
+Codex, Claude Code and Cursor with an API key; the web interface's **Chat apps** page shows how.
 
 Tools, setup by hand and how covers work: [docs/mcp.md](docs/mcp.md).
 

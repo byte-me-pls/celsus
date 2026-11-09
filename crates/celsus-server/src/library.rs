@@ -51,6 +51,84 @@ pub fn output_file(config: &Config, id: &str, lang: &str) -> PathBuf {
     book_dir(config, id).join(format!("{lang}.pdf"))
 }
 
+/// Pictures redrawn for a language live in `redrawn-<lang>/` next to the book, named by page and object.
+pub fn redrawn_dir(config: &Config, id: &str, lang: &str) -> PathBuf {
+    assert!(valid_lang(lang), "languages are checked before use");
+    book_dir(config, id).join(format!("redrawn-{lang}"))
+}
+
+fn redrawn_name(page: usize, image: celsus_pdf::ObjRef, ext: &str) -> String {
+    format!("p{page}-{}-{}.{ext}", image.num, image.generation)
+}
+
+/// Where a redrawn picture goes; the extension follows the file's type.
+pub fn redrawn_file(
+    config: &Config,
+    id: &str,
+    lang: &str,
+    page: usize,
+    image: celsus_pdf::ObjRef,
+    bytes: &[u8],
+) -> PathBuf {
+    let ext = if bytes.starts_with(b"\x89PNG") {
+        "png"
+    } else {
+        "jpg"
+    };
+    redrawn_dir(config, id, lang).join(redrawn_name(page, image, ext))
+}
+
+/// The redrawn file of a picture, if there is one.
+pub fn find_redrawn(
+    config: &Config,
+    id: &str,
+    lang: &str,
+    page: usize,
+    image: celsus_pdf::ObjRef,
+) -> Option<PathBuf> {
+    ["jpg", "png"]
+        .iter()
+        .map(|ext| redrawn_dir(config, id, lang).join(redrawn_name(page, image, ext)))
+        .find(|p| p.exists())
+}
+
+/// Remove a picture's redrawn files.
+pub fn remove_redrawn(
+    config: &Config,
+    id: &str,
+    lang: &str,
+    page: usize,
+    image: celsus_pdf::ObjRef,
+) {
+    for ext in ["jpg", "png"] {
+        let _ = std::fs::remove_file(
+            redrawn_dir(config, id, lang).join(redrawn_name(page, image, ext)),
+        );
+    }
+}
+
+/// Every redrawn picture of a book in a language, to place over the originals.
+pub fn redrawn_images(config: &Config, id: &str, lang: &str) -> Vec<(celsus_pdf::ObjRef, Vec<u8>)> {
+    let Ok(entries) = std::fs::read_dir(redrawn_dir(config, id, lang)) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            let stem = name.strip_prefix('p')?.split('.').next()?;
+            let mut parts = stem.split('-');
+            let (_page, num, generation) = (
+                parts.next()?,
+                parts.next()?.parse().ok()?,
+                parts.next()?.parse().ok()?,
+            );
+            let bytes = std::fs::read(e.path()).ok()?;
+            Some((celsus_pdf::ObjRef { num, generation }, bytes))
+        })
+        .collect()
+}
+
 /// What an uploaded PDF says about itself.
 pub struct Parsed {
     pub title: String,

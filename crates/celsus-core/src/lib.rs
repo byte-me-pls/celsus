@@ -2,6 +2,7 @@
 //!
 //! Both the server and the desktop app link this crate directly.
 
+pub mod assist;
 pub mod base64;
 pub mod extract;
 pub mod fit;

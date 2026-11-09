@@ -82,10 +82,7 @@ pub struct Redrawn {
 }
 
 pub fn parse_image_id(s: &str) -> Option<ObjRef> {
-    let mut parts = s.split_whitespace();
-    let num = parts.next()?.parse().ok()?;
-    let generation = parts.next().unwrap_or("0").parse().ok()?;
-    Some(ObjRef { num, generation })
+    celsus_core::assist::parse_image_id(s)
 }
 
 pub fn redrawn(library: &Path, id: i64, lang: &str) -> Vec<Redrawn> {
@@ -125,22 +122,7 @@ pub fn redrawn_images(library: &Path, id: i64, lang: &str) -> Vec<(ObjRef, Vec<u
 
 /// Text of the first pages of a book, for recognising it.
 pub fn opening_text(doc: &Document, max_chars: usize) -> String {
-    let Ok(pages) = doc.pages() else {
-        return String::new();
-    };
-    let mut text = String::new();
-    for (i, page) in pages.iter().enumerate().take(14) {
-        if let Ok(e) = celsus_core::extract::extract_page(doc, page, i as u32 + 1) {
-            for b in &e.layout.blocks {
-                text.push_str(&b.source());
-                text.push('\n');
-            }
-        }
-        if text.chars().count() >= max_chars {
-            break;
-        }
-    }
-    text.chars().take(max_chars).collect()
+    celsus_core::assist::opening_text(doc, max_chars)
 }
 
 /// PDF text strings are PDFDocEncoding or UTF-16BE with a byte order mark.

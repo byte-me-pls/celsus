@@ -1,6 +1,7 @@
 //! The Celsus server: a shared library for several people, reachable from the internet behind an HTTPS proxy.
 //! `docs/server-security.md` describes how it is protected.
 
+pub mod assist;
 pub mod audit;
 pub mod auth;
 pub mod crypto;
@@ -117,6 +118,7 @@ pub struct State {
     pub secrets: crypto::SecretBox,
     pub config: Config,
     pub jobs: worker::Jobs,
+    pub outputs: worker::OutputLocks,
 }
 
 pub type AppState = Arc<State>;
@@ -171,6 +173,7 @@ pub async fn start(config: Config) -> Result<AppState, String> {
         secrets: crypto::SecretBox::new(&key),
         config,
         jobs: worker::Jobs::default(),
+        outputs: worker::OutputLocks::default(),
     });
     worker::start(state.clone()).await?;
     if let Some(code) = routes::setup::prepare(&state).await? {

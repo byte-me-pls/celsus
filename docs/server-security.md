@@ -69,6 +69,21 @@ HTTPS reverse proxy. This document describes what it protects, against whom, and
 - Each key has scopes (`read`, `translate`, `admin`), an optional expiry and a last-used time. A key can never do more
   than its owner can. Keys are shown once, can be revoked at any time and are revoked with the account.
 
+## Chat apps (MCP and OAuth)
+
+- `POST /mcp` takes only bearer credentials: an API key or an OAuth access token. A browser's session cookie is not
+  accepted there, and requests from other sites' pages are refused like any other cross-site write.
+- Apps such as ChatGPT and Claude register themselves (`/oauth/register`) and send the person to the web interface,
+  which shows the app's name, where it will return and what it may do. Nothing is granted until the person allows it
+  while signed in; an API key cannot approve on anyone's behalf.
+- Redirect addresses must be https, or http only to this computer, and must match the registration exactly. PKCE
+  with S256 is required. A code works once and for ten minutes; a failed attempt spends it.
+- Access tokens last an hour and refresh tokens 60 days; refresh tokens rotate, so a stolen one stops working at the
+  next use. Codes and tokens are stored only as SHA-256 hashes. Tokens carry the scopes granted (`read`,
+  `translate`), never `admin`, and stop working when the person disconnects the app or the account is disabled.
+- Each person sees their connected apps under **Chat apps** and can disconnect them; registrations, approvals and
+  disconnections are in the audit log.
+
 ## Audit log
 
 Sign-ins (successful and failed), sign-outs, two-step changes, password changes, invitations, role and account
@@ -127,5 +142,4 @@ The log is append-only for the application and visible to admins. It never conta
 
 ## Still to come
 
-- Remote MCP for Claude and ChatGPT connectors, authorised per user with OAuth 2.1 and PKCE.
 - Per-user storage quotas.

@@ -172,6 +172,38 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE users ADD COLUMN last_seen BIGINT;
     UPDATE users u SET last_seen = (SELECT MAX(last_seen) FROM sessions s WHERE s.user_id = u.id);
     "#,
+    // OAuth for chat apps that connect over MCP (ChatGPT, Claude): registered apps, one-time codes, and the
+    // tokens a person granted. Only hashes of codes and tokens are kept.
+    r#"
+    CREATE TABLE oauth_clients (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        redirect_uris TEXT[] NOT NULL,
+        created_at BIGINT NOT NULL
+    );
+    CREATE TABLE oauth_codes (
+        code_hash BYTEA PRIMARY KEY,
+        client_id TEXT NOT NULL REFERENCES oauth_clients (id) ON DELETE CASCADE,
+        user_id BIGINT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+        redirect_uri TEXT NOT NULL,
+        challenge TEXT NOT NULL,
+        scopes TEXT[] NOT NULL,
+        expires_at BIGINT NOT NULL
+    );
+    CREATE TABLE oauth_tokens (
+        id BIGSERIAL PRIMARY KEY,
+        client_id TEXT NOT NULL REFERENCES oauth_clients (id) ON DELETE CASCADE,
+        user_id BIGINT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+        access_hash BYTEA NOT NULL UNIQUE,
+        refresh_hash BYTEA NOT NULL UNIQUE,
+        scopes TEXT[] NOT NULL,
+        access_expires BIGINT NOT NULL,
+        refresh_expires BIGINT NOT NULL,
+        created_at BIGINT NOT NULL,
+        last_used BIGINT
+    );
+    CREATE INDEX oauth_tokens_user ON oauth_tokens (user_id);
+    "#,
 ];
 
 pub fn pool(url: &str) -> Result<Pool, String> {

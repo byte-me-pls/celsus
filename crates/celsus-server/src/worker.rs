@@ -6,18 +6,35 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use celsus_core::fonts::FontSet;
-use celsus_core::pipeline::{Cache, Options, Progress, translate_document};
+use celsus_core::pipeline::{Options, Progress, translate_document};
 use celsus_core::provider::OpenAiCompatible;
 use tokio::runtime::Handle;
 use tokio::sync::Notify;
 
-use crate::crypto::sha256;
+use crate::assist::PgCache;
 use crate::{AppState, library, now};
 
 #[derive(Default)]
 pub struct Jobs {
     wake: Notify,
     running: Mutex<HashMap<String, Arc<AtomicBool>>>,
+}
+
+/// One writer at a time for each translated PDF (the queue, an assistant in a chat, a redrawn picture).
+#[derive(Default)]
+pub struct OutputLocks(Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>);
+
+impl OutputLocks {
+    pub async fn lock(&self, book: &str, lang: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = self
+            .0
+            .lock()
+            .unwrap()
+            .entry(format!("{book}/{lang}"))
+            .or_default()
+            .clone();
+        lock.lock_owned().await
+    }
 }
 
 impl Jobs {
@@ -118,7 +135,11 @@ pub async fn model_for(state: &AppState, task: &str) -> Result<OpenAiCompatible,
         .as_deref()
         .and_then(|v| v.split_once(':'))
         .and_then(|(id, m)| Some((id.parse::<i64>().ok()?, m.to_owned())))
-        .ok_or("No model is chosen for translation. An admin can choose one under Models.")?;
+        .ok_or(match task {
+            "image" => "No picture model is chosen. An admin can choose one under Connections and models.",
+            "metadata" => "No model is chosen for book details. An admin can choose one under Connections and models.",
+            _ => "No model is chosen for translation. An admin can choose one under Connections and models.",
+        })?;
     let row = db
         .query_opt(
             "SELECT url, key_sealed, allow_local FROM providers WHERE id = $1",
@@ -142,38 +163,12 @@ pub async fn model_for(state: &AppState, task: &str) -> Result<OpenAiCompatible,
     Ok(OpenAiCompatible::new(url, key, model))
 }
 
-/// Translations kept in PostgreSQL, keyed by a hash of language and source text.
-struct PgCache {
-    state: AppState,
-    handle: Handle,
-}
-
-impl Cache for PgCache {
-    fn get(&self, key: &str) -> Option<String> {
-        self.handle.block_on(async {
-            let db = self.state.pool.get().await.ok()?;
-            db.query_opt(
-                "SELECT text FROM translation_cache WHERE key_hash = $1",
-                &[&sha256(key.as_bytes())],
-            )
-            .await
-            .ok()?
-            .map(|r| r.get(0))
-        })
-    }
-
-    fn put(&mut self, key: &str, translation: &str) {
-        self.handle.block_on(async {
-            if let Ok(db) = self.state.pool.get().await {
-                let _ = db
-                    .execute(
-                        "INSERT INTO translation_cache (key_hash, text) VALUES ($1, $2) ON CONFLICT (key_hash) DO UPDATE SET text = $2",
-                        &[&sha256(key.as_bytes()), &translation],
-                    )
-                    .await;
-            }
-        });
-    }
+async fn db_setting(state: &AppState, key: &str) -> Option<String> {
+    let db = state.pool.get().await.ok()?;
+    db.query_opt("SELECT value FROM settings WHERE key = $1", &[&key])
+        .await
+        .ok()?
+        .map(|r| r.get(0))
 }
 
 /// Run one job. `Ok(true)` means it was cancelled part way; what was done is kept.
@@ -218,6 +213,12 @@ async fn run_job(state: &AppState, id: &str, cancel: Arc<AtomicBool>) -> Result<
             .map_err(|e: celsus_core::language::InvalidLanguage| e.to_string())?,
     );
     options.from = book.get::<_, String>(2).parse().ok();
+    if let Some(n) = db_setting(state, "batch_chars")
+        .await
+        .and_then(|v| v.parse().ok())
+    {
+        options.batch_chars = n;
+    }
     options.book.title = book.get(0);
     options.book.subject = book.get(1);
     let all: BTreeSet<usize> = wanted
@@ -232,6 +233,10 @@ async fn run_job(state: &AppState, id: &str, cancel: Arc<AtomicBool>) -> Result<
     let output = library::output_file(&state.config, &book_id, &lang);
     let fonts_dir = state.config.fonts_dir.clone();
     let target = options.to.clone();
+    // Pictures redrawn for this language stay in every new version of the book.
+    options.images = library::redrawn_images(&state.config, &book_id, &lang);
+    let lock_book = book_id.clone();
+    let lock_lang = lang.clone();
     let st = state.clone();
     let handle = Handle::current();
     let job_id = id.to_owned();
@@ -264,6 +269,7 @@ async fn run_job(state: &AppState, id: &str, cancel: Arc<AtomicBool>) -> Result<
     .await
     .map_err(|e| e.to_string())??;
     // Write next to the old file and swap, so readers never see half a PDF.
+    let _guard = state.outputs.lock(&lock_book, &lock_lang).await;
     let tmp = output.with_extension("pdf.part");
     tokio::fs::write(&tmp, &bytes)
         .await

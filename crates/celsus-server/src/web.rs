@@ -42,6 +42,14 @@ impl ApiError {
             "You are not allowed to do this.",
         )
     }
+    /// A model could not be used: none is chosen for the task (`no_model`), or something else is wrong with it.
+    pub fn model(message: String) -> Self {
+        if message.starts_with("No ") && message.contains("chosen") {
+            Self::new(StatusCode::BAD_REQUEST, "no_model", message)
+        } else {
+            Self::bad(message)
+        }
+    }
     pub fn not_found() -> Self {
         Self::new(StatusCode::NOT_FOUND, "not_found", "Not found.")
     }
