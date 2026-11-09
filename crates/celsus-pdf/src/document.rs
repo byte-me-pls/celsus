@@ -1,6 +1,6 @@
 //! Loading a PDF file: cross-reference data, indirect objects and the page tree.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -38,6 +38,13 @@ impl Page {
     }
 }
 
+/// Object numbers at or above this are ignored. Tables are sized by the highest number, and a real book has far
+/// fewer objects.
+pub const MAX_OBJECTS: u32 = 1 << 22;
+
+/// How deep loading one object may lead into loading others (a stream's `/Length`, an object stream).
+const MAX_NESTING: usize = 24;
+
 /// A decoded object stream and the offset of each object inside it.
 type ObjStm = (Vec<u8>, Vec<(u32, usize)>);
 
@@ -50,6 +57,13 @@ pub struct Document {
     objstm: RefCell<HashMap<u32, Rc<ObjStm>>>,
     /// The file needed reconstruction because its cross-reference data was broken.
     pub repaired: bool,
+    /// How many objects are being loaded inside one another right now.
+    nesting: Cell<usize>,
+    /// Bytes of the file parsed into objects, and bytes of decoded object streams kept. Objects in a sound file
+    /// do not overlap, so the first stays below the file's size; a file whose entries all point into one large
+    /// stream would otherwise be copied once per entry.
+    parsed: Cell<usize>,
+    unpacked: Cell<usize>,
 }
 
 impl Document {
@@ -61,10 +75,10 @@ impl Document {
             cache: RefCell::new(HashMap::new()),
             objstm: RefCell::new(HashMap::new()),
             repaired: false,
+            nesting: Cell::new(0),
+            parsed: Cell::new(0),
+            unpacked: Cell::new(0),
         };
-        if get(&doc.trailer, "Encrypt").is_some() {
-            return Err(Error::Encrypted);
-        }
         let read = doc.read_xref_chain();
         if read.is_err()
             || doc.catalog().is_err()
@@ -102,12 +116,15 @@ impl Document {
                 break;
             }
             let trailer = self.read_xref_section(offset)?;
-            if let Some(stm) = get(&trailer, "XRefStm").and_then(Object::as_i64) {
-                let _ = self.read_xref_section(stm as usize);
+            if let Some(stm) = get(&trailer, "XRefStm")
+                .and_then(Object::as_i64)
+                .and_then(|s| usize::try_from(s).ok())
+            {
+                let _ = self.read_xref_section(stm);
             }
             next = get(&trailer, "Prev")
                 .and_then(Object::as_i64)
-                .map(|p| p as usize);
+                .and_then(|p| usize::try_from(p).ok());
             if first {
                 self.trailer = trailer;
                 first = false;
@@ -124,6 +141,9 @@ impl Document {
 
     /// Read one xref table or xref stream; entries already known (from newer sections) win.
     fn read_xref_section(&mut self, offset: usize) -> Result<Dict> {
+        if offset >= self.data.len() {
+            return Err(Error::Corrupt("xref offset past the end".into()));
+        }
         let mut lexer = Lexer::at(&self.data, offset);
         lexer.skip_whitespace();
         if self.data[lexer.pos..].starts_with(b"xref") {
@@ -147,7 +167,13 @@ impl Document {
                             else {
                                 return Err(Error::Corrupt("xref entry".into()));
                             };
-                            let num = (start + i) as u32;
+                            let Some(num) = start
+                                .checked_add(i)
+                                .and_then(|n| u32::try_from(n).ok())
+                                .filter(|n| *n < MAX_OBJECTS)
+                            else {
+                                continue;
+                            };
                             if kind == b"n" && off > 0 {
                                 self.xref
                                     .entry(num)
@@ -191,6 +217,9 @@ impl Document {
             .and_then(numbers)
             .unwrap_or_else(|| vec![0.0, size as f64]);
         let row = w[0] + w[1] + w[2];
+        if row == 0 {
+            return Err(Error::Corrupt("xref /W".into()));
+        }
         let field = |bytes: &[u8]| bytes.iter().fold(0u64, |acc, &b| acc << 8 | u64::from(b));
         let mut pos = 0;
         for pair in index.chunks(2) {
@@ -203,7 +232,9 @@ impl Document {
                 let kind = if w[0] == 0 { 1 } else { field(&entry[..w[0]]) };
                 let a = field(&entry[w[0]..w[0] + w[1]]);
                 let b = field(&entry[w[0] + w[1]..]);
-                let num = start + i;
+                let Some(num) = start.checked_add(i).filter(|n| *n < MAX_OBJECTS) else {
+                    continue;
+                };
                 let value = match kind {
                     1 => (Entry::Offset(a as usize), b as u16),
                     2 => (
@@ -225,8 +256,7 @@ impl Document {
     fn reconstruct(&mut self) -> Result<()> {
         self.repaired = true;
         self.xref.clear();
-        self.cache.borrow_mut().clear();
-        self.objstm.borrow_mut().clear();
+        self.forget();
         let data = &self.data;
         let mut found: Vec<(u32, u16, usize)> = Vec::new();
         let mut i = 0;
@@ -238,7 +268,9 @@ impl Document {
             }) {
                 continue;
             }
-            if let Some((num, generation, start)) = header_before(data, at) {
+            if let Some((num, generation, start)) = header_before(data, at)
+                && num < MAX_OBJECTS
+            {
                 found.push((num, generation, start));
             }
         }
@@ -270,6 +302,9 @@ impl Document {
                 Some(b"ObjStm") => {
                     if let Ok(stm) = self.object_stream(num) {
                         for (index, (inner, _)) in stm.1.iter().enumerate() {
+                            if *inner >= MAX_OBJECTS {
+                                continue;
+                            }
                             self.xref
                                 .entry(*inner)
                                 .or_insert((Entry::Compressed { stream: num, index }, 0));
@@ -284,6 +319,7 @@ impl Document {
             }
         }
         self.cache.borrow_mut().clear();
+        self.parsed.set(0);
         if get(&trailer, "Root").is_none() {
             return Err(Error::Corrupt("no document catalog".into()));
         }
@@ -291,8 +327,37 @@ impl Document {
         Ok(())
     }
 
+    /// Drop everything loaded so far.
+    fn forget(&self) {
+        self.cache.borrow_mut().clear();
+        self.objstm.borrow_mut().clear();
+        self.parsed.set(0);
+        self.unpacked.set(0);
+    }
+
+    /// Count `bytes` of the file as parsed; refuse once far more has been parsed than the file holds.
+    fn spend(&self, bytes: usize) -> Result<()> {
+        let total = self.parsed.get().saturating_add(bytes);
+        let allowed = self
+            .data
+            .len()
+            .saturating_add(self.unpacked.get())
+            .saturating_mul(2)
+            .saturating_add(1 << 20);
+        // Kept even when refused, so that every later object fails at once instead of being scanned first.
+        self.parsed.set(total);
+        if total > allowed {
+            return Err(Error::Corrupt("objects overlap one another".into()));
+        }
+        Ok(())
+    }
+
     /// Parse `num generation obj ... endobj` at `offset`.
     fn parse_indirect_at(&self, offset: usize) -> Result<(ObjRef, Object)> {
+        if offset >= self.data.len() {
+            return Err(Error::Corrupt(format!("no object at {offset}")));
+        }
+        self.spend(0)?;
         let mut lexer = Lexer::at(&self.data, offset);
         let (Some(Token::Int(num)), Some(Token::Int(generation)), Some(Token::Keyword(k))) = (
             lexer.next_token()?,
@@ -310,11 +375,16 @@ impl Document {
         };
         let obj = lexer.parse_object(true)?;
         let Object::Dict(dict) = obj else {
+            self.spend(lexer.pos.saturating_sub(offset))?;
             return Ok((id, obj));
         };
+        let dict_end = lexer.pos;
         match lexer.next_token()? {
             Some(Token::Keyword(k)) if k == b"stream" => {}
-            _ => return Ok((id, Object::Dict(dict))),
+            _ => {
+                self.spend(dict_end.saturating_sub(offset))?;
+                return Ok((id, Object::Dict(dict)));
+            }
         }
         // The stream data starts after the end-of-line that follows `stream`.
         let mut start = lexer.pos;
@@ -325,12 +395,12 @@ impl Document {
             start += 1;
         }
         let declared = match get(&dict, "Length") {
-            Some(Object::Int(n)) => Some(*n as usize),
+            Some(Object::Int(n)) => usize::try_from(*n).ok(),
             Some(Object::Ref(r)) if r.num != id.num => self
                 .get(*r)
                 .ok()
                 .and_then(|o| o.as_i64())
-                .map(|n| n as usize),
+                .and_then(|n| usize::try_from(n).ok()),
             _ => None,
         };
         let valid = |len: usize| {
@@ -358,6 +428,7 @@ impl Document {
                 end
             }
         };
+        self.spend(end.saturating_sub(offset))?;
         Ok((
             id,
             Object::Stream(Stream {
@@ -376,6 +447,11 @@ impl Document {
             .as_stream()
             .ok_or(Error::Corrupt("object stream".into()))?;
         let data = filters::decode(&stream.dict, &stream.data)?;
+        let unpacked = self.unpacked.get().saturating_add(data.len());
+        if unpacked > filters::MAX_DECODED {
+            return Err(Error::Corrupt("object streams are too large".into()));
+        }
+        self.unpacked.set(unpacked);
         let n = get(&stream.dict, "N")
             .and_then(Object::as_i64)
             .unwrap_or(0)
@@ -385,11 +461,14 @@ impl Document {
             .unwrap_or(0)
             .max(0) as usize;
         let mut lexer = Lexer::new(&data);
-        let mut offsets = Vec::with_capacity(n);
+        let mut offsets = Vec::new();
         for _ in 0..n {
             match (lexer.next_token()?, lexer.next_token()?) {
                 (Some(Token::Int(obj)), Some(Token::Int(off))) => {
-                    offsets.push((obj as u32, first + off as usize))
+                    let (Ok(obj), Ok(off)) = (u32::try_from(obj), usize::try_from(off)) else {
+                        continue;
+                    };
+                    offsets.push((obj, first.saturating_add(off)))
                 }
                 _ => break,
             }
@@ -404,7 +483,23 @@ impl Document {
         if let Some(o) = self.cache.borrow().get(&id.num) {
             return Ok(o.clone());
         }
-        let obj = match self.xref.get(&id.num) {
+        // Loading an object can need another one (a stream's /Length, the object stream it is packed in), and
+        // a file can make that a loop.
+        if self.nesting.get() >= MAX_NESTING {
+            return Err(Error::Corrupt(
+                "objects refer to one another in a loop".into(),
+            ));
+        }
+        self.nesting.set(self.nesting.get() + 1);
+        let obj = self.load_object(id);
+        self.nesting.set(self.nesting.get() - 1);
+        let obj = Rc::new(obj?);
+        self.cache.borrow_mut().insert(id.num, obj.clone());
+        Ok(obj)
+    }
+
+    fn load_object(&self, id: ObjRef) -> Result<Object> {
+        Ok(match self.xref.get(&id.num) {
             None | Some((Entry::Offset(0), _)) => Object::Null,
             Some((Entry::Offset(off), _)) => self.parse_indirect_at(*off)?.1,
             Some((Entry::Compressed { stream, index }, _)) => {
@@ -418,13 +513,14 @@ impl Document {
                     .filter(|(n, _)| *n == id.num)
                     .or_else(|| stm.1.iter().find(|(n, _)| *n == id.num))
                     .map(|(_, o)| *o)
+                    .filter(|o| *o < stm.0.len())
                     .ok_or(Error::Corrupt("object missing from object stream".into()))?;
-                Lexer::at(&stm.0, offset).parse_object(true)?
+                let mut lexer = Lexer::at(&stm.0, offset);
+                let obj = lexer.parse_object(true)?;
+                self.spend(lexer.pos.saturating_sub(offset))?;
+                obj
             }
-        };
-        let obj = Rc::new(obj);
-        self.cache.borrow_mut().insert(id.num, obj.clone());
-        Ok(obj)
+        })
     }
 
     /// Every object the cross-reference data lists as in use.
@@ -581,7 +677,12 @@ impl Document {
             let obj = self.resolve(&part)?;
             if let Some(stream) = obj.as_stream() {
                 match self.stream_data(stream) {
-                    Ok(data) => out.extend_from_slice(&data),
+                    Ok(data) => {
+                        if out.len() + data.len() > filters::MAX_DECODED {
+                            return Err(Error::Corrupt("a page's content is too large".into()));
+                        }
+                        out.extend_from_slice(&data)
+                    }
                     Err(Error::Corrupt(_)) => continue,
                     Err(e) => return Err(e),
                 }

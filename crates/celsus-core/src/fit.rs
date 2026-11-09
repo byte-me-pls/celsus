@@ -133,6 +133,9 @@ fn is_mark(c: char) -> bool {
     )
 }
 
+/// The largest font size, in points, that is fitted.
+const MAX_SIZE: f32 = 2000.0;
+
 /// The space a translation may use.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Area {
@@ -164,6 +167,11 @@ pub fn fit(
     if text.trim().is_empty() || width <= 0.0 || height <= 0.0 || size <= 0.0 {
         return None;
     }
+    // The size comes from the file. Past this no step is small enough to change it (the loops below would
+    // never end), and nothing that large is body text anyway.
+    if size.is_nan() || size > MAX_SIZE || opts.step.is_nan() || opts.step <= 0.0 {
+        return None;
+    }
     let ratio = leading
         .map(|l| l / size)
         .filter(|r| (0.9..=2.5).contains(r))
@@ -184,10 +192,11 @@ pub fn fit(
                     leading: s * ratio,
                 });
             }
-            if s <= floor + f32::EPSILON {
+            let smaller = (s - opts.step).max(floor);
+            if s <= floor + f32::EPSILON || smaller >= s {
                 break;
             }
-            s = (s - opts.step).max(floor);
+            s = smaller;
         }
     }
     let mut s = size;
@@ -209,16 +218,30 @@ pub fn fit(
                 });
             }
         }
-        if s <= floor + f32::EPSILON {
+        let smaller = (s - opts.step).max(floor);
+        if s <= floor + f32::EPSILON || smaller >= s {
             return None;
         }
-        s = (s - opts.step).max(floor);
+        s = smaller;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_absurd_size_is_refused_at_once() {
+        let area = Area {
+            width: 200.0,
+            height: 50.0,
+            indent: Indent::default(),
+            line_box: None,
+        };
+        for size in [1.0e30, f32::INFINITY, f32::NAN, 5.0e7] {
+            assert!(fit("some text", area, size, None, &Mono, FitOptions::default()).is_none());
+        }
+    }
 
     /// Every character is half the font size wide.
     struct Mono;

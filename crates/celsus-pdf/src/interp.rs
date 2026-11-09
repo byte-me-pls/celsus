@@ -163,7 +163,15 @@ struct Interpreter<'d> {
     out: PageContent,
     fonts: HashMap<FontKey, Rc<Font>>,
     depth: usize,
+    /// Operators still allowed on this page. Forms can draw forms, so a few lines can ask for billions.
+    budget: usize,
 }
+
+/// The most operators one page may run, forms included. Dense vector drawings stay well below this.
+const MAX_OPERATORS: usize = if cfg!(test) { 200_000 } else { 20_000_000 };
+
+/// How many names a colour space may pass through before it is given up on.
+const MAX_ALIASES: usize = 8;
 
 #[derive(Hash, PartialEq, Eq)]
 enum FontKey {
@@ -183,6 +191,7 @@ pub fn interpret_data(doc: &Document, page: &Page, data: Vec<u8>) -> PageContent
         out: PageContent::default(),
         fonts: HashMap::new(),
         depth: 0,
+        budget: MAX_OPERATORS,
     };
     let ops = content::parse(&data);
     let b = page.crop_box;
@@ -223,6 +232,10 @@ fn to_rgb(values: &[f64]) -> [u8; 3] {
 
 impl Interpreter<'_> {
     fn colorspace_components(&self, resources: &Dict, name: &[u8]) -> usize {
+        self.colorspace_named(resources, name, 0)
+    }
+
+    fn colorspace_named(&self, resources: &Dict, name: &[u8], aliases: usize) -> usize {
         match name {
             b"DeviceGray" | b"G" | b"CalGray" => 1,
             b"Indexed" | b"I" | b"Pattern" => OTHER,
@@ -260,7 +273,10 @@ impl Interpreter<'_> {
                         }
                         _ => OTHER,
                     },
-                    Some(Object::Name(n)) => self.colorspace_components(resources, n),
+                    // A name can stand for another name, and a file can make that a circle.
+                    Some(Object::Name(n)) if aliases < MAX_ALIASES => {
+                        self.colorspace_named(resources, n, aliases + 1)
+                    }
                     _ => 3,
                 }
             }
@@ -293,6 +309,10 @@ impl Interpreter<'_> {
         let mut pending_clip = false;
 
         for (index, op) in ops.iter().enumerate() {
+            if self.budget == 0 {
+                return;
+            }
+            self.budget -= 1;
             let o = &op.operands;
             match op.operator.as_slice() {
                 b"q" => {
@@ -545,7 +565,7 @@ impl Interpreter<'_> {
             }
             Some(b"Form") => {
                 let Some(id) = entry.as_ref() else { return };
-                if self.depth >= 12 {
+                if self.depth >= 12 || self.budget == 0 {
                     return;
                 }
                 let matrix = get(&stream.dict, "Matrix")

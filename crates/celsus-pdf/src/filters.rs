@@ -11,6 +11,9 @@ pub fn decode(dict: &Dict, data: &[u8]) -> Result<Vec<u8>> {
         Some(Object::Array(a)) => a.iter().filter_map(Object::as_name).collect(),
         Some(_) => return Err(Error::Unsupported("filter".into())),
     };
+    if filters.len() > MAX_FILTERS {
+        return Err(Error::Corrupt("a stream has too many filters".into()));
+    }
     let params: Vec<Option<&Dict>> = match get(dict, "DecodeParms").or_else(|| get(dict, "DP")) {
         Some(Object::Array(a)) => a.iter().map(Object::as_dict).collect(),
         Some(o) => vec![o.as_dict()],
@@ -26,11 +29,11 @@ pub fn decode(dict: &Dict, data: &[u8]) -> Result<Vec<u8>> {
                     .and_then(|p| get(p, "EarlyChange"))
                     .and_then(Object::as_i64)
                     .unwrap_or(1);
-                predict(lzw(&out, early != 0), p)?
+                predict(lzw(&out, early != 0)?, p)?
             }
             b"ASCIIHexDecode" | b"AHx" => ascii_hex(&out),
             b"ASCII85Decode" | b"A85" => ascii85(&out)?,
-            b"RunLengthDecode" | b"RL" => run_length(&out),
+            b"RunLengthDecode" | b"RL" => run_length(&out)?,
             other => {
                 return Err(Error::Unsupported(
                     String::from_utf8_lossy(other).into_owned(),
@@ -44,6 +47,9 @@ pub fn decode(dict: &Dict, data: &[u8]) -> Result<Vec<u8>> {
 /// The most one stream may decode to. A few kilobytes of Flate can expand to gigabytes; a real book's streams
 /// stay far below this.
 pub const MAX_DECODED: usize = 256 << 20;
+
+/// The most filters one stream may chain. Real files use one or two.
+const MAX_FILTERS: usize = 8;
 
 fn too_large() -> Error {
     Error::Corrupt(format!(
@@ -83,9 +89,10 @@ fn predict(data: Vec<u8>, params: Option<&Dict>) -> Result<Vec<u8>> {
     }
     let colors = int("Colors", 1).clamp(1, 32) as usize;
     let bpc = int("BitsPerComponent", 8).clamp(1, 16) as usize;
-    let columns = int("Columns", 1).max(1) as usize;
+    let columns = int("Columns", 1).clamp(1, 1 << 28) as usize;
     let bpp = (colors * bpc).div_ceil(8);
-    let row = (colors * bpc * columns).div_ceil(8);
+    // A row longer than the data is one short row; the file must not choose how much is allocated.
+    let row = (colors * bpc * columns).div_ceil(8).min(data.len().max(1));
 
     if predictor == 2 {
         // TIFF predictor, 8-bit components only (the only kind seen in practice).
@@ -175,7 +182,12 @@ fn ascii85(data: &[u8]) -> Result<Vec<u8>> {
     for &b in body {
         match b {
             b'~' => break,
-            b'z' if n == 0 => out.extend_from_slice(&[0; 4]),
+            b'z' if n == 0 => {
+                if out.len() >= MAX_DECODED {
+                    return Err(too_large());
+                }
+                out.extend_from_slice(&[0; 4]);
+            }
             b'!'..=b'u' => {
                 group[n] = b - b'!';
                 n += 1;
@@ -199,17 +211,20 @@ fn ascii85(data: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-fn run_length(data: &[u8]) -> Vec<u8> {
+fn run_length(data: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < data.len() {
+        if out.len() > MAX_DECODED {
+            return Err(too_large());
+        }
         let len = data[i];
         i += 1;
         match len {
             128 => break,
             0..=127 => {
                 let n = usize::from(len) + 1;
-                out.extend_from_slice(&data[i..(i + n).min(data.len())]);
+                out.extend_from_slice(&data[i.min(data.len())..(i + n).min(data.len())]);
                 i += n;
             }
             _ => {
@@ -220,10 +235,10 @@ fn run_length(data: &[u8]) -> Vec<u8> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
-fn lzw(data: &[u8], early_change: bool) -> Vec<u8> {
+fn lzw(data: &[u8], early_change: bool) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut table: Vec<Vec<u8>> = Vec::new();
     let reset = |t: &mut Vec<Vec<u8>>| {
@@ -248,11 +263,11 @@ fn lzw(data: &[u8], early_change: bool) -> Vec<u8> {
                     prev = None;
                     continue;
                 }
-                257 => return out,
+                257 => return Ok(out),
                 _ => {}
             }
             if out.len() > MAX_DECODED {
-                return out;
+                return Err(too_large());
             }
             let entry = if code < table.len() {
                 table[code].clone()
@@ -261,10 +276,13 @@ fn lzw(data: &[u8], early_change: bool) -> Vec<u8> {
                 e.push(p[0]);
                 e
             } else {
-                return out;
+                return Ok(out);
             };
             out.extend_from_slice(&entry);
-            if let Some(mut p) = prev.take() {
+            // Codes are twelve bits at most, so entries past 4096 could never be used.
+            if let Some(mut p) = prev.take()
+                && table.len() < 4096
+            {
                 p.push(entry[0]);
                 table.push(p);
             }
@@ -278,7 +296,7 @@ fn lzw(data: &[u8], early_change: bool) -> Vec<u8> {
             };
         }
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -296,7 +314,7 @@ mod tests {
         assert_eq!(ascii_hex(b"48 65 6C 6C 6F>"), b"Hello");
         assert_eq!(ascii85(b"<~87cURD]i,\"Ebo80~>").unwrap(), b"Hello World!");
         assert_eq!(
-            run_length(&[2, b'a', b'b', b'c', 254, b'x', 128]),
+            run_length(&[2, b'a', b'b', b'c', 254, b'x', 128]).unwrap(),
             b"abcxxx"
         );
     }
@@ -314,7 +332,53 @@ mod tests {
     fn lzw_spec_example() {
         // The example from the PDF specification, section 7.4.4.2.
         let encoded = [0x80, 0x0B, 0x60, 0x50, 0x22, 0x0C, 0x0C, 0x85, 0x01];
-        assert_eq!(lzw(&encoded, true), b"-----A---B");
+        assert_eq!(lzw(&encoded, true).unwrap(), b"-----A---B");
+    }
+
+    fn stream_dict(filters: &[&str]) -> Dict {
+        let mut dict = Dict::new();
+        dict.insert(
+            b"Filter".to_vec(),
+            Object::Array(
+                filters
+                    .iter()
+                    .map(|f| Object::Name(f.as_bytes().to_vec()))
+                    .collect(),
+            ),
+        );
+        dict
+    }
+
+    #[test]
+    fn chained_run_lengths_cannot_grow_without_end() {
+        // "129 129" is 128 bytes of 129, which the next layer reads the same way: every layer is 64 times
+        // larger, and four of them would turn 64 KiB into a terabyte.
+        let data = vec![129u8; 1 << 16];
+        let dict = stream_dict(&["RunLengthDecode"; 4]);
+        assert!(decode(&dict, &data).is_err());
+        assert!(decode(&stream_dict(&["ASCIIHexDecode"; 9]), b"00").is_err());
+    }
+
+    #[test]
+    fn ascii85_zeros_are_capped() {
+        let data = vec![b'z'; (MAX_DECODED / 4) + 16];
+        assert!(ascii85(&data).is_err());
+    }
+
+    #[test]
+    fn a_huge_column_count_allocates_nothing() {
+        let mut dict = Dict::new();
+        dict.insert(b"Predictor".to_vec(), Object::Int(12));
+        dict.insert(b"Columns".to_vec(), Object::Int(i64::MAX));
+        dict.insert(b"Colors".to_vec(), Object::Int(32));
+        dict.insert(b"BitsPerComponent".to_vec(), Object::Int(16));
+        assert_eq!(
+            predict(vec![0, 1, 2, 3], Some(&dict)).unwrap(),
+            vec![1, 2, 3]
+        );
+        dict.insert(b"Predictor".to_vec(), Object::Int(2));
+        dict.insert(b"BitsPerComponent".to_vec(), Object::Int(8));
+        assert_eq!(predict(vec![1, 1], Some(&dict)).unwrap().len(), 2);
     }
 
     #[test]

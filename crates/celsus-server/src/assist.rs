@@ -14,20 +14,44 @@ use crate::crypto::sha256;
 use crate::web::{ApiError, ApiResult};
 use crate::{AppState, library};
 
-/// Translations kept in PostgreSQL, keyed by a hash of language and source text. PDF work runs on a blocking
-/// thread, so the cache waits for the database there.
+/// One book's translations kept in PostgreSQL, keyed by a hash of the book, the language and the source text.
+/// PDF work runs on a blocking thread, so the cache waits for the database there.
+///
+/// The cache belongs to the book: what someone submits for their own book is never read back into another
+/// person's. Entries written before books had their own (no book recorded) are still read, never written.
 pub struct PgCache {
     pub state: AppState,
     pub handle: Handle,
+    pub book_id: String,
+}
+
+impl PgCache {
+    fn scoped(&self, key: &str) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.book_id.len() + 1 + key.len());
+        bytes.extend_from_slice(self.book_id.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(key.as_bytes());
+        sha256(&bytes)
+    }
 }
 
 impl Cache for PgCache {
     fn get(&self, key: &str) -> Option<String> {
         self.handle.block_on(async {
             let db = self.state.pool.get().await.ok()?;
+            let own = db
+                .query_opt(
+                    "SELECT text FROM translation_cache WHERE key_hash = $1 AND book_id = $2",
+                    &[&self.scoped(key).as_slice(), &self.book_id],
+                )
+                .await
+                .ok()?;
+            if let Some(row) = own {
+                return Some(row.get(0));
+            }
             db.query_opt(
-                "SELECT text FROM translation_cache WHERE key_hash = $1",
-                &[&sha256(key.as_bytes())],
+                "SELECT text FROM translation_cache WHERE key_hash = $1 AND book_id IS NULL",
+                &[&sha256(key.as_bytes()).as_slice()],
             )
             .await
             .ok()?
@@ -40,8 +64,9 @@ impl Cache for PgCache {
             if let Ok(db) = self.state.pool.get().await {
                 let _ = db
                     .execute(
-                        "INSERT INTO translation_cache (key_hash, text) VALUES ($1, $2) ON CONFLICT (key_hash) DO UPDATE SET text = $2",
-                        &[&sha256(key.as_bytes()), &translation],
+                        "INSERT INTO translation_cache (key_hash, text, book_id) VALUES ($1, $2, $3) \
+                         ON CONFLICT (key_hash) DO UPDATE SET text = $2 WHERE translation_cache.book_id = $3",
+                        &[&self.scoped(key).as_slice(), &translation, &self.book_id],
                     )
                     .await;
             }
@@ -108,7 +133,11 @@ pub async fn pending(
     let handle = Handle::current();
     blocking(move || {
         let doc = open(&st, &id)?;
-        let mut cache = PgCache { state: st, handle };
+        let mut cache = PgCache {
+            state: st,
+            handle,
+            book_id: id,
+        };
         assist::pending(&doc, &info, &done, &mut cache, &to, &pages, max_chars)
     })
     .await
@@ -126,7 +155,11 @@ pub async fn submit(
     let handle = Handle::current();
     let (mut result, complete) = blocking(move || {
         let doc = open(&st, &id)?;
-        let mut cache = PgCache { state: st, handle };
+        let mut cache = PgCache {
+            state: st,
+            handle,
+            book_id: id,
+        };
         assist::accept(&doc, &mut cache, &lang, &items, accept_anyway)
     })
     .await?;
@@ -158,7 +191,11 @@ pub async fn write_output(
         let doc = open(&st, &id)?;
         let fonts = FontSet::for_language(&st.config.fonts_dir, &to2);
         let redrawn = library::redrawn_images(&st.config, &id, &lang2);
-        let mut cache = PgCache { state: st, handle };
+        let mut cache = PgCache {
+            state: st,
+            handle,
+            book_id: id,
+        };
         assist::render(&doc, &fonts, &mut cache, &to2, &pages, &redrawn)
     })
     .await?;

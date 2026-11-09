@@ -325,7 +325,10 @@ impl Font {
                         else {
                             break;
                         };
-                        if last >= first && last - first < 0x10000 {
+                        if last >= first
+                            && last - first < 0x10000
+                            && self.cid_widths.len() < 1 << 20
+                        {
                             for cid in first..=last {
                                 self.cid_widths.insert(cid as u32, v as f32 / 1000.0);
                             }

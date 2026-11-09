@@ -4,10 +4,13 @@
 //! `POST /mcp` takes JSON-RPC 2.0 (one message or a batch) and answers with JSON. Credentials are an API key or
 //! an OAuth access token in `Authorization: Bearer`; without them the answer points to the OAuth metadata, so apps
 //! such as ChatGPT and Claude can sign in on their own.
+//!
+//! A message can carry a whole book, so the body may be large. It is read only once the credentials have been
+//! checked: a stranger's request is answered from its headers alone.
 
 use axum::Json;
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use celsus_core::Language;
@@ -191,6 +194,23 @@ fn base64_arg(args: &Value, key: &str) -> ApiResult<Vec<u8>> {
         .ok_or_else(|| ApiError::bad(format!("{key} is not valid base64")))
 }
 
+/// A picture to put into a book. Checked before decoding, so an oversized one costs nothing more.
+fn picture_arg(args: &Value) -> ApiResult<Vec<u8>> {
+    let limit = crate::routes::extras::picture_limit();
+    if arg_str(args, "image_base64").is_some_and(|raw| raw.len() / 4 * 3 > limit + 64) {
+        return Err(ApiError::bad(
+            "The picture is larger than this server accepts.",
+        ));
+    }
+    let picture = base64_arg(args, "image_base64")?;
+    if picture.len() > limit {
+        return Err(ApiError::bad(
+            "The picture is larger than this server accepts.",
+        ));
+    }
+    Ok(picture)
+}
+
 fn absolute(state: &AppState, path: &str) -> String {
     match &state.config.public_origin {
         Some(origin) => format!("{origin}{path}"),
@@ -357,15 +377,7 @@ async fn call_tool(state: &AppState, auth: &Auth, name: &str, args: &Value) -> A
             let image = arg_str(args, "picture_id").map(str::to_owned);
             let picture = match name {
                 "replace_picture" => {
-                    assist::place(
-                        state,
-                        &book.id,
-                        &lang,
-                        page,
-                        image,
-                        base64_arg(args, "image_base64")?,
-                    )
-                    .await?
+                    assist::place(state, &book.id, &lang, page, image, picture_arg(args)?).await?
                 }
                 "redraw_picture" => {
                     assist::redraw(
@@ -457,11 +469,25 @@ pub fn unauthorized(state: &AppState) -> Response {
     res
 }
 
+/// The largest message accepted: a book or a picture comes as base64, a third larger than the file.
+pub fn body_limit(max_upload: usize) -> usize {
+    max_upload / 3 * 4 + (1 << 20)
+}
+
+fn too_large() -> Response {
+    ApiError::new(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "too_large",
+        "The message is larger than this server accepts.",
+    )
+    .into_response()
+}
+
 pub async fn post(
     State(state): State<AppState>,
     auth: Result<Auth, ApiError>,
     headers: HeaderMap,
-    body: Bytes,
+    request: Request,
 ) -> Response {
     // Only bearer credentials: a browser's session cookie is not an MCP client.
     let Ok(auth) = auth
@@ -469,7 +495,19 @@ pub async fn post(
         .filter(|_| headers.contains_key(header::AUTHORIZATION))
         .ok_or(())
     else {
+        // The body is dropped unread.
         return unauthorized(&state);
+    };
+    let limit = body_limit(state.config.max_upload);
+    let declared = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok());
+    if declared.is_some_and(|n| n > limit) {
+        return too_large();
+    }
+    let Ok(body) = axum::body::to_bytes(request.into_body(), limit).await else {
+        return too_large();
     };
     let msg: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
@@ -499,4 +537,22 @@ pub async fn post(
 /// This server answers each request directly and opens no event stream.
 pub async fn other() -> Response {
     (StatusCode::METHOD_NOT_ALLOWED, [(header::ALLOW, "POST")]).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_picture_too_large_to_place_is_refused() {
+        let limit = crate::routes::extras::picture_limit();
+        let small = json!({ "image_base64": celsus_core::base64::encode(&[7u8; 300]) });
+        assert_eq!(picture_arg(&small).unwrap(), [7u8; 300]);
+        let url = json!({ "image_base64": format!("data:image/png;base64,{}", celsus_core::base64::encode(b"png")) });
+        assert_eq!(picture_arg(&url).unwrap(), b"png");
+        // Refused by the length of the text alone, whatever is in it.
+        let large = json!({ "image_base64": "A".repeat((limit + 4096) / 3 * 4) });
+        assert!(picture_arg(&large).is_err());
+        assert!(picture_arg(&json!({})).is_err());
+    }
 }

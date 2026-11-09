@@ -72,7 +72,9 @@ HTTPS reverse proxy. This document describes what it protects, against whom, and
 ## Chat apps (MCP and OAuth)
 
 - `POST /mcp` takes only bearer credentials: an API key or an OAuth access token. A browser's session cookie is not
-  accepted there, and requests from other sites' pages are refused like any other cross-site write.
+  accepted there, and requests from other sites' pages are refused like any other cross-site write. A message can
+  carry a whole book, so it may be large; it is read only after the credentials have been checked, and a request
+  without them is answered from its headers alone.
 - Apps such as ChatGPT and Claude register themselves (`/oauth/register`) and send the person to the web interface,
   which shows the app's name, where it will return and what it may do. Nothing is granted until the person allows it
   while signed in; an API key cannot approve on anyone's behalf.
@@ -103,7 +105,9 @@ The log is append-only for the application and visible to admins. It never conta
   `Cross-Origin-Opener-Policy: same-origin`, `Permissions-Policy` turning off camera, microphone and location, and
   `Strict-Transport-Security` when the server is told it is served over HTTPS.
 - API responses are `Cache-Control: no-store`.
-- Request bodies are limited (1 MiB for JSON, a configurable size for uploads), and slow clients are cut off.
+- Request bodies are limited: 1 MiB for JSON, 32 MiB for a picture, `CELSUS_MAX_UPLOAD_MB` for a book (a third
+  more on `/mcp`, where files travel as base64). The server sets no time limit on a slow connection; that is the
+  reverse proxy's job.
 - Error responses say what the client did wrong, never how the server failed inside.
 - All database access uses bound parameters; no SQL is built from input.
 - The client address comes from `X-Forwarded-For` only when the request arrives from a proxy listed in
@@ -119,8 +123,14 @@ The log is append-only for the application and visible to admins. It never conta
   client sent; uploaded file names are kept only as text. The web files are served by a file server that refuses
   paths leaving its folder.
 - **Uploads.** Only PDFs are accepted (checked by content, not by name), up to `CELSUS_MAX_UPLOAD_MB`. Reading one runs
-  off the request threads with a time limit, and no stream may expand past 256 MiB, so a small crafted file cannot
-  exhaust memory.
+  off the request threads with a time limit. A file decides nothing about how much the reader uses: no stream may
+  expand past 256 MiB however its filters are chained, picture and table sizes are checked before memory is set
+  aside for them, objects that refer to one another in a loop are given up on, and a page stops being read after
+  twenty million drawing operators. A small crafted file can therefore neither exhaust memory nor keep a thread
+  busy without end, and it cannot bring the server down.
+- **Translations.** The cache of translations belongs to each book and is deleted with it. What one person sends for
+  their own book is never used in another person's; people who can open the same shared book share its
+  translations.
 - **Jobs.** Page lists are checked against the book; one person can queue at most 20 jobs. Only the person who
   started a job, the book's owner or an admin can stop it.
 

@@ -204,6 +204,11 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX oauth_tokens_user ON oauth_tokens (user_id);
     "#,
+    // Cached translations belong to a book and go with it. Rows from before this (no book) are only read.
+    r#"
+    ALTER TABLE translation_cache ADD COLUMN book_id TEXT REFERENCES books (id) ON DELETE CASCADE;
+    CREATE INDEX translation_cache_book ON translation_cache (book_id);
+    "#,
 ];
 
 pub fn pool(url: &str) -> Result<Pool, String> {

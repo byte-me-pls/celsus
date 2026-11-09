@@ -23,8 +23,7 @@ pub const BODY_LIMIT: usize = 1 << 20;
 
 pub fn router(state: AppState) -> Router {
     let upload_limit = state.config.max_upload;
-    // A book or a picture sent over MCP comes as base64, a third larger than the file.
-    let mcp_limit = upload_limit / 3 * 4 + (1 << 20);
+    let mcp_limit = mcp::body_limit(upload_limit);
     let shared = tower_http::services::ServeDir::new(&state.config.ui_dir);
     let web = tower_http::services::ServeDir::new(&state.config.web_dir)
         .append_index_html_on_directories(true)

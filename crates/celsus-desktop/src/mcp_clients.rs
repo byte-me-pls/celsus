@@ -405,27 +405,75 @@ fn client(id: &str) -> Result<(&'static Client, PathBuf), String> {
     Ok((c, (c.file)(&home, &data)))
 }
 
-/// Write a settings file, keeping a copy of the version before Celsus first touched it.
-fn write(file: &Path, text: &str) -> Result<(), String> {
-    if let Some(dir) = file.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    let mut backup = file.as_os_str().to_owned();
-    backup.push(".celsus-backup");
-    let backup = PathBuf::from(backup);
-    if file.exists() && !backup.exists() {
-        std::fs::copy(file, &backup).map_err(|e| e.to_string())?;
-    }
-    std::fs::write(file, text).map_err(|e| format!("{}: {e}", file.display()))
+/// `file` with `suffix` added to its name.
+fn beside(file: &Path, suffix: &str) -> PathBuf {
+    let mut name = file.as_os_str().to_owned();
+    name.push(suffix);
+    PathBuf::from(name)
 }
 
-fn edited(c: &Client, file: &Path, add: Option<&str>) -> Result<String, String> {
-    let text = std::fs::read_to_string(file).unwrap_or_default();
+/// The text of a settings file; a file that is not there yet is empty. A file that is there but cannot be read
+/// (in use, no permission, not text) is an error: treating it as empty would replace it with Celsus's entry
+/// alone.
+fn current(file: &Path) -> Result<String, String> {
+    match std::fs::read_to_string(file) {
+        Ok(text) => Ok(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(format!(
+            "{}: {e}. Add the entry by hand instead.",
+            file.display()
+        )),
+    }
+}
+
+/// Replace a settings file whose text was `before`. Two copies are kept beside it: `.celsus-backup`, the file
+/// before Celsus first touched it, and `.celsus-previous`, the file before this change. The new text is written
+/// to a file of its own and moved into place, so the app never finds half a file.
+fn write(file: &Path, before: &str, text: &str) -> Result<(), String> {
+    if before == text {
+        return Ok(());
+    }
+    let failed = |e: std::io::Error| format!("{}: {e}", file.display());
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir).map_err(failed)?;
+    }
+    // A link is followed, so the file it points to is the one replaced.
+    let target = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
+    if target.exists() {
+        // The app may have saved its settings since they were read.
+        if current(&target)? != before {
+            return Err(format!(
+                "{}: the file changed while Celsus was editing it. Try again.",
+                file.display()
+            ));
+        }
+        let first = beside(file, ".celsus-backup");
+        if !first.exists() {
+            std::fs::copy(&target, &first).map_err(failed)?;
+        }
+        std::fs::copy(&target, beside(file, ".celsus-previous")).map_err(failed)?;
+    }
+    let new = beside(&target, ".celsus-new");
+    let written = (|| {
+        use std::io::Write as _;
+        let mut f = std::fs::File::create(&new)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&new, &target)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&new);
+    }
+    written.map_err(failed)
+}
+
+fn edited(c: &Client, text: &str, file: &Path, add: Option<&str>) -> Result<String, String> {
     let result = match (c.format, add) {
-        (Format::Json { .. }, Some(cmd)) => json_add(&text, c.format, cmd),
-        (Format::Json { key, .. }, None) => json_remove(&text, key),
-        (Format::CodexToml, Some(cmd)) => Ok(toml_add(&text, cmd)),
-        (Format::CodexToml, None) => Ok(toml_remove(&text)),
+        (Format::Json { .. }, Some(cmd)) => json_add(text, c.format, cmd),
+        (Format::Json { key, .. }, None) => json_remove(text, key),
+        (Format::CodexToml, Some(cmd)) => Ok(toml_add(text, cmd)),
+        (Format::CodexToml, None) => Ok(toml_remove(text)),
     };
     result.map_err(|e| format!("{}: {e}. Add the entry by hand instead.", file.display()))
 }
@@ -433,8 +481,9 @@ fn edited(c: &Client, file: &Path, add: Option<&str>) -> Result<String, String> 
 /// Add (or update) Celsus in an app. Returns the settings file.
 pub fn add(id: &str, command: &str) -> Result<String, String> {
     let (c, file) = client(id)?;
-    let text = edited(c, &file, Some(command))?;
-    write(&file, &text)?;
+    let before = current(&file)?;
+    let text = edited(c, &before, &file, Some(command))?;
+    write(&file, &before, &text)?;
     Ok(file.display().to_string())
 }
 
@@ -443,8 +492,9 @@ pub fn remove(id: &str) -> Result<(), String> {
     if !file.exists() {
         return Ok(());
     }
-    let text = edited(c, &file, None)?;
-    write(&file, &text)
+    let before = current(&file)?;
+    let text = edited(c, &before, &file, None)?;
+    write(&file, &before, &text)
 }
 
 #[cfg(test)]
@@ -556,11 +606,39 @@ mod tests {
         let toml = dir.join("config.toml");
         std::fs::write(&toml, toml_add("", CMD)).unwrap();
         assert_eq!(state_of(Format::CodexToml, &toml, CMD), State::Added);
-        // Writing keeps the first original as a backup.
-        write(&file, "{}").unwrap();
-        write(&file, "{\"a\":1}").unwrap();
+        // Writing keeps the first original as a backup, and the version before each change.
+        write(&file, "{ // comment\n}", "{}").unwrap();
+        write(&file, "{}", "{\"a\":1}").unwrap();
         let backup = std::fs::read_to_string(dir.join("config.json.celsus-backup")).unwrap();
         assert_eq!(backup, "{ // comment\n}");
+        let previous = std::fs::read_to_string(dir.join("config.json.celsus-previous")).unwrap();
+        assert_eq!(previous, "{}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "{\"a\":1}");
+        assert!(!dir.join("config.json.celsus-new").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_is_never_replaced() {
+        let dir = std::env::temp_dir().join(format!("celsus-mcp-safe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Not text: reading fails, and nothing is taken to be empty.
+        let file = dir.join("settings.json");
+        let bytes = [b'{', 0xFF, 0xFE, b'}'];
+        std::fs::write(&file, bytes).unwrap();
+        assert!(current(&file).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), bytes);
+        // A file that is not there is simply empty.
+        assert_eq!(current(&dir.join("none.json")).unwrap(), "");
+        // Saved by its app after Celsus read it: the newer version stays.
+        let live = dir.join("live.json");
+        std::fs::write(&live, "{\"theirs\":2}").unwrap();
+        assert!(write(&live, "{\"theirs\":1}", "{\"ours\":1}").is_err());
+        assert_eq!(std::fs::read_to_string(&live).unwrap(), "{\"theirs\":2}");
+        assert!(!dir.join("live.json.celsus-backup").exists());
+        // Nothing to change: nothing is written, not even a backup.
+        write(&live, "{\"theirs\":2}", "{\"theirs\":2}").unwrap();
+        assert!(!dir.join("live.json.celsus-backup").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

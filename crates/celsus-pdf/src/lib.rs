@@ -12,6 +12,8 @@ pub mod embed;
 pub mod encoding;
 pub mod filters;
 pub mod font;
+#[cfg(test)]
+mod hostile;
 pub mod image;
 pub mod interp;
 pub mod lexer;

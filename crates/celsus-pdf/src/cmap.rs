@@ -12,6 +12,9 @@ struct Codespace {
     hi: u32,
 }
 
+/// The most code-to-text entries one map keeps. A range of a few bytes can stand for 65,536 of them.
+const MAX_MAPPINGS: usize = 1 << 20;
+
 #[derive(Debug, Clone, Default)]
 pub struct CMap {
     codespaces: Vec<Codespace>,
@@ -126,7 +129,7 @@ impl CMap {
                             continue;
                         };
                         let (lo, hi) = (be(lo), be(hi));
-                        if hi < lo || hi - lo > 0xFFFF {
+                        if hi < lo || hi - lo > 0xFFFF || cmap.unicode.len() > MAX_MAPPINGS {
                             i += 3;
                             continue;
                         }

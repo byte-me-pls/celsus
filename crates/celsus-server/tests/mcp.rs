@@ -804,3 +804,201 @@ async fn the_web_has_estimates_usage_settings_and_connection_details() {
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
     s.finish().await;
 }
+
+/// A request to `/mcp` whose body says when the server starts reading it.
+async fn watched(
+    s: &Server,
+    token: Option<&str>,
+    body: Vec<u8>,
+    declared: Option<usize>,
+) -> (StatusCode, bool) {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use axum::http::{Request, header};
+    use http_body_util::{BodyExt, Full};
+    use tower::ServiceExt;
+
+    let read = Arc::new(AtomicBool::new(false));
+    let seen = read.clone();
+    let body = Full::new(axum::body::Bytes::from(body)).map_frame(move |frame| {
+        seen.store(true, Ordering::SeqCst);
+        frame
+    });
+    let mut req = Request::builder()
+        .method(Method::POST)
+        .uri("/mcp")
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(t) = token {
+        req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
+    }
+    if let Some(n) = declared {
+        req = req.header(header::CONTENT_LENGTH, n);
+    }
+    let mut req = req.body(Body::new(body)).unwrap();
+    req.extensions_mut()
+        .insert(ConnectInfo(std::net::SocketAddr::new(
+            "203.0.113.5".parse().unwrap(),
+            50000,
+        )));
+    let res = s.app.clone().oneshot(req).await.unwrap();
+    (res.status(), read.load(Ordering::SeqCst))
+}
+
+#[tokio::test]
+async fn a_message_without_credentials_is_refused_unread() {
+    let s = Server::new().await;
+    let owner = s.owner().await;
+    let k = key(&s, &owner, &["read"]).await;
+    let ping = br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#.to_vec();
+
+    // No credentials or wrong ones: answered from the headers alone.
+    let (status, read) = watched(&s, None, ping.clone(), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(!read, "the body of a request without credentials was read");
+    let (status, read) = watched(
+        &s,
+        Some("celsus_0123456789abcdef_not-a-real-secret-at-all-000000000"),
+        vec![b' '; 3 << 20],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(!read, "the body of a request with a wrong key was read");
+
+    // With a key the message is read and answered.
+    let (status, read) = watched(&s, Some(&k), ping.clone(), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(read);
+
+    // Larger than a book can be: refused by its declared size before any of it is read, and by its real size
+    // when none is declared.
+    let (status, read) = watched(&s, Some(&k), ping, Some(1 << 30)).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(!read);
+    let (status, _) = watched(&s, Some(&k), vec![b' '; 5 << 20], None).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    s.finish().await;
+}
+
+/// The cached translations of one book.
+async fn cached(s: &Server, book: &str) -> Vec<String> {
+    s.db()
+        .await
+        .query(
+            "SELECT text FROM translation_cache WHERE book_id = $1",
+            &[&book],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get(0))
+        .collect()
+}
+
+#[tokio::test]
+async fn translations_stay_with_their_book() {
+    let s = Server::new().await;
+    let owner = s.owner().await;
+    let member = s.member(&owner, "uye@lib.test", "member").await;
+    let line = "Chapter 7 begins here";
+    let theirs = upload(&s, &member, sample_pdf(line)).await;
+    let mine = upload(&s, &owner, sample_pdf(line)).await;
+    let member_key = key(&s, &member, &["read", "translate"]).await;
+    let owner_key = key(&s, &owner, &["read", "translate"]).await;
+
+    // The member gives the line a translation of their own choosing, in their own book.
+    let todo = ok(
+        &s,
+        &member_key,
+        "get_text_to_translate",
+        json!({ "book_id": theirs, "target_language": "tr" }),
+    )
+    .await;
+    let block = &todo["blocks"][0];
+    let sent = ok(
+        &s,
+        &member_key,
+        "submit_translations",
+        json!({ "book_id": theirs, "target_language": "tr", "accept_anyway": true,
+                "translations": [{ "page": block["page"], "id": block["id"], "text": "Buraya başka bir şey yazıldı" }] }),
+    )
+    .await;
+    assert_eq!(sent["completed_pages"], json!([1]), "{sent}");
+
+    // The same line in the owner's book is still to be translated: nothing came over from the member's book.
+    let todo = ok(
+        &s,
+        &owner_key,
+        "get_text_to_translate",
+        json!({ "book_id": mine, "target_language": "tr" }),
+    )
+    .await;
+    let blocks = todo["blocks"].as_array().unwrap();
+    assert_eq!(blocks.len(), 1, "{todo}");
+    assert_eq!(blocks[0]["text"], line);
+    ok(
+        &s,
+        &owner_key,
+        "submit_translations",
+        json!({ "book_id": mine, "target_language": "tr",
+                "translations": [{ "page": blocks[0]["page"], "id": blocks[0]["id"], "text": "Bölüm 7 burada başlıyor" }] }),
+    )
+    .await;
+    assert_eq!(cached(&s, &theirs).await, ["Buraya başka bir şey yazıldı"]);
+    assert_eq!(cached(&s, &mine).await, ["Bölüm 7 burada başlıyor"]);
+    let unowned: i64 = s
+        .db()
+        .await
+        .query_one(
+            "SELECT COUNT(*) FROM translation_cache WHERE book_id IS NULL",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(unowned, 0);
+
+    // Translations kept before books had their own are still found, so earlier work is not lost.
+    let old = "An older line of text";
+    let tr: celsus_core::Language = "tr".parse().unwrap();
+    s.db()
+        .await
+        .execute(
+            "INSERT INTO translation_cache (key_hash, text) VALUES ($1, $2)",
+            &[
+                &celsus_server::crypto::sha256(
+                    celsus_core::pipeline::cache_key(&tr, old).as_bytes(),
+                ),
+                &"Eski bir metin satırı",
+            ],
+        )
+        .await
+        .unwrap();
+    let earlier = upload(&s, &owner, sample_pdf(old)).await;
+    let todo = ok(
+        &s,
+        &owner_key,
+        "get_text_to_translate",
+        json!({ "book_id": earlier, "target_language": "tr" }),
+    )
+    .await;
+    assert_eq!(todo["blocks"].as_array().unwrap().len(), 0, "{todo}");
+
+    // A book's translations go with it.
+    let gone = s
+        .send(
+            &member,
+            Method::DELETE,
+            &format!("/api/books/{theirs}"),
+            None,
+            &[],
+        )
+        .await;
+    assert_eq!(gone.status, StatusCode::OK, "{:?}", gone.body);
+    assert!(cached(&s, &theirs).await.is_empty());
+    assert_eq!(cached(&s, &mine).await.len(), 1);
+    s.finish().await;
+}

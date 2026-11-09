@@ -50,7 +50,10 @@ pub fn page_images(doc: &Document, page: &Page) -> Vec<PageImage> {
             .get_in(d, "Height")
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
-        if width >= 64 && height >= 64 && !out.iter().any(|i: &PageImage| i.id == id) {
+        if (64..=MAX_SIDE).contains(&width)
+            && (64..=MAX_SIDE).contains(&height)
+            && !out.iter().any(|i: &PageImage| i.id == id)
+        {
             out.push(PageImage {
                 id,
                 width: width as u32,
@@ -60,6 +63,19 @@ pub fn page_images(doc: &Document, page: &Page) -> Vec<PageImage> {
     }
     out.sort_by_key(|i| std::cmp::Reverse(u64::from(i.width) * u64::from(i.height)));
     out
+}
+
+/// The longest side a picture may have, and the most pixels: sizes come from the file and decide how much is
+/// allocated.
+const MAX_SIDE: i64 = 1 << 15;
+const MAX_PIXELS: usize = 1 << 27;
+
+/// `width` x `height` as a pixel count, if both are sizes a picture can have.
+fn pixel_count(width: i64, height: i64) -> Option<usize> {
+    if !(1..=MAX_SIDE).contains(&width) || !(1..=MAX_SIDE).contains(&height) {
+        return None;
+    }
+    Some(width as usize * height as usize).filter(|n| *n <= MAX_PIXELS)
 }
 
 /// A picture as an image file: its bytes and media type (`image/jpeg` or `image/png`).
@@ -101,15 +117,21 @@ pub fn export(doc: &Document, id: ObjRef) -> Option<(Vec<u8>, &'static str)> {
             .starts_with(&[0xFF, 0xD8])
             .then_some((data, "image/jpeg"));
     }
-    let samples = filters::decode(&dict, &stream.data).ok()?;
-    let width = get(&dict, "Width")?.as_i64()? as u32;
-    let height = get(&dict, "Height")?.as_i64()? as u32;
+    let (width, height) = (
+        get(&dict, "Width")?.as_i64()?,
+        get(&dict, "Height")?.as_i64()?,
+    );
+    let count = pixel_count(width, height)?;
     if get(&dict, "BitsPerComponent").and_then(Object::as_i64) != Some(8) {
         return None;
     }
+    let samples = filters::decode(&dict, &stream.data).ok()?;
     let space = get(&dict, "ColorSpace")?;
-    let (pixels, channels) = to_pixels(doc, space, &samples, (width * height) as usize)?;
-    Some((png(width, height, channels, &pixels), "image/png"))
+    let (pixels, channels) = to_pixels(doc, space, &samples, count, 0)?;
+    Some((
+        png(width as u32, height as u32, channels, &pixels),
+        "image/png",
+    ))
 }
 
 /// Samples in a colour space as grey or RGB pixels.
@@ -118,7 +140,12 @@ fn to_pixels(
     space: &Object,
     samples: &[u8],
     count: usize,
+    depth: usize,
 ) -> Option<(Vec<u8>, u8)> {
+    // An indexed space is based on another space; a file can base it on itself.
+    if depth > 4 {
+        return None;
+    }
     let resolved = doc.resolve(space).ok()?;
     match &*resolved {
         Object::Name(n) if n == b"DeviceGray" || n == b"CalGray" => {
@@ -141,7 +168,7 @@ fn to_pixels(
                     4 => b"DeviceCMYK",
                     _ => return None,
                 };
-                to_pixels(doc, &Object::Name(alt.to_vec()), samples, count)
+                to_pixels(doc, &Object::Name(alt.to_vec()), samples, count, depth + 1)
             }
             b"Indexed" => {
                 let base = doc.resolve(a.get(1)?).ok()?;
@@ -163,7 +190,7 @@ fn to_pixels(
                         table.get(at..at + n).unwrap_or(&[0, 0, 0, 0][..n]).to_vec()
                     })
                     .collect();
-                to_pixels(doc, &base, &expanded, count)
+                to_pixels(doc, &base, &expanded, count, depth + 1)
             }
             _ => None,
         },
@@ -201,8 +228,8 @@ fn crc32(chunks: &[&[u8]]) -> u32 {
 
 /// A PNG file of 8-bit grey (1 channel) or RGB (3 channels) pixels.
 pub fn png(width: u32, height: u32, channels: u8, pixels: &[u8]) -> Vec<u8> {
-    let row = width as usize * channels as usize;
-    let mut raw = Vec::with_capacity((row + 1) * height as usize);
+    let row = (width as usize * channels as usize).max(1);
+    let mut raw = Vec::with_capacity(pixels.len() + pixels.len() / row + 1);
     for line in pixels.chunks(row).take(height as usize) {
         raw.push(0);
         raw.extend_from_slice(line);
@@ -315,11 +342,11 @@ pub fn png_xobject(file: &[u8]) -> Option<Stream> {
         let data = file.get(at + 8..at + 8 + len)?;
         match name {
             b"IHDR" => {
-                width = u32::from_be_bytes(data[0..4].try_into().ok()?);
-                height = u32::from_be_bytes(data[4..8].try_into().ok()?);
-                depth = data[8];
-                kind = data[9];
-                interlace = data[12];
+                width = u32::from_be_bytes(data.get(0..4)?.try_into().ok()?);
+                height = u32::from_be_bytes(data.get(4..8)?.try_into().ok()?);
+                depth = *data.get(8)?;
+                kind = *data.get(9)?;
+                interlace = *data.get(12)?;
             }
             b"PLTE" => palette = data.to_vec(),
             b"IDAT" => idat.extend_from_slice(data),
@@ -328,9 +355,10 @@ pub fn png_xobject(file: &[u8]) -> Option<Stream> {
         }
         at += 12 + len;
     }
-    if depth != 8 || interlace != 0 || width == 0 || height == 0 {
+    if depth != 8 || interlace != 0 {
         return None;
     }
+    pixel_count(i64::from(width), i64::from(height))?;
     let colors: i64 = match kind {
         0 | 3 => 1,
         2 => 3,
@@ -386,6 +414,10 @@ pub fn png_xobject(file: &[u8]) -> Option<Stream> {
 /// Reverse PNG row filtering for 8-bit samples with `bpp` bytes per pixel.
 fn unfilter(raw: &[u8], width: usize, height: usize, bpp: usize) -> Option<Vec<u8>> {
     let row = width * bpp;
+    // The rows must really be there before anything of that size is set aside.
+    if raw.len() < (row + 1).checked_mul(height)? {
+        return None;
+    }
     let mut out = vec![0u8; row * height];
     for y in 0..height {
         let line = raw.get(y * (row + 1)..(y + 1) * (row + 1))?;

@@ -238,7 +238,8 @@ impl Session<'_> {
 }
 
 /// The cache key of a block: the same text in the same target language is translated once, whoever translates
-/// it (a model through an API or an assistant in a chat).
+/// it (a model through an API or an assistant in a chat). Whose cache it is, one person's or one book's, is up to
+/// the [`Cache`].
 pub fn cache_key(to: &Language, source: &str) -> String {
     format!("{to}|{source}")
 }

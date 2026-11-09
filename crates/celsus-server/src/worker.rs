@@ -236,6 +236,7 @@ async fn run_job(state: &AppState, id: &str, cancel: Arc<AtomicBool>) -> Result<
     // Pictures redrawn for this language stay in every new version of the book.
     options.images = library::redrawn_images(&state.config, &book_id, &lang);
     let lock_book = book_id.clone();
+    let cache_book = book_id.clone();
     let lock_lang = lang.clone();
     let st = state.clone();
     let handle = Handle::current();
@@ -243,7 +244,11 @@ async fn run_job(state: &AppState, id: &str, cancel: Arc<AtomicBool>) -> Result<
     let (bytes, outcome) = tokio::task::spawn_blocking(move || {
         let fonts = FontSet::for_language(&fonts_dir, &target);
         let doc = celsus_pdf::Document::open(&source).map_err(|e| e.to_string())?;
-        let mut cache = PgCache { state: st.clone(), handle: handle.clone() };
+        let mut cache = PgCache {
+            state: st.clone(),
+            handle: handle.clone(),
+            book_id: cache_book,
+        };
         let mut done = 0i32;
         let mut progress = |p: Progress| {
             if let Progress::PageDone { page, kept, .. } = p {
