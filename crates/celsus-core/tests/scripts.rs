@@ -1,7 +1,8 @@
 //! Writing translations in every major writing system into a PDF and reading them back.
 //!
-//! The fonts come from the system: `C:\Windows\Fonts` on Windows, `/usr/share/fonts` on Linux (the CI and the
-//! Docker image install Noto and WenQuanYi), or `CELSUS_TEST_FONTS_DIR`. A language whose fonts are not installed is
+//! The fonts come from the system: `C:\Windows\Fonts` on Windows, `/System/Library/Fonts` on macOS,
+//! `/usr/share/fonts` on Linux (the CI and the Docker image install Noto and WenQuanYi), or
+//! `CELSUS_TEST_FONTS_DIR`. A language whose fonts are not installed is
 //! skipped with a note rather than failing.
 
 use std::collections::BTreeMap;
@@ -31,6 +32,7 @@ fn fonts_dir() -> Option<PathBuf> {
         .into_iter()
         .chain([
             PathBuf::from(r"C:\Windows\Fonts"),
+            PathBuf::from("/System/Library/Fonts"),
             PathBuf::from("/usr/share/fonts"),
         ])
         .find(|p| p.is_dir())

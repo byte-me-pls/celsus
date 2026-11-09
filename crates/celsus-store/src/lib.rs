@@ -48,7 +48,8 @@ pub fn default_fonts_dir() -> String {
     if cfg!(windows) {
         r"C:\Windows\Fonts".into()
     } else if cfg!(target_os = "macos") {
-        "/Library/Fonts".into()
+        // The fonts macOS ships, `Supplemental` (Arial, Times New Roman) included.
+        "/System/Library/Fonts".into()
     } else {
         "/usr/share/fonts".into()
     }

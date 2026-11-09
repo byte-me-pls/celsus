@@ -1,7 +1,8 @@
-# Windows installer for a version tag: builds the desktop app with its MCP server and attaches the installer to a
-# draft GitHub release, to be checked and published by hand. The server image is built by docker.yml.
+# Desktop app for a version tag: builds it with its MCP server for Windows, macOS and Linux and attaches the files
+# to a draft GitHub release, to be checked and published by hand. The server image is built by docker.yml.
 #   git tag v0.2611.0 && git push origin v0.2611.0
 # Versions are 0.YYMM.N: 0.2611.0 is the first release of November 2026, 0.2611.1 the next one that month.
+# Run by hand (without a tag) it only builds, and keeps the files with the run.
 name: Release
 
 on:
@@ -13,9 +14,51 @@ permissions:
   contents: read
 
 jobs:
-  windows:
-    runs-on: windows-2025
-    timeout-minutes: 60
+  draft:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Version matches the tag
+        run: |
+          want="${GITHUB_REF_NAME#v}"
+          have=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          conf=$(grep -m1 '"version"' crates/celsus-desktop/tauri.conf.json | cut -d'"' -f4)
+          test "$want" = "$have" && test "$want" = "$conf" || { echo "tag $want, Cargo.toml $have, tauri.conf.json $conf"; exit 1; }
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --draft --title "Celsus ${GITHUB_REF_NAME#v}" --notes-file CHANGELOG.md
+
+  desktop:
+    needs: draft
+    # Without a tag there is no draft to wait for.
+    if: ${{ !failure() && !cancelled() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows
+            os: windows-2025
+            files: target/release/bundle/nsis/*-setup.exe
+          # One app for Apple silicon and Intel.
+          - name: macos
+            os: macos-15
+            files: target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          # The oldest Ubuntu still supported, so the app also runs on systems older than the newest.
+          - name: linux
+            os: ubuntu-22.04
+            files: |
+              target/release/bundle/deb/*.deb
+              target/release/bundle/rpm/*.rpm
+              target/release/bundle/appimage/*.AppImage
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     permissions:
       contents: write
     env:
@@ -28,32 +71,32 @@ jobs:
         with:
           toolchain: "1.94"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - name: Version matches the tag
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: bash
+      - name: Libraries the app is built against
+        if: runner.os == 'Linux'
         run: |
-          want="${GITHUB_REF_NAME#v}"
-          have=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
-          conf=$(grep -m1 '"version"' crates/celsus-desktop/tauri.conf.json | cut -d'"' -f4)
-          test "$want" = "$have" && test "$want" = "$conf" || { echo "tag $want, Cargo.toml $have, tauri.conf.json $conf"; exit 1; }
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libdbus-1-dev pkg-config patchelf file xdg-utils
       - name: Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
-      - name: MCP server
-        run: cargo build --release --locked -p celsus-mcp
-      - name: Installer
-        working-directory: crates/celsus-desktop
-        run: cargo tauri build --config release.conf.json
-      - name: Draft release
+      # Says which languages the fonts of macOS can write; a language without a font is skipped, not failed.
+      - name: Writing every script with the macOS fonts
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: cargo test --locked -p celsus-core --test scripts -- --nocapture
+      - name: App
+        shell: bash
+        run: bash scripts/bundle.sh
+      - name: Attach to the draft release
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "$GITHUB_REF_NAME" target/release/bundle/nsis/*-setup.exe \
-            --draft --title "Celsus ${GITHUB_REF_NAME#v}" --notes-file CHANGELOG.md
-      - name: Keep the installer (manual runs)
+          FILES: ${{ matrix.files }}
+        run: gh release upload "$GITHUB_REF_NAME" $FILES
+      - name: Keep the files (manual runs)
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: celsus-windows-installer
-          path: target/release/bundle/nsis/*-setup.exe
+          name: celsus-${{ matrix.name }}
+          path: ${{ matrix.files }}

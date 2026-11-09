@@ -2,17 +2,26 @@
   "$schema": "https://schema.tauri.app/config/2",
   "mainBinaryName": "Celsus",
   "bundle": {
-    "targets": ["nsis"],
     "publisher": "Celsus",
+    "category": "Productivity",
     "shortDescription": "Translates books without breaking their layout",
-    "resources": {
-      "../../target/release/celsus-mcp.exe": "celsus-mcp.exe"
-    },
+    "externalBin": ["sidecar/celsus-mcp"],
     "windows": {
       "nsis": {
         "installMode": "currentUser",
         "languages": ["English", "Turkish", "German", "French", "Spanish", "Italian", "PortugueseBR", "Dutch", "Polish", "Russian", "Ukrainian", "Arabic", "Hindi", "Indonesian", "SimpChinese", "Japanese", "Korean"],
         "displayLanguageSelector": false
+      }
+    },
+    "macOS": {
+      "signingIdentity": "-"
+    },
+    "linux": {
+      "deb": {
+        "depends": ["libdbus-1-3"]
+      },
+      "rpm": {
+        "depends": ["dbus-libs"]
       }
     }
   }

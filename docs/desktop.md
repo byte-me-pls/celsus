@@ -50,12 +50,15 @@ listed in the job's report. Code, formulas, URLs and numbers-only blocks are nev
 
 ### Fonts
 
-Translations are written with TrueType fonts from **Settings → Fonts** (Windows: `C:\Windows\Fonts`). Celsus picks
-the face closest to the original's style (serif, sans, mono, bold, italic) and adds fonts for the target language's
-script: on Windows these are Segoe UI and Tahoma (Arabic, Hebrew), Nirmala UI (Indian scripts), Leelawadee UI
-(Thai, Lao, Khmer), Microsoft YaHei and JhengHei (Chinese), Yu Gothic and Meiryo (Japanese), Malgun Gothic (Korean)
-and others. Noto fonts are used when present. To use other fonts, point the setting at a folder of `.ttf`/`.ttc`
-files; subfolders are searched too.
+Translations are written with TrueType fonts from **Settings → Fonts** (Windows: `C:\Windows\Fonts`, macOS:
+`/System/Library/Fonts`, Linux: `/usr/share/fonts`). Celsus picks the face closest to the original's style (serif,
+sans, mono, bold, italic) and adds fonts for the target language's script: on Windows these are Segoe UI and Tahoma
+(Arabic, Hebrew), Nirmala UI (Indian scripts), Leelawadee UI (Thai, Lao, Khmer), Microsoft YaHei and JhengHei
+(Chinese), Yu Gothic and Meiryo (Japanese), Malgun Gothic (Korean) and others. On macOS the text is set in Arial,
+Times New Roman and Courier New, with Arial Unicode, PingFang, Songti and Apple SD Gothic Neo for other scripts. On
+Linux it is set in Noto, Liberation or DejaVu; for other scripts install the Noto fonts of your system
+(`fonts-noto-core`) and, for Chinese, Japanese and Korean, `fonts-wqy-zenhei`. Noto fonts are used when present on
+any system. To use other fonts, point the setting at a folder of `.ttf`/`.ttc` files; subfolders are searched too.
 
 ## Covers and pictures
 
@@ -81,14 +84,17 @@ Click a book to read it. The reader draws only the pages near the screen, so lon
 
 **Settings → General → Interface language**: English, Türkçe, Deutsch, Français, Español, Italiano, Português,
 Nederlands, Polski, Русский, Українська, العربية, हिन्दी, Bahasa Indonesia, 简体中文, 日本語 or 한국어. *System*
-follows the language of Windows. Arabic switches the interface to right to left.
+follows the language of the system. Arabic switches the interface to right to left.
 
 ## Where things are kept
 
-| What | Where (Windows) |
+Everything is in one folder, `io.github.byte-me-pls.celsus`, under `%APPDATA%` on Windows,
+`~/Library/Application Support` on macOS and `~/.local/share` on Linux:
+
+| What | Where |
 | --- | --- |
-| Library database | `%APPDATA%\io.github.byte-me-pls.celsus\celsus.db` |
-| Books, translated PDFs, redrawn pictures | `%APPDATA%\io.github.byte-me-pls.celsus\library\books\<id>\` |
-| API keys | Windows Credential Manager, entries named `Celsus` |
+| Library database | `celsus.db` |
+| Books, translated PDFs, redrawn pictures | `library/books/<id>/` |
+| API keys | not in the folder: Windows Credential Manager, macOS Keychain, or the Secret Service on Linux (GNOME Keyring, KWallet), entries named `Celsus` |
 
 Uninstalling the app leaves the library in place. `CELSUS_DATA_DIR` moves it elsewhere.

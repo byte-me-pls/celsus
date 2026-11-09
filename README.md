@@ -37,11 +37,22 @@ It is named after the Library of Celsus in Ephesus.
 
 ## Get started
 
-### Desktop app (Windows)
+### Desktop app (Windows, macOS, Linux)
 
-Download `Celsus_x.y.z_x64-setup.exe` from [Releases](https://github.com/byte-me-pls/celsus/releases) and run it.
-It installs for your user only; no administrator rights are needed. Windows may warn about an unknown publisher
-because the installer is not signed yet: choose *More info → Run anyway*.
+Download the file for your system from [Releases](https://github.com/byte-me-pls/celsus/releases):
+
+| System | File | Install |
+| --- | --- | --- |
+| Windows 10, 11 | `Celsus_x.y.z_x64-setup.exe` | Run it. It installs for your user only; no administrator rights are needed. |
+| macOS (Apple silicon and Intel) | `Celsus_x.y.z_universal.dmg` | Open it and drag Celsus to Applications. |
+| Debian, Ubuntu, Mint | `Celsus_x.y.z_amd64.deb` | `sudo apt install ./Celsus_x.y.z_amd64.deb` |
+| Fedora, openSUSE | `Celsus-x.y.z-1.x86_64.rpm` | `sudo dnf install ./Celsus-x.y.z-1.x86_64.rpm` |
+| Other Linux | `Celsus_x.y.z_amd64.AppImage` | `chmod +x` it and run it. |
+
+The files are not signed yet, so the system asks before the first start. On Windows choose *More info → Run
+anyway*. On macOS open the app once, then allow it under *System Settings → Privacy & Security → Open Anyway*.
+On Linux, translations are written with the Noto, Liberation or DejaVu fonts; most systems have one of them, and
+`fonts-noto-core` covers the most languages.
 
 Then:
 
@@ -80,7 +91,11 @@ Requirements, HTTPS, backups and settings: [docs/server-setup.md](docs/server-se
 ## Build from source
 
 You need Rust 1.94 or newer. On Windows the desktop app also needs the WebView2 runtime (included in Windows 10
-and 11).
+and 11); on Linux, the WebKitGTK and D-Bus development packages:
+
+```sh
+sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libdbus-1-dev pkg-config patchelf
+```
 
 ```sh
 cargo build --release -p celsus-desktop -p celsus-mcp   # desktop app and MCP server
@@ -88,17 +103,18 @@ cargo build --release -p celsus-server                  # server edition
 cargo test --workspace                                  # tests (server tests need CELSUS_TEST_DATABASE_URL)
 ```
 
-The Windows installer is made with the Tauri CLI (`cargo install tauri-cli --version "^2" --locked`):
+The installers are made with the Tauri CLI (`cargo install tauri-cli --version "^2" --locked`), each on the system
+it is for: the Windows setup program on Windows, the `.dmg` on macOS, the `.deb`, `.rpm` and AppImage on Linux.
 
 ```sh
-cargo build --release -p celsus-mcp
-cd crates/celsus-desktop && cargo tauri build --config release.conf.json
+bash scripts/bundle.sh
 ```
 
 The server image builds with plain `docker build -t celsus .`.
 
-Tests for writing every script use the fonts installed on the system (`C:\Windows\Fonts`, `/usr/share/fonts`, or
-`CELSUS_TEST_FONTS_DIR`); on Linux install `fonts-noto-core` and `fonts-wqy-zenhei`.
+Tests for writing every script use the fonts installed on the system (`C:\Windows\Fonts`,
+`/System/Library/Fonts`, `/usr/share/fonts`, or `CELSUS_TEST_FONTS_DIR`); on Linux install `fonts-noto-core` and
+`fonts-wqy-zenhei`.
 
 ## How it is put together
 

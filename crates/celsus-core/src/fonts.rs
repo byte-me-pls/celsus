@@ -179,8 +179,8 @@ impl FontSet {
             .map(|(i, _)| i)
     }
 
-    /// Load the general faces from a directory (and its subfolders) using the common file names of the Noto family,
-    /// falling back to the standard Windows fonts. Missing faces are skipped.
+    /// Load the general faces from a directory (and its subfolders) by their common file names: Noto, Liberation
+    /// and DejaVu (Linux), Arial, Times New Roman and Courier New (Windows and macOS). Missing faces are skipped.
     pub fn discover(dir: &Path) -> Self {
         Self::discover_for(dir, None)
     }
@@ -192,7 +192,27 @@ impl FontSet {
 
     /// The general faces plus the fonts for one writing system, for translating into a language that uses it.
     pub fn discover_for(dir: &Path, script: Option<Script>) -> Self {
+        // Of two faces of the same style the later one is used, so the list runs from the least wanted to the
+        // most wanted.
         const GENERAL: &[(&str, Family, bool, bool)] = &[
+            ("DejaVuSans.ttf", Family::Sans, false, false),
+            ("DejaVuSans-Bold.ttf", Family::Sans, true, false),
+            ("DejaVuSans-Oblique.ttf", Family::Sans, false, true),
+            ("DejaVuSans-BoldOblique.ttf", Family::Sans, true, true),
+            ("DejaVuSerif.ttf", Family::Serif, false, false),
+            ("DejaVuSerif-Bold.ttf", Family::Serif, true, false),
+            ("DejaVuSerif-Italic.ttf", Family::Serif, false, true),
+            ("DejaVuSerif-BoldItalic.ttf", Family::Serif, true, true),
+            ("DejaVuSansMono.ttf", Family::Mono, false, false),
+            ("LiberationSans-Regular.ttf", Family::Sans, false, false),
+            ("LiberationSans-Bold.ttf", Family::Sans, true, false),
+            ("LiberationSans-Italic.ttf", Family::Sans, false, true),
+            ("LiberationSans-BoldItalic.ttf", Family::Sans, true, true),
+            ("LiberationSerif-Regular.ttf", Family::Serif, false, false),
+            ("LiberationSerif-Bold.ttf", Family::Serif, true, false),
+            ("LiberationSerif-Italic.ttf", Family::Serif, false, true),
+            ("LiberationSerif-BoldItalic.ttf", Family::Serif, true, true),
+            ("LiberationMono-Regular.ttf", Family::Mono, false, false),
             ("NotoSans-Regular.ttf", Family::Sans, false, false),
             ("NotoSans-Bold.ttf", Family::Sans, true, false),
             ("NotoSans-Italic.ttf", Family::Sans, false, true),
@@ -211,6 +231,15 @@ impl FontSet {
             ("timesi.ttf", Family::Serif, false, true),
             ("timesbi.ttf", Family::Serif, true, true),
             ("cour.ttf", Family::Mono, false, false),
+            // macOS names the same fonts in full (its `Arial.ttf` is found as `arial.ttf` above).
+            ("Arial Bold.ttf", Family::Sans, true, false),
+            ("Arial Italic.ttf", Family::Sans, false, true),
+            ("Arial Bold Italic.ttf", Family::Sans, true, true),
+            ("Times New Roman.ttf", Family::Serif, false, false),
+            ("Times New Roman Bold.ttf", Family::Serif, true, false),
+            ("Times New Roman Italic.ttf", Family::Serif, false, true),
+            ("Times New Roman Bold Italic.ttf", Family::Serif, true, true),
+            ("Courier New.ttf", Family::Mono, false, false),
         ];
         let index = font_index(dir);
         let path = |file: &str| index.get(&file.to_ascii_lowercase()).cloned();
@@ -272,7 +301,7 @@ fn font_index(dir: &Path) -> HashMap<String, PathBuf> {
 }
 
 /// Fonts known to cover a writing system, best first: Noto (Linux, the Docker image), then the fonts Windows
-/// ships. Only TrueType outlines can be embedded, so CFF-based files (most .otf) are not listed.
+/// and macOS ship. Only TrueType outlines can be embedded, so CFF-based files (most .otf) are not listed.
 fn script_fonts(script: Script) -> &'static [(&'static str, Family)] {
     use Family::{Sans, Serif};
     match script {
@@ -295,52 +324,64 @@ fn script_fonts(script: Script) -> &'static [(&'static str, Family)] {
             ("NotoSansDevanagari-Regular.ttf", Sans),
             ("Nirmala.ttf", Sans),
             ("mangal.ttf", Sans),
+            ("Arial Unicode.ttf", Sans),
         ],
         Script::Beng => &[
             ("NotoSerifBengali-Regular.ttf", Serif),
             ("NotoSansBengali-Regular.ttf", Sans),
             ("Nirmala.ttf", Sans),
             ("vrinda.ttf", Sans),
+            ("Arial Unicode.ttf", Sans),
         ],
         Script::Guru => &[
             ("NotoSansGurmukhi-Regular.ttf", Sans),
             ("Nirmala.ttf", Sans),
             ("raavi.ttf", Sans),
+            ("Arial Unicode.ttf", Sans),
         ],
         Script::Gujr => &[
             ("NotoSansGujarati-Regular.ttf", Sans),
             ("Nirmala.ttf", Sans),
             ("shruti.ttf", Sans),
+            ("Arial Unicode.ttf", Sans),
         ],
         Script::Orya => &[
             ("NotoSansOriya-Regular.ttf", Sans),
             ("Nirmala.ttf", Sans),
             ("kalinga.ttf", Sans),
+            ("NotoSansOriya.ttc", Sans),
+            ("Arial Unicode.ttf", Sans),
         ],
         Script::Taml => &[
             ("NotoSansTamil-Regular.ttf", Sans),
             ("Nirmala.ttf", Sans),
             ("latha.ttf", Sans),
+            ("Arial Unicode.ttf", Sans),
         ],
         Script::Telu => &[
             ("NotoSansTelugu-Regular.ttf", Sans),
             ("Nirmala.ttf", Sans),
             ("gautami.ttf", Sans),
+            ("Arial Unicode.ttf", Sans),
         ],
         Script::Knda => &[
             ("NotoSansKannada-Regular.ttf", Sans),
             ("Nirmala.ttf", Sans),
             ("tunga.ttf", Sans),
+            ("NotoSansKannada.ttc", Sans),
+            ("Arial Unicode.ttf", Sans),
         ],
         Script::Mlym => &[
             ("NotoSansMalayalam-Regular.ttf", Sans),
             ("Nirmala.ttf", Sans),
             ("kartika.ttf", Sans),
+            ("Arial Unicode.ttf", Sans),
         ],
         Script::Sinh => &[
             ("NotoSansSinhala-Regular.ttf", Sans),
             ("Nirmala.ttf", Sans),
             ("iskpota.ttf", Sans),
+            ("Sinhala Sangam MN.ttc", Sans),
         ],
         Script::Thai => &[
             ("NotoSerifThai-Regular.ttf", Serif),
@@ -348,23 +389,45 @@ fn script_fonts(script: Script) -> &'static [(&'static str, Family)] {
             ("LeelawUI.ttf", Sans),
             ("tahoma.ttf", Sans),
         ],
-        Script::Laoo => &[("NotoSansLao-Regular.ttf", Sans), ("LeelawUI.ttf", Sans)],
-        Script::Khmr => &[("NotoSansKhmer-Regular.ttf", Sans), ("LeelawUI.ttf", Sans)],
-        Script::Mymr => &[("NotoSansMyanmar-Regular.ttf", Sans), ("mmrtext.ttf", Sans)],
+        Script::Laoo => &[
+            ("NotoSansLao-Regular.ttf", Sans),
+            ("LeelawUI.ttf", Sans),
+            ("Lao Sangam MN.ttf", Sans),
+            ("Arial Unicode.ttf", Sans),
+        ],
+        Script::Khmr => &[
+            ("NotoSansKhmer-Regular.ttf", Sans),
+            ("LeelawUI.ttf", Sans),
+            ("Khmer Sangam MN.ttf", Sans),
+        ],
+        Script::Mymr => &[
+            ("NotoSansMyanmar-Regular.ttf", Sans),
+            ("mmrtext.ttf", Sans),
+            ("NotoSansMyanmar.ttc", Sans),
+        ],
         Script::Tibt => &[
             ("NotoSerifTibetan-Regular.ttf", Serif),
             ("himalaya.ttf", Serif),
+            ("Kailasa.ttc", Sans),
+            ("Arial Unicode.ttf", Sans),
         ],
-        Script::Ethi => &[("NotoSansEthiopic-Regular.ttf", Sans), ("ebrima.ttf", Sans)],
+        Script::Ethi => &[
+            ("NotoSansEthiopic-Regular.ttf", Sans),
+            ("ebrima.ttf", Sans),
+            ("Kefa.ttc", Sans),
+        ],
         Script::Armn => &[
             ("NotoSerifArmenian-Regular.ttf", Serif),
             ("NotoSansArmenian-Regular.ttf", Sans),
             ("sylfaen.ttf", Serif),
+            ("NotoSansArmenian.ttc", Sans),
+            ("Arial Unicode.ttf", Sans),
         ],
         Script::Geor => &[
             ("NotoSerifGeorgian-Regular.ttf", Serif),
             ("NotoSansGeorgian-Regular.ttf", Sans),
             ("sylfaen.ttf", Serif),
+            ("Arial Unicode.ttf", Sans),
         ],
         Script::Hans => &[
             ("msyh.ttc", Sans),
@@ -372,6 +435,11 @@ fn script_fonts(script: Script) -> &'static [(&'static str, Family)] {
             ("NotoSansSC-Regular.ttf", Sans),
             ("wqy-zenhei.ttc", Sans),
             ("wqy-microhei.ttc", Sans),
+            ("PingFang.ttc", Sans),
+            ("STHeiti Medium.ttc", Sans),
+            ("Songti.ttc", Serif),
+            ("DroidSansFallbackFull.ttf", Sans),
+            ("Arial Unicode.ttf", Sans),
         ],
         Script::Hant => &[
             ("msjh.ttc", Sans),
@@ -379,6 +447,11 @@ fn script_fonts(script: Script) -> &'static [(&'static str, Family)] {
             ("NotoSansTC-Regular.ttf", Sans),
             ("wqy-zenhei.ttc", Sans),
             ("wqy-microhei.ttc", Sans),
+            ("PingFang.ttc", Sans),
+            ("STHeiti Medium.ttc", Sans),
+            ("Songti.ttc", Serif),
+            ("DroidSansFallbackFull.ttf", Sans),
+            ("Arial Unicode.ttf", Sans),
         ],
         Script::Jpan => &[
             ("YuGothR.ttc", Sans),
@@ -387,6 +460,8 @@ fn script_fonts(script: Script) -> &'static [(&'static str, Family)] {
             ("NotoSansJP-Regular.ttf", Sans),
             ("ipagp.ttf", Sans),
             ("wqy-zenhei.ttc", Sans),
+            ("DroidSansFallbackFull.ttf", Sans),
+            ("Arial Unicode.ttf", Sans),
         ],
         Script::Kore => &[
             ("malgun.ttf", Sans),
@@ -394,6 +469,9 @@ fn script_fonts(script: Script) -> &'static [(&'static str, Family)] {
             ("NanumGothic.ttf", Sans),
             ("UnDotum.ttf", Sans),
             ("wqy-zenhei.ttc", Sans),
+            ("AppleSDGothicNeo.ttc", Sans),
+            ("AppleGothic.ttf", Sans),
+            ("Arial Unicode.ttf", Sans),
         ],
     }
 }

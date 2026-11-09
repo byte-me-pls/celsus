@@ -1,5 +1,6 @@
 # Tests for main and pull requests: the PDF library, translation core, desktop store, MCP server and the web server
-# (with its security tests against a real PostgreSQL), every interface language, and the desktop app on Windows.
+# (with its security tests against a real PostgreSQL), every interface language, and the desktop app on Windows
+# and Linux (macOS is built by release.yml).
 # Actions are pinned to commits, not tags.
 name: CI
 
@@ -71,10 +72,15 @@ jobs:
           ! grep -nE '<script>|<script [^>]*>[^<]|style="|[[:space:]]on[a-z]+="' crates/celsus-server/web/index.html
 
   desktop:
-    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
       CARGO_TERM_COLOR: always
+      CELSUS_TEST_FONTS_DIR: ${{ matrix.os == 'ubuntu-24.04' && '/usr/share/fonts' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -84,7 +90,13 @@ jobs:
           toolchain: "1.94"
           components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Libraries the app is built against, and fonts for translated pages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libdbus-1-dev pkg-config fonts-noto-core fonts-wqy-zenhei
       - name: Clippy
         run: cargo clippy --locked -p celsus-desktop --all-targets -- -D warnings
-      - name: Tests (desktop, and writing every script with the Windows fonts)
+      - name: Tests (desktop, and writing every script with the fonts of the system)
         run: cargo test --locked -p celsus-desktop -p celsus-core

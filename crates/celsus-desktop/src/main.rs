@@ -754,16 +754,49 @@ fn cache_clear(app: State<App>) -> Res<()> {
 
 // ---------- MCP connection ----------
 
+/// The MCP server other apps start: the program beside this one.
 fn mcp_command() -> PathBuf {
     let name = if cfg!(windows) {
         "celsus-mcp.exe"
     } else {
         "celsus-mcp"
     };
-    std::env::current_exe()
+    let beside = std::env::current_exe()
         .ok()
         .and_then(|e| e.parent().map(|d| d.join(name)))
-        .unwrap_or_else(|| PathBuf::from(name))
+        .unwrap_or_else(|| PathBuf::from(name));
+    // An AppImage is mounted somewhere else every time it runs, so other apps are given a copy that stays put.
+    if cfg!(target_os = "linux") && std::env::var_os("APPIMAGE").is_some() {
+        static KEPT: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+        let kept = KEPT.get_or_init(|| {
+            let to = celsus_store::data_dir().join("bin").join(name);
+            keep_copy(&beside, &to).ok().map(|()| to)
+        });
+        if let Some(kept) = kept {
+            return kept.clone();
+        }
+    }
+    beside
+}
+
+/// Make `to` a copy of the program `from`, leaving it alone when it already is one. The copy is written beside
+/// `to` and moved into place, so an app running the old one is not disturbed.
+fn keep_copy(from: &Path, to: &Path) -> std::io::Result<()> {
+    let new = std::fs::read(from)?;
+    if std::fs::read(to).is_ok_and(|old| old == new) {
+        return Ok(());
+    }
+    if let Some(dir) = to.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut part = to.as_os_str().to_owned();
+    part.push(".new");
+    let part = PathBuf::from(part);
+    // Copying keeps the permission to run it.
+    std::fs::copy(from, &part)?;
+    std::fs::rename(&part, to).inspect_err(|_| {
+        let _ = std::fs::remove_file(&part);
+    })
 }
 
 #[derive(Serialize)]
@@ -891,4 +924,33 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Celsus");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_kept_server_follows_the_one_beside_the_app() {
+        let dir = std::env::temp_dir().join(format!("celsus-kept-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (from, to) = (dir.join("celsus-mcp"), dir.join("bin").join("celsus-mcp"));
+        std::fs::write(&from, b"first build").unwrap();
+        keep_copy(&from, &to).unwrap();
+        assert_eq!(std::fs::read(&to).unwrap(), b"first build");
+        // Unchanged: the copy is not written again.
+        let written = std::fs::metadata(&to).unwrap().modified().unwrap();
+        keep_copy(&from, &to).unwrap();
+        assert_eq!(std::fs::metadata(&to).unwrap().modified().unwrap(), written);
+        // A newer app brings a newer server.
+        std::fs::write(&from, b"second build").unwrap();
+        keep_copy(&from, &to).unwrap();
+        assert_eq!(std::fs::read(&to).unwrap(), b"second build");
+        assert!(!dir.join("bin").join("celsus-mcp.new").exists());
+        // Nothing to copy: an error, and the copy that is there stays.
+        std::fs::remove_file(&from).unwrap();
+        assert!(keep_copy(&from, &to).is_err());
+        assert_eq!(std::fs::read(&to).unwrap(), b"second build");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

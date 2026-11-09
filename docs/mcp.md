@@ -12,7 +12,10 @@ computer (Claude Desktop, Claude Code, OpenAI Codex, Gemini CLI, Antigravity, VS
 LM Studio) and adds Celsus to their settings with one click. Restart the app afterwards.
 
 For an app that is not listed, add this to its MCP settings (most apps use this format), with the path to
-`celsus-mcp.exe` in the folder Celsus is installed in:
+`celsus-mcp.exe` in the folder Celsus is installed in. The same page of the app shows the path to copy. On macOS it
+is `/Applications/Celsus.app/Contents/MacOS/celsus-mcp` (move Celsus to Applications first: an app started from the
+disk image or the Downloads folder has no lasting place), on Linux `/usr/bin/celsus-mcp`. The AppImage keeps a copy
+of the server in `~/.local/share/io.github.byte-me-pls.celsus/bin/` and points other apps at that.
 
 ```json
 {
