@@ -44,6 +44,16 @@ impl FontEmbedder {
         out
     }
 
+    /// Encode one glyph chosen by a shaping engine. `text` is what it stands for (empty for the second and later
+    /// glyphs of a cluster), so the page can still be searched and copied.
+    pub fn encode_glyph(&mut self, gid: u16, text: &str) -> [u8; 2] {
+        let entry = self.used.entry(gid).or_default();
+        if entry.is_empty() && !text.is_empty() {
+            *entry = text.to_owned();
+        }
+        gid.to_be_bytes()
+    }
+
     pub fn is_used(&self) -> bool {
         !self.used.is_empty()
     }
@@ -126,7 +136,8 @@ impl FontEmbedder {
             "/CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n",
             "1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n"
         ));
-        let entries: Vec<(&u16, &String)> = self.used.iter().collect();
+        let entries: Vec<(&u16, &String)> =
+            self.used.iter().filter(|(_, t)| !t.is_empty()).collect();
         for chunk in entries.chunks(100) {
             writeln!(cmap, "{} beginbfchar", chunk.len()).unwrap();
             for (g, text) in chunk {

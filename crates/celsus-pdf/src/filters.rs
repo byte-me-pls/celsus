@@ -41,20 +41,32 @@ pub fn decode(dict: &Dict, data: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// The most one stream may decode to. A few kilobytes of Flate can expand to gigabytes; a real book's streams
+/// stay far below this.
+pub const MAX_DECODED: usize = 256 << 20;
+
+fn too_large() -> Error {
+    Error::Corrupt(format!(
+        "a stream decodes to more than {} MiB",
+        MAX_DECODED >> 20
+    ))
+}
+
 /// zlib inflate. Damaged streams are common in old books: keep whatever decodes.
 pub fn inflate(data: &[u8]) -> Result<Vec<u8>> {
-    match miniz_oxide::inflate::decompress_to_vec_zlib(data) {
+    use miniz_oxide::inflate::{
+        TINFLStatus, decompress_to_vec_with_limit, decompress_to_vec_zlib_with_limit,
+    };
+    match decompress_to_vec_zlib_with_limit(data, MAX_DECODED) {
         Ok(v) => Ok(v),
+        Err(e) if e.status == TINFLStatus::HasMoreOutput => Err(too_large()),
         Err(e) if !e.output.is_empty() => Ok(e.output),
-        Err(_) => miniz_oxide::inflate::decompress_to_vec(data)
-            .or_else(|e| {
-                if e.output.is_empty() {
-                    Err(e)
-                } else {
-                    Ok(e.output)
-                }
-            })
-            .map_err(|_| Error::Corrupt("flate stream".into())),
+        Err(_) => match decompress_to_vec_with_limit(data, MAX_DECODED) {
+            Ok(v) => Ok(v),
+            Err(e) if e.status == TINFLStatus::HasMoreOutput => Err(too_large()),
+            Err(e) if !e.output.is_empty() => Ok(e.output),
+            Err(_) => Err(Error::Corrupt("flate stream".into())),
+        },
     }
 }
 
@@ -239,6 +251,9 @@ fn lzw(data: &[u8], early_change: bool) -> Vec<u8> {
                 257 => return out,
                 _ => {}
             }
+            if out.len() > MAX_DECODED {
+                return out;
+            }
             let entry = if code < table.len() {
                 table[code].clone()
             } else if let Some(p) = &prev {
@@ -284,6 +299,15 @@ mod tests {
             run_length(&[2, b'a', b'b', b'c', 254, b'x', 128]),
             b"abcxxx"
         );
+    }
+
+    #[test]
+    fn decompression_bombs_are_refused() {
+        // 300 MiB of zeros compresses to a few hundred kilobytes.
+        let bomb = miniz_oxide::deflate::compress_to_vec_zlib(&vec![0u8; 300 << 20], 9);
+        assert!(bomb.len() < 1 << 20);
+        assert!(inflate(&bomb).is_err());
+        assert_eq!(inflate(&deflate(b"fine")).unwrap(), b"fine");
     }
 
     #[test]

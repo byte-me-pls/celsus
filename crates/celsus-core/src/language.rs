@@ -26,7 +26,10 @@ impl Language {
 
     /// Whether the language is written right to left.
     pub fn is_rtl(&self) -> bool {
-        const RTL: &[&str] = &["ar", "he", "fa", "ur", "ps", "sd", "ug", "yi", "dv", "ku"];
+        if let Some(info) = crate::languages::info(self) {
+            return info.rtl;
+        }
+        const RTL: &[&str] = &["ar", "he", "fa", "ur", "ps", "sd", "ug", "yi", "dv", "ckb"];
         // An explicit script subtag (ku-Arab, ku-Latn) decides; otherwise the language's usual script does.
         match self.0.split('-').skip(1).find(|s| s.len() == 4) {
             Some(script) => matches!(script, "Arab" | "Hebr" | "Thaa" | "Syrc" | "Nkoo" | "Adlm"),

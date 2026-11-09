@@ -301,9 +301,14 @@ impl<'a> Lexer<'a> {
                     if value == Token::DictEnd {
                         break;
                     }
-                    let value = self.object_from(value, refs, depth + 1)?;
-                    if !value.is_null() {
-                        dict.insert(key, value);
+                    // A broken entry (seen in real files: a key with a space, `/Maker, Inc(...)`) is
+                    // skipped; the rest of the dictionary is still read.
+                    match self.object_from(value, refs, depth + 1) {
+                        Ok(value) if !value.is_null() => {
+                            dict.insert(key, value);
+                        }
+                        Ok(_) | Err(Error::Syntax("unexpected keyword", _)) => {}
+                        Err(e) => return Err(e),
                     }
                 }
                 // Garbage inside a dictionary: skip it rather than fail the whole file.
@@ -389,6 +394,21 @@ mod tests {
         assert_eq!(d.get(&b"Type"[..]), Some(&Object::Name(b"Page".to_vec())));
         assert_eq!(d.get(&b"Count"[..]), Some(&Object::Int(3)));
         assert!(!d.contains_key(&b"Empty"[..]));
+    }
+
+    #[test]
+    fn broken_dictionary_entries_are_skipped() {
+        let d =
+            obj("<< /Author (Eric Evans) /Maker, LLC(http://x) /Title (Domain-Driven Design) >>");
+        let d = d.as_dict().unwrap();
+        assert_eq!(
+            d.get(&b"Title"[..]),
+            Some(&Object::String(b"Domain-Driven Design".to_vec()))
+        );
+        assert_eq!(
+            d.get(&b"Author"[..]),
+            Some(&Object::String(b"Eric Evans".to_vec()))
+        );
     }
 
     #[test]

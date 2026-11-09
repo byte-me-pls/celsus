@@ -1,0 +1,66 @@
+# Tests on every push: the PDF library, translation core, desktop store, MCP server and the web server, the
+# server's security tests against a real PostgreSQL. Actions are pinned to commits, not tags.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: celsus
+          POSTGRES_PASSWORD: celsus-ci-only
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U celsus"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      CARGO_TERM_COLOR: always
+      CELSUS_TEST_DATABASE_URL: postgres://celsus:celsus-ci-only@localhost:5432/postgres
+      CELSUS_TEST_FONTS_DIR: /usr/share/fonts
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Fonts for translated pages, and D-Bus for the system key store
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fonts-noto-core fonts-wqy-zenhei libdbus-1-dev pkg-config
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --locked -p celsus-pdf -p celsus-core -p celsus-store -p celsus-mcp -p celsus-server --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --locked -p celsus-pdf -p celsus-core -p celsus-store -p celsus-mcp -p celsus-server
+
+  web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Scripts parse
+        run: |
+          for f in crates/celsus-server/web/web.js crates/celsus-desktop/ui/app.js crates/celsus-desktop/ui/reader.js; do node --check "$f"; done
+          bash -n install.sh
+      - name: No inline scripts or styles in the web pages
+        run: |
+          ! grep -nE '<script>|<script [^>]*>[^<]|style="|[[:space:]]on[a-z]+="' crates/celsus-server/web/index.html

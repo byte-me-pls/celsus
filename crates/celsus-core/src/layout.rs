@@ -86,6 +86,24 @@ pub struct TextBlock {
     pub align: Align,
     /// Code, formulas, numbers-only text: kept as is, never sent for translation.
     pub protected: bool,
+    /// Its lines are separate entries (a table of contents, a list), worked out against the whole column.
+    #[serde(default)]
+    pub separate_lines: bool,
+}
+
+/// Whether most lines before the last stop well short of `right`, the edge running text would reach in a column
+/// that starts at `left`.
+pub fn lines_end_short(lines: &[TextLine], left: f32, right: f32) -> bool {
+    let n = lines.len();
+    let width = right - left;
+    if n < 2 || width <= 0.0 {
+        return false;
+    }
+    let short = lines[..n - 1]
+        .iter()
+        .filter(|l| l.rect.x1 < right - width * 0.25)
+        .count();
+    short >= 1 && short * 2 >= n - 1
 }
 
 /// Marks a word broken across lines with a hyphen that only exists because of the line break.
@@ -122,8 +140,25 @@ fn ends_with_broken_word(text: &str) -> bool {
 }
 
 impl TextBlock {
+    /// Whether the lines are separate entries rather than running text: a table of contents, a list, verse, a
+    /// title over two lines. Most lines stop well before the right edge, where running text fills the measure.
+    pub fn keeps_lines(&self) -> bool {
+        self.separate_lines
+            || (self.lines.len() >= 2 && lines_end_short(&self.lines, self.rect.x0, self.rect.x1))
+    }
+
+    /// The text to translate. Lines that are separate entries stay on their own lines; running text is joined.
     pub fn source(&self) -> String {
-        join_lines(self.lines.iter().map(|l| l.text.as_str()))
+        if self.keeps_lines() {
+            self.lines
+                .iter()
+                .map(|l| l.text.trim())
+                .filter(|t| !t.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            join_lines(self.lines.iter().map(|l| l.text.as_str()))
+        }
     }
 }
 
@@ -140,6 +175,85 @@ pub struct PageLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn line(x0: f32, x1: f32, y: f32, text: &str) -> TextLine {
+        TextLine {
+            rect: Rect {
+                x0,
+                y0: y,
+                x1,
+                y1: y + 10.0,
+            },
+            text: text.into(),
+            baseline: y + 8.0,
+        }
+    }
+
+    fn block(lines: Vec<TextLine>) -> TextBlock {
+        let x0 = lines.iter().map(|l| l.rect.x0).fold(f32::MAX, f32::min);
+        let x1 = lines.iter().map(|l| l.rect.x1).fold(f32::MIN, f32::max);
+        TextBlock {
+            id: BlockId("b1".into()),
+            rect: Rect {
+                x0,
+                y0: 0.0,
+                x1,
+                y1: 100.0,
+            },
+            lines,
+            style: TextStyle {
+                font_name: None,
+                font_size: 10.0,
+                color: 0,
+                bold: false,
+                italic: false,
+                serif: true,
+                monospace: false,
+            },
+            align: Align::Left,
+            protected: false,
+            separate_lines: false,
+        }
+    }
+
+    #[test]
+    fn tables_of_contents_keep_their_lines_and_paragraphs_do_not() {
+        let toc = block(vec![
+            line(100.0, 260.0, 0.0, "Chapter 4: Isolating the Domain"),
+            line(110.0, 230.0, 12.0, "LAYERED ARCHITECTURE"),
+            line(120.0, 220.0, 24.0, "Relating the Layers"),
+            line(
+                100.0,
+                400.0,
+                36.0,
+                "The Domain Layer Is Where the Model Lives and Breathes",
+            ),
+        ]);
+        assert!(toc.keeps_lines());
+        assert_eq!(toc.source().lines().count(), 4);
+        let paragraph = block(vec![
+            line(100.0, 400.0, 0.0, "Running text fills the measure from one"),
+            line(
+                100.0,
+                398.0,
+                12.0,
+                "edge to the other, line after line, until",
+            ),
+            line(100.0, 210.0, 24.0, "the end."),
+        ]);
+        assert!(!paragraph.keeps_lines());
+        assert!(!paragraph.source().contains('\n'));
+        let title = block(vec![
+            line(100.0, 160.0, 0.0, "Part II"),
+            line(
+                100.0,
+                400.0,
+                14.0,
+                "The Building Blocks of a Model-Driven Design",
+            ),
+        ]);
+        assert!(title.keeps_lines(), "a two-line title keeps its break");
+    }
 
     #[test]
     fn joins_hyphenated_words() {

@@ -4,11 +4,14 @@
 //! rarely reuse them. Instead each block is written with the closest bundled face (serif/sans/mono, bold, italic),
 //! keeping the original size and colour.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use celsus_pdf::ttf::TrueType;
 
 use crate::fit::Measure;
+use crate::languages::Script;
 use crate::layout::TextStyle;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -25,6 +28,8 @@ pub struct FontFace {
     pub family: Family,
     pub bold: bool,
     pub italic: bool,
+    /// Set for a font loaded for one writing system (Arabic, Devanagari, Chinese...); `None` for the general faces.
+    pub script: Option<Script>,
     ascent: f32,
     descent: f32,
 }
@@ -47,20 +52,25 @@ impl FontFace {
     ) -> Result<Self, FontError> {
         let name = name.into();
         let font = TrueType::parse(data).map_err(|e| FontError::Parse(format!("{name}: {e}")))?;
+        Ok(Self::from_font(name, font, family, bold, italic))
+    }
+
+    fn from_font(name: String, font: TrueType, family: Family, bold: bool, italic: bool) -> Self {
         let upem = f32::from(font.units_per_em);
         let (ascent, descent) = (
             f32::from(font.ascender) / upem,
             -f32::from(font.descender) / upem,
         );
-        Ok(Self {
+        Self {
             name,
             font,
             family,
             bold,
             italic,
+            script: None,
             ascent,
             descent,
-        })
+        }
     }
 
     pub fn from_file(
@@ -119,7 +129,32 @@ impl FontSet {
         self.faces.is_empty()
     }
 
-    /// Index of the face closest to `style`: family first, then weight, then slant.
+    /// The fonts to draw a block with, in order of preference: the general face closest to its style, the faces
+    /// for `script`, then everything else.
+    pub fn chain_for(&self, style: &TextStyle, script: Option<Script>) -> Vec<usize> {
+        let for_script = (0..self.faces.len())
+            .filter(|&i| script.is_some() && self.faces[i].script == script)
+            .collect::<Vec<_>>();
+        // Chinese, Japanese and Korean fonts carry their own digits and Latin letters, designed to sit with the
+        // ideographs; drawing those with a Western face in between looks patched. Other scripts mix well.
+        let cjk = matches!(
+            script,
+            Some(Script::Hans | Script::Hant | Script::Jpan | Script::Kore)
+        );
+        let mut chain: Vec<usize> = Vec::new();
+        if cjk {
+            chain.extend(&for_script);
+        }
+        chain.extend(self.best_for(style));
+        chain.extend(for_script);
+        chain.extend(0..self.faces.len());
+        let mut seen = std::collections::HashSet::new();
+        chain.retain(|i| seen.insert(*i));
+        chain
+    }
+
+    /// Index of the face closest to `style`: family first, then weight, then slant. General faces are preferred
+    /// over fonts made for one writing system.
     pub fn best_for(&self, style: &TextStyle) -> Option<usize> {
         let want = if style.monospace {
             Family::Mono
@@ -128,9 +163,11 @@ impl FontSet {
         } else {
             Family::Sans
         };
+        let general = self.faces.iter().any(|f| f.script.is_none());
         self.faces
             .iter()
             .enumerate()
+            .filter(|(_, f)| !general || f.script.is_none())
             .max_by_key(|(_, f)| {
                 let family = match (f.family == want, f.family) {
                     (true, _) => 4,
@@ -142,10 +179,20 @@ impl FontSet {
             .map(|(i, _)| i)
     }
 
-    /// Load a set from a directory using the common file names of the Noto, DejaVu and Liberation families,
+    /// Load the general faces from a directory (and its subfolders) using the common file names of the Noto family,
     /// falling back to the standard Windows fonts. Missing faces are skipped.
     pub fn discover(dir: &Path) -> Self {
-        const CANDIDATES: &[(&str, Family, bool, bool)] = &[
+        Self::discover_for(dir, None)
+    }
+
+    /// The general faces plus the fonts for the writing system of `lang`.
+    pub fn for_language(dir: &Path, lang: &crate::Language) -> Self {
+        Self::discover_for(dir, crate::languages::info(lang).map(|i| i.script))
+    }
+
+    /// The general faces plus the fonts for one writing system, for translating into a language that uses it.
+    pub fn discover_for(dir: &Path, script: Option<Script>) -> Self {
+        const GENERAL: &[(&str, Family, bool, bool)] = &[
             ("NotoSans-Regular.ttf", Family::Sans, false, false),
             ("NotoSans-Bold.ttf", Family::Sans, true, false),
             ("NotoSans-Italic.ttf", Family::Sans, false, true),
@@ -165,12 +212,188 @@ impl FontSet {
             ("timesbi.ttf", Family::Serif, true, true),
             ("cour.ttf", Family::Mono, false, false),
         ];
-        let faces = CANDIDATES
+        let index = font_index(dir);
+        let path = |file: &str| index.get(&file.to_ascii_lowercase()).cloned();
+        let mut faces: Vec<FontFace> = GENERAL
             .iter()
             .filter_map(|(file, family, bold, italic)| {
-                FontFace::from_file(&dir.join(file), *family, *bold, *italic).ok()
+                FontFace::from_file(&path(file)?, *family, *bold, *italic).ok()
             })
             .collect();
+        if let Some(script) = script {
+            let mut loaded = 0;
+            for (file, family) in script_fonts(script) {
+                if loaded == 2 {
+                    break;
+                }
+                let Some(p) = path(file) else { continue };
+                let Ok(data) = std::fs::read(&p) else {
+                    continue;
+                };
+                // A collection's first font is its regular face (Microsoft YaHei, Yu Gothic, SimSun...).
+                let Ok(font) = TrueType::parse_shared(Arc::new(data), 0) else {
+                    continue;
+                };
+                let mut face =
+                    FontFace::from_font(p.display().to_string(), font, *family, false, false);
+                face.script = Some(script);
+                faces.push(face);
+                loaded += 1;
+            }
+        }
         Self { faces }
+    }
+}
+
+/// Font files under `dir` by lower-case file name, looking a few folders deep (Linux keeps fonts in
+/// `truetype/noto/`, `truetype/wqy/`...). The first file of a name wins.
+fn font_index(dir: &Path) -> HashMap<String, PathBuf> {
+    let mut out = HashMap::new();
+    let mut stack = vec![(dir.to_path_buf(), 0)];
+    while let Some((d, depth)) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if depth < 4 {
+                    stack.push((p, depth + 1));
+                }
+            } else if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                let lower = name.to_ascii_lowercase();
+                if lower.ends_with(".ttf") || lower.ends_with(".ttc") {
+                    out.entry(lower).or_insert(p);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Fonts known to cover a writing system, best first: Noto (Linux, the Docker image), then the fonts Windows
+/// ships. Only TrueType outlines can be embedded, so CFF-based files (most .otf) are not listed.
+fn script_fonts(script: Script) -> &'static [(&'static str, Family)] {
+    use Family::{Sans, Serif};
+    match script {
+        Script::Latn | Script::Cyrl | Script::Grek => &[],
+        Script::Arab => &[
+            ("NotoNaskhArabic-Regular.ttf", Serif),
+            ("NotoSansArabic-Regular.ttf", Sans),
+            ("segoeui.ttf", Sans),
+            ("tahoma.ttf", Sans),
+        ],
+        Script::Hebr => &[
+            ("NotoSerifHebrew-Regular.ttf", Serif),
+            ("NotoSansHebrew-Regular.ttf", Sans),
+            ("segoeui.ttf", Sans),
+            ("tahoma.ttf", Sans),
+        ],
+        Script::Thaa => &[("NotoSansThaana-Regular.ttf", Sans), ("mvboli.ttf", Sans)],
+        Script::Deva => &[
+            ("NotoSerifDevanagari-Regular.ttf", Serif),
+            ("NotoSansDevanagari-Regular.ttf", Sans),
+            ("Nirmala.ttf", Sans),
+            ("mangal.ttf", Sans),
+        ],
+        Script::Beng => &[
+            ("NotoSerifBengali-Regular.ttf", Serif),
+            ("NotoSansBengali-Regular.ttf", Sans),
+            ("Nirmala.ttf", Sans),
+            ("vrinda.ttf", Sans),
+        ],
+        Script::Guru => &[
+            ("NotoSansGurmukhi-Regular.ttf", Sans),
+            ("Nirmala.ttf", Sans),
+            ("raavi.ttf", Sans),
+        ],
+        Script::Gujr => &[
+            ("NotoSansGujarati-Regular.ttf", Sans),
+            ("Nirmala.ttf", Sans),
+            ("shruti.ttf", Sans),
+        ],
+        Script::Orya => &[
+            ("NotoSansOriya-Regular.ttf", Sans),
+            ("Nirmala.ttf", Sans),
+            ("kalinga.ttf", Sans),
+        ],
+        Script::Taml => &[
+            ("NotoSansTamil-Regular.ttf", Sans),
+            ("Nirmala.ttf", Sans),
+            ("latha.ttf", Sans),
+        ],
+        Script::Telu => &[
+            ("NotoSansTelugu-Regular.ttf", Sans),
+            ("Nirmala.ttf", Sans),
+            ("gautami.ttf", Sans),
+        ],
+        Script::Knda => &[
+            ("NotoSansKannada-Regular.ttf", Sans),
+            ("Nirmala.ttf", Sans),
+            ("tunga.ttf", Sans),
+        ],
+        Script::Mlym => &[
+            ("NotoSansMalayalam-Regular.ttf", Sans),
+            ("Nirmala.ttf", Sans),
+            ("kartika.ttf", Sans),
+        ],
+        Script::Sinh => &[
+            ("NotoSansSinhala-Regular.ttf", Sans),
+            ("Nirmala.ttf", Sans),
+            ("iskpota.ttf", Sans),
+        ],
+        Script::Thai => &[
+            ("NotoSerifThai-Regular.ttf", Serif),
+            ("NotoSansThai-Regular.ttf", Sans),
+            ("LeelawUI.ttf", Sans),
+            ("tahoma.ttf", Sans),
+        ],
+        Script::Laoo => &[("NotoSansLao-Regular.ttf", Sans), ("LeelawUI.ttf", Sans)],
+        Script::Khmr => &[("NotoSansKhmer-Regular.ttf", Sans), ("LeelawUI.ttf", Sans)],
+        Script::Mymr => &[("NotoSansMyanmar-Regular.ttf", Sans), ("mmrtext.ttf", Sans)],
+        Script::Tibt => &[
+            ("NotoSerifTibetan-Regular.ttf", Serif),
+            ("himalaya.ttf", Serif),
+        ],
+        Script::Ethi => &[("NotoSansEthiopic-Regular.ttf", Sans), ("ebrima.ttf", Sans)],
+        Script::Armn => &[
+            ("NotoSerifArmenian-Regular.ttf", Serif),
+            ("NotoSansArmenian-Regular.ttf", Sans),
+            ("sylfaen.ttf", Serif),
+        ],
+        Script::Geor => &[
+            ("NotoSerifGeorgian-Regular.ttf", Serif),
+            ("NotoSansGeorgian-Regular.ttf", Sans),
+            ("sylfaen.ttf", Serif),
+        ],
+        Script::Hans => &[
+            ("msyh.ttc", Sans),
+            ("simsun.ttc", Serif),
+            ("NotoSansSC-Regular.ttf", Sans),
+            ("wqy-zenhei.ttc", Sans),
+            ("wqy-microhei.ttc", Sans),
+        ],
+        Script::Hant => &[
+            ("msjh.ttc", Sans),
+            ("mingliu.ttc", Serif),
+            ("NotoSansTC-Regular.ttf", Sans),
+            ("wqy-zenhei.ttc", Sans),
+            ("wqy-microhei.ttc", Sans),
+        ],
+        Script::Jpan => &[
+            ("YuGothR.ttc", Sans),
+            ("meiryo.ttc", Sans),
+            ("msgothic.ttc", Sans),
+            ("NotoSansJP-Regular.ttf", Sans),
+            ("ipagp.ttf", Sans),
+            ("wqy-zenhei.ttc", Sans),
+        ],
+        Script::Kore => &[
+            ("malgun.ttf", Sans),
+            ("NotoSansKR-Regular.ttf", Sans),
+            ("NanumGothic.ttf", Sans),
+            ("UnDotum.ttf", Sans),
+            ("wqy-zenhei.ttc", Sans),
+        ],
     }
 }

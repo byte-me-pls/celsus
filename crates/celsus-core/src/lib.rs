@@ -2,12 +2,18 @@
 //!
 //! Both the server and the desktop app link this crate directly.
 
+pub mod base64;
 pub mod extract;
 pub mod fit;
 pub mod fonts;
 pub mod language;
+pub mod languages;
 pub mod layout;
+pub mod metadata;
+pub mod pipeline;
+pub mod provider;
 pub mod render;
+pub mod shape;
 pub mod translate;
 
 pub use language::Language;

@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="tr" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Celsus</title>
+  <script>
+    try { const t = localStorage.getItem("celsus-theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch {}
+  </script>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="titlebar" data-tauri-drag-region>
+    <div class="titlebar-brand" data-tauri-drag-region>
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-name" data-tauri-drag-region>Celsus</span>
+    </div>
+    <div class="titlebar-crumbs" id="crumbs" data-tauri-drag-region></div>
+    <div class="window-dots" role="group" aria-label="Window">
+      <button class="dot dot-min" id="win-min" data-i18n-title="winMin">
+        <svg viewBox="0 0 12 12"><path d="M3 6h6"/></svg>
+      </button>
+      <button class="dot dot-max" id="win-max" data-i18n-title="winMax">
+        <svg viewBox="0 0 12 12" class="i-max"><path d="M4 8l4-4M5 4h3v3"/></svg>
+        <svg viewBox="0 0 12 12" class="i-restore"><path d="M8 4L4 8M7 8H4V5"/></svg>
+      </button>
+      <button class="dot dot-close" id="win-close" data-i18n-title="winClose">
+        <svg viewBox="0 0 12 12"><path d="M4 4l4 4M8 4l-4 4"/></svg>
+      </button>
+    </div>
+  </header>
+  <div class="shell">
+    <aside class="sidebar">
+      <p class="sidebar-tagline" data-i18n="tagline"></p>
+      <nav id="nav">
+        <button class="nav-link" data-go="library">
+          <svg viewBox="0 0 24 24"><path d="M4 19.5V5a2 2 0 0 1 2-2h4v18H6a2 2 0 0 1-2-1.5z"/><path d="M10 3h4v18h-4"/><path d="M14 4.5l3.8-1 3.4 16.5-3.8.9z"/></svg>
+          <span data-i18n="navLibrary"></span><em id="count-books"></em>
+        </button>
+        <button class="nav-link" data-go="jobs">
+          <svg viewBox="0 0 24 24"><path d="M4 5h9M8.5 3v2M6 5c.6 3.6 2.8 6.5 6 8"/><path d="M11 5c-.6 3.4-2.9 6.4-7 8.5"/><path d="M13 21l4-10 4 10M14.5 17.5h5"/></svg>
+          <span data-i18n="navJobs"></span><em id="count-jobs"></em>
+        </button>
+        <button class="nav-link" data-go="glossary" disabled>
+          <svg viewBox="0 0 24 24"><path d="M4 4h12a4 4 0 0 1 4 4v12H8a4 4 0 0 1-4-4z"/><path d="M8 9h8M8 13h6"/></svg>
+          <span data-i18n="navGlossary"></span><em class="soon" data-i18n="soon"></em>
+        </button>
+        <button class="nav-link" data-go="settings">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+          <span data-i18n="navSettings"></span>
+        </button>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="theme-switch" role="group">
+          <button data-theme-choice="dark" data-i18n="dark"></button>
+          <button data-theme-choice="light" data-i18n="light"></button>
+        </div>
+        <button class="profile-card" data-go="profile">
+          <span class="avatar" id="avatar"></span>
+          <span class="profile-text"><b id="profile-name"></b><small id="profile-model"></small></span>
+        </button>
+      </div>
+    </aside>
+    <main id="main"></main>
+  </div>
+  <datalist id="languages"></datalist>
+  <div id="toast" class="toast" hidden></div>
+  <div id="drop-overlay" class="drop-overlay" hidden><span data-i18n="dropHere"></span></div>
+  <script src="i18n/core.js"></script>
+  <script src="i18n/en.js"></script>
+  <script src="i18n/tr.js"></script>
+  <script src="i18n/de.js"></script>
+  <script src="i18n/fr.js"></script>
+  <script src="i18n/es.js"></script>
+  <script src="i18n/it.js"></script>
+  <script src="i18n/pt.js"></script>
+  <script src="i18n/nl.js"></script>
+  <script src="i18n/pl.js"></script>
+  <script src="i18n/ru.js"></script>
+  <script src="i18n/uk.js"></script>
+  <script src="i18n/ar.js"></script>
+  <script src="i18n/hi.js"></script>
+  <script src="i18n/id.js"></script>
+  <script src="i18n/zh.js"></script>
+  <script src="i18n/ja.js"></script>
+  <script src="i18n/ko.js"></script>
+  <script src="app.js"></script>
+  <script src="reader.js"></script>
+</body>
+</html>

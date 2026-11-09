@@ -360,8 +360,10 @@ pub fn extract_page(doc: &Document, page: &Page, number: u32) -> celsus_pdf::Res
             style,
             align,
             protected,
+            separate_lines: false,
         });
     }
+    mark_separate_lines(&mut blocks);
 
     // Rotated runs: one protected block each, so they are never touched.
     for &ri in &rotated_runs {
@@ -401,6 +403,7 @@ pub fn extract_page(doc: &Document, page: &Page, number: u32) -> celsus_pdf::Res
             style: run_style(&content, ri, run.size),
             align: Align::Left,
             protected: true,
+            separate_lines: false,
         });
     }
 
@@ -449,6 +452,8 @@ fn find_gutters(glyphs: &[G], rows: &[Vec<usize>]) -> std::collections::HashSet<
         x0: f32,
         x1: f32,
         after: usize,
+        /// Wider than a word space can be; narrower gaps only count before a column of page numbers.
+        wide: bool,
     }
     let mut gaps = Vec::new();
     let mut edges = Vec::new();
@@ -461,14 +466,19 @@ fn find_gutters(glyphs: &[G], rows: &[Vec<usize>]) -> std::collections::HashSet<
             }
             if let Some(p) = prev {
                 let gap = g.rect.x0 - p.rect.x1;
-                if gap > p.size.max(g.size) * 0.6 {
+                let size = p.size.max(g.size);
+                if gap > size * 0.3 {
+                    let wide = gap > size * 0.6;
                     gaps.push(Gap {
                         row: ri,
                         x0: p.rect.x1,
                         x1: g.rect.x0,
                         after: i,
+                        wide,
                     });
-                    edges.push(p.rect.x1);
+                    if wide {
+                        edges.push(p.rect.x1);
+                    }
                 }
             }
             prev = Some(g);
@@ -477,11 +487,52 @@ fn find_gutters(glyphs: &[G], rows: &[Vec<usize>]) -> std::collections::HashSet<
             edges.push(p.rect.x1);
         }
     }
+    // A column of page numbers (a table of contents, an index): a row ends in a run of digits or roman numerals,
+    // set apart from what comes before, and its right edge lines up with such runs on at least two other rows. A
+    // long entry can come close to its number, so the gap may be narrow (and is often a positioning move, not a
+    // space character); it still separates two columns.
+    let is_numeral = |t: &str| {
+        !t.is_empty()
+            && (t.chars().all(|c| c.is_ascii_digit()) || t.chars().all(|c| "ivxlcdm".contains(c)))
+    };
+    // (row, first glyph of the trailing number, its right edge)
+    let mut trailing: Vec<(usize, usize, f32)> = Vec::new();
+    for (ri, row) in rows.iter().enumerate() {
+        let ink: Vec<usize> = row.iter().copied().filter(|&i| !glyphs[i].space).collect();
+        let Some(&last) = ink.last() else { continue };
+        let mut k = ink.len();
+        while k > 0 && is_numeral(glyphs[ink[k - 1]].text.trim()) {
+            k -= 1;
+        }
+        if k == ink.len() || k == 0 {
+            continue;
+        }
+        let text: String = ink[k..].iter().map(|&i| glyphs[i].text.as_str()).collect();
+        let (before, first) = (&glyphs[ink[k - 1]], &glyphs[ink[k]]);
+        if is_numeral(&text) && first.rect.x0 - before.rect.x1 > before.size.max(first.size) * 0.3 {
+            trailing.push((ri, ink[k], glyphs[last].rect.x1));
+        }
+    }
     let mut out = std::collections::HashSet::new();
+    for &(ri, first, right) in &trailing {
+        if trailing
+            .iter()
+            .filter(|t| (t.2 - right).abs() < 1.5)
+            .count()
+            >= 3
+        {
+            out.insert((ri, first));
+        }
+    }
     for gap in &gaps {
+        if !gap.wide {
+            continue;
+        }
         let shared_edge = edges.iter().filter(|e| (*e - gap.x0).abs() < 1.0).count() >= 3;
         let partner = gaps.iter().any(|o| {
-            o.row != gap.row && ((o.x0 - gap.x0).abs() < 1.0 || (o.x1 - gap.x1).abs() < 1.0)
+            o.wide
+                && o.row != gap.row
+                && ((o.x0 - gap.x0).abs() < 1.0 || (o.x1 - gap.x1).abs() < 1.0)
         });
         if shared_edge && partner {
             out.insert((gap.row, gap.after));
@@ -620,10 +671,12 @@ fn detect_align(lines: &[TextLine], block: &Rect, size: f32) -> Align {
     }
     let tol = (size * 0.25).max(1.0);
     let body = &lines[..lines.len() - 1];
+    // The lines after the first share a left edge (the first may be indented, or hang out to the left).
+    let rest_left = lines[1].rect.x0;
     let lefts = lines
         .iter()
         .skip(1)
-        .all(|l| (l.rect.x0 - block.x0).abs() < tol);
+        .all(|l| (l.rect.x0 - rest_left).abs() < tol);
     let rights = body.iter().all(|l| (l.rect.x1 - block.x1).abs() < tol);
     let centers = lines
         .iter()
@@ -645,9 +698,101 @@ fn detect_align(lines: &[TextLine], block: &Rect, size: f32) -> Align {
     }
 }
 
+/// Find blocks whose lines are separate entries. A line is compared with the right edge of its column (the
+/// widest text block it shares horizontal space with), not of its own block: two table-of-contents entries grouped
+/// into one block have a "longest" line that still stops far short of where running text would end.
+fn mark_separate_lines(blocks: &mut [TextBlock]) {
+    let text: Vec<(f32, f32)> = blocks
+        .iter()
+        .filter(|b| !b.protected)
+        .map(|b| (b.rect.x0, b.rect.x1))
+        .collect();
+    for b in blocks
+        .iter_mut()
+        .filter(|b| !b.protected && b.lines.len() >= 2)
+    {
+        let (x0, x1) = (b.rect.x0, b.rect.x1);
+        let column = text
+            .iter()
+            .filter(|(a0, a1)| *a0 < x1 && *a1 > x0)
+            .fold((x0, x1), |(l, r), (a0, a1)| (l.min(*a0), r.max(*a1)));
+        b.separate_lines = crate::layout::lines_end_short(&b.lines, column.0, column.1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::looks_like_code;
+    use super::*;
+
+    /// One row of text starting at `x`, one 5pt-wide glyph per character, then `number` with its right edge at
+    /// `number_right`.
+    fn row_glyphs(
+        glyphs: &mut Vec<G>,
+        y: f32,
+        text: &str,
+        number: &str,
+        number_right: f32,
+    ) -> Vec<usize> {
+        let mut row = Vec::new();
+        let mut push = |glyphs: &mut Vec<G>, c: char, x0: f32| {
+            row.push(glyphs.len());
+            let n = glyphs.len();
+            glyphs.push(G {
+                text: c.to_string(),
+                rect: Rect {
+                    x0,
+                    y0: y,
+                    x1: x0 + 5.0,
+                    y1: y + 10.0,
+                },
+                baseline: y + 8.0,
+                size: 10.0,
+                at: GlyphRef { run: 0, glyph: n },
+                space: c == ' ',
+            });
+        };
+        for (k, c) in text.chars().enumerate() {
+            push(glyphs, c, 5.0 * k as f32);
+        }
+        let start = number_right - 5.0 * number.chars().count() as f32;
+        for (k, c) in number.chars().enumerate() {
+            push(glyphs, c, start + 5.0 * k as f32);
+        }
+        row
+    }
+
+    #[test]
+    fn page_number_columns_split_even_when_the_gap_is_narrow() {
+        let mut g = Vec::new();
+        let rows = vec![
+            row_glyphs(&mut g, 0.0, "Short entry", "331", 300.0),
+            row_glyphs(&mut g, 14.0, "Another entry", "335", 300.0),
+            // 56 characters end at 280 and the number starts at 285: half an em, narrower than a column gap.
+            row_glyphs(
+                &mut g,
+                28.0,
+                "A very long entry that nearly reaches its number columnX",
+                "366",
+                300.0,
+            ),
+            row_glyphs(&mut g, 42.0, "Fourth", "339", 300.0),
+            // A word ending in a letter that is also a roman numeral is not a page number.
+            row_glyphs(&mut g, 56.0, "Mimari", "", 300.0),
+        ];
+        let split = find_gutters(&g, &rows);
+        let first_number_glyph =
+            |r: usize| *rows[r].iter().find(|&&i| g[i].rect.x0 >= 284.0).unwrap();
+        assert!(split.contains(&(0, first_number_glyph(0))));
+        assert!(
+            split.contains(&(2, first_number_glyph(2))),
+            "the long entry is cut from its number"
+        );
+        assert!(split.contains(&(3, first_number_glyph(3))));
+        assert!(
+            !split.iter().any(|(r, _)| *r == 4),
+            "no split inside a word"
+        );
+    }
 
     #[test]
     fn code_tokens() {

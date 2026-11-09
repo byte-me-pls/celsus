@@ -1,7 +1,7 @@
 //! Write translations into a PDF without any model, to try the writer:
 //!
 //!     cargo run --release -p celsus-core --example translate_pdf -- in.pdf out.pdf [--pages 1-3] [--map map.json]
-//!         [--fonts C:\Windows\Fonts] [--rtl] [--grow PERCENT]
+//!         [--fonts C:\Windows\Fonts] [--to LANGUAGE] [--grow PERCENT]
 //!
 //! Without `--map`, every translatable block gets a stand-in translation with Turkish letters that is about 15%
 //! longer than the source, which is typical for English to Turkish. A map is `{"1": {"b0001": "...", ...}}` keyed
@@ -47,7 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         "/usr/share/fonts/truetype"
     });
-    let mut rtl = false;
+    let mut to: celsus_core::Language = "tr".parse()?;
     let mut grow = 15;
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -59,7 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .map(PathBuf::from)
                     .ok_or("--fonts needs a directory")?
             }
-            "--rtl" => rtl = true,
+            "--to" => to = args.next().ok_or("--to needs a language")?.parse()?,
             "--grow" => grow = args.next().ok_or("--grow needs a percentage")?.parse()?,
             _ if input.is_none() => input = Some(PathBuf::from(a)),
             _ if output.is_none() => output = Some(PathBuf::from(a)),
@@ -70,7 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         input.ok_or("missing in.pdf")?,
         output.ok_or("missing out.pdf")?,
     );
-    let fonts = FontSet::discover(&fonts_dir);
+    let fonts = FontSet::for_language(&fonts_dir, &to);
     if fonts.is_empty() {
         return Err(format!("no usable fonts in {}", fonts_dir.display()).into());
     }
@@ -115,7 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(|b| (b.id.clone(), stand_in(&b.source(), grow)))
                 .collect(),
         };
-        let report = writer.translate_page(page, &extracted, &translations, rtl)?;
+        let report = writer.translate_page(page, &extracted, &translations, &to)?;
         replaced += report.replaced.len();
         kept += report.kept.len();
         for issue in &report.kept {

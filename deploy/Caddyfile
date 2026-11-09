@@ -1,0 +1,10 @@
+# Automatic HTTPS in front of Celsus. Caddy gets and renews the certificate for CELSUS_DOMAIN.
+#
+# Caddy ignores any X-Forwarded-For a client sends and passes the real client address on; Celsus trusts that
+# header only from this proxy (CELSUS_TRUSTED_PROXIES in compose.yml).
+
+{$CELSUS_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy celsus:8080
+	header -Server
+}

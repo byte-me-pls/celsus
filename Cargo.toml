@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/celsus-core", "crates/celsus-pdf", "crates/celsus-server"]
+members = ["crates/celsus-core", "crates/celsus-desktop", "crates/celsus-mcp", "crates/celsus-pdf", "crates/celsus-server", "crates/celsus-store"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,8 +11,21 @@ repository = "https://github.com/byte-me-pls/celsus"
 [workspace.dependencies]
 celsus-core = { path = "crates/celsus-core" }
 celsus-pdf = { path = "crates/celsus-pdf" }
+celsus-store = { path = "crates/celsus-store" }
 
 [profile.release]
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# Password hashing and encryption are slow without optimisation; keep tests fast.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
+[profile.dev.package.chacha20]
+opt-level = 3
+[profile.dev.package.poly1305]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3

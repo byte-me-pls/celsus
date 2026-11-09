@@ -19,6 +19,7 @@ use crate::extract::{ExtractedPage, GlyphRef};
 use crate::fit::{self, FitOptions, Measure};
 use crate::fonts::FontSet;
 use crate::layout::{Align, BlockId, PageLayout, Rect, TextBlock};
+use crate::shape::Shaper;
 
 /// Translations may shrink to 70% of the original size, and never below 6 pt.
 pub const READABLE: FitOptions = FitOptions {
@@ -58,7 +59,8 @@ pub struct BookWriter<'d> {
 
 struct Plan<'b> {
     block: &'b TextBlock,
-    face: usize,
+    /// Fonts for this block, best first (see [`FontSet::chain_for`]).
+    chain: Vec<usize>,
     fitted: fit::Fitted,
 }
 
@@ -89,8 +91,10 @@ impl<'d> BookWriter<'d> {
         page: &Page,
         extracted: &ExtractedPage,
         translations: &BTreeMap<BlockId, String>,
-        rtl: bool,
+        to: &crate::Language,
     ) -> celsus_pdf::Result<PageReport> {
+        let rtl = to.is_rtl();
+        let script = crate::languages::info(to).map(|i| i.script);
         let layout = &extracted.layout;
         let mut report = PageReport {
             page: layout.page,
@@ -106,25 +110,25 @@ impl<'d> BookWriter<'d> {
             if text.is_empty() {
                 continue;
             }
-            let Some(best) = self.fonts.best_for(&block.style) else {
+            let chain = self.fonts.chain_for(&block.style, script);
+            if chain.is_empty() {
                 report.kept.push(Issue::MissingGlyphs {
                     id: id.clone(),
                     chars: text.into(),
                 });
                 continue;
-            };
-            let faces = self.fonts.faces();
-            let Some(face) = std::iter::once(best)
-                .chain(0..faces.len())
-                .find(|&f| faces[f].missing_chars(text).is_empty())
-            else {
-                let chars = faces[best].missing_chars(text).into_iter().collect();
+            }
+            let shaper = Shaper::new(self.fonts, chain.clone(), rtl);
+            // No font for some character: the original stays, and the report says which characters were missing,
+            // rather than printing gaps.
+            let missing = shaper.missing(text);
+            if !missing.is_empty() {
                 report.kept.push(Issue::MissingGlyphs {
                     id: id.clone(),
-                    chars,
+                    chars: missing.into_iter().collect(),
                 });
                 continue;
-            };
+            }
             let leading = (block.lines.len() > 1).then(|| {
                 (block.lines.last().unwrap().baseline - block.lines[0].baseline)
                     / (block.lines.len() - 1) as f32
@@ -136,7 +140,7 @@ impl<'d> BookWriter<'d> {
             let indent = indent_of(block);
             let width =
                 available_width(layout, &extracted.obstacles, block).max(block.style.font_size);
-            let measure: &dyn Measure = &faces[face];
+            let measure: &dyn Measure = &shaper;
             let line_box = (block.lines[0].rect.height() / block.style.font_size).clamp(0.6, 1.5);
             let area = fit::Area {
                 width,
@@ -173,7 +177,7 @@ impl<'d> BookWriter<'d> {
             }) {
                 Some(fitted) => plans.push(Plan {
                     block,
-                    face,
+                    chain,
                     fitted,
                 }),
                 None => report.kept.push(Issue::DoesNotFit { id: id.clone() }),
@@ -201,16 +205,17 @@ impl<'d> BookWriter<'d> {
                 .map_or(&[][..], Vec::as_slice);
             let place = insertion_point(content, refs);
             let mut draw = String::new();
-            self.font_ref(plan.face);
-            used_faces.insert(plan.face);
-            let face = &self.fonts.faces()[plan.face];
-            let embedder = &mut self.embedders.get_mut(&plan.face).unwrap().0;
+            let shaper = Shaper::new(self.fonts, plan.chain.clone(), rtl);
             let b = plan.block;
             let size = plan.fitted.size;
             let align = match b.align {
                 Align::Left | Align::Justify if rtl => Align::Right,
+                // Separate entries are never stretched to the full measure.
+                Align::Justify if b.keeps_lines() => Align::Left,
                 a => a,
             };
+            // Entries of a table of contents keep each line's own indent when the line count is unchanged.
+            let own_indents = !rtl && b.keeps_lines() && plan.fitted.lines.len() == b.lines.len();
             let c = b.style.color;
             let rgb =
                 [(c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF].map(|v| real(f64::from(v) / 255.0));
@@ -227,18 +232,21 @@ impl<'d> BookWriter<'d> {
             // Text state is part of the graphics state the original may have left set.
             writeln!(
                 draw,
-                "{} {} {} rg 0 Tc 0 Tw 100 Tz 0 Ts 0 Tr BT /CelsusF{} {} Tf",
-                rgb[0],
-                rgb[1],
-                rgb[2],
-                plan.face,
-                real(f64::from(size))
+                "{} {} {} rg 0 Tc 0 Tw 100 Tz 0 Ts 0 Tr BT",
+                rgb[0], rgb[1], rgb[2]
             )
             .unwrap();
             let last = plan.fitted.lines.len() - 1;
             for (n, line) in plan.fitted.lines.iter().enumerate() {
-                let w = face.width(line, size);
-                let indent = indent_of(b).of_line(n);
+                let shaped = shaper.shape_line(line, size);
+                let w = shaped.width;
+                let indent = if own_indents {
+                    b.lines[n].rect.x0 - b.rect.x0
+                } else if rtl {
+                    0.0
+                } else {
+                    indent_of(b).of_line(n)
+                };
                 let x = match align {
                     Align::Left | Align::Justify => b.rect.x0 + indent,
                     Align::Center => (b.rect.x0 + b.rect.x1 - w) / 2.0,
@@ -246,33 +254,31 @@ impl<'d> BookWriter<'d> {
                 };
                 let baseline = first + plan.fitted.leading * n as f32;
                 let (px, py) = (cx0 + f64::from(x), cy1 - f64::from(baseline));
-                write!(draw, "1 0 0 1 {} {} Tm ", real(px), real(py)).unwrap();
-                let spaces = line.matches(' ').count();
+                writeln!(draw, "1 0 0 1 {} {} Tm", real(px), real(py)).unwrap();
+                // Justified lines spread the free space over their spaces.
+                let spaces = shaped
+                    .runs
+                    .iter()
+                    .flat_map(|r| &r.glyphs)
+                    .filter(|g| g.text == " ")
+                    .count();
                 let stretch = width - indent - w;
-                if align == Align::Justify
+                let per_space = if align == Align::Justify
                     && n < last
                     && spaces > 0
                     && stretch > 0.0
                     && stretch < width * 0.25
                 {
-                    // Justify with TJ adjustments after each space (Tw does not apply to two-byte codes).
-                    let per_space = -(stretch / spaces as f32) / size * 1000.0;
-                    draw.push('[');
-                    for (i, word) in line.split(' ').enumerate() {
-                        if i > 0 {
-                            write!(
-                                draw,
-                                "<{}> {} ",
-                                hex(&embedder.encode(" ")),
-                                real(f64::from(per_space))
-                            )
-                            .unwrap();
-                        }
-                        write!(draw, "<{}>", hex(&embedder.encode(word))).unwrap();
-                    }
-                    draw.push_str("] TJ\n");
+                    stretch / spaces as f32
                 } else {
-                    writeln!(draw, "<{}> Tj", hex(&embedder.encode(line))).unwrap();
+                    0.0
+                };
+                for run in &shaped.runs {
+                    self.font_ref(run.face);
+                    used_faces.insert(run.face);
+                    let font = &self.fonts.faces()[run.face].font;
+                    let embedder = &mut self.embedders.get_mut(&run.face).unwrap().0;
+                    write_run(&mut draw, run, font, embedder, size, per_space);
                 }
             }
             draw.push_str("ET Q\n");
@@ -367,6 +373,16 @@ impl<'d> BookWriter<'d> {
         Ok(report)
     }
 
+    /// Put a redrawn picture (a JPEG or PNG) in place of the image XObject `id`. The page keeps drawing it in the same
+    /// place and size, so nothing else changes.
+    pub fn replace_image(&mut self, id: ObjRef, jpeg: &[u8]) -> celsus_pdf::Result<()> {
+        let stream = celsus_pdf::image::xobject(jpeg).ok_or_else(|| {
+            celsus_pdf::Error::Corrupt("redrawn picture is not a JPEG or PNG".into())
+        })?;
+        self.saver.set(id, Object::Stream(stream));
+        Ok(())
+    }
+
     /// Embed the fonts and produce the new file.
     pub fn finish(mut self) -> celsus_pdf::Result<Vec<u8>> {
         let mut faces: Vec<usize> = self.embedders.keys().copied().collect();
@@ -429,6 +445,61 @@ fn insertion_point(content: &PageContent, glyphs: &[GlyphRef]) -> Option<(usize,
     Some((ops[et].end, last.ctm))
 }
 
+/// Draw one shaped run: glyph ids in a `TJ` array, with adjustments wherever the shaped position differs from the
+/// font's own advance (kerning, joined Arabic letters, marks), and marks raised or lowered with `Ts`.
+fn write_run(
+    draw: &mut String,
+    run: &crate::shape::Run,
+    font: &celsus_pdf::ttf::TrueType,
+    embedder: &mut FontEmbedder,
+    size: f32,
+    per_space: f32,
+) {
+    let upem = f32::from(font.units_per_em);
+    let thousandths = |pt: f32| -> String { real(f64::from(pt / size * 1000.0)) };
+    writeln!(draw, "/CelsusF{} {} Tf", run.face, real(f64::from(size))).unwrap();
+    let mut open = false;
+    // Movement still owed before the next glyph, in points (positive moves right).
+    let mut owed = 0.0f32;
+    let flush_owed = |draw: &mut String, owed: &mut f32| {
+        if owed.abs() > 0.001 {
+            write!(draw, " {} ", thousandths(-*owed)).unwrap();
+        }
+        *owed = 0.0;
+    };
+    for g in &run.glyphs {
+        let code = hex(&embedder.encode_glyph(g.gid, &g.text));
+        let natural = f32::from(font.advance(g.gid)) * size / upem;
+        owed += g.dx;
+        if g.dy.abs() > 0.001 {
+            // A raised or lowered mark: leave the array, set the rise, draw it, and come back.
+            if open {
+                draw.push_str("] TJ\n");
+                open = false;
+            }
+            if owed.abs() > 0.001 {
+                write!(draw, "[{}] TJ ", thousandths(-owed)).unwrap();
+                owed = 0.0;
+            }
+            writeln!(draw, "{} Ts [<{code}>] TJ 0 Ts", real(f64::from(g.dy))).unwrap();
+        } else {
+            if !open {
+                draw.push('[');
+                open = true;
+            }
+            flush_owed(draw, &mut owed);
+            write!(draw, "<{code}>").unwrap();
+        }
+        let extra = if g.text == " " { per_space } else { 0.0 };
+        // After the glyph the pen sits at dx + natural; it should sit at advance (+ any justification).
+        owed += g.advance + extra - natural - g.dx;
+    }
+    if open {
+        flush_owed(draw, &mut owed);
+        draw.push_str("] TJ\n");
+    }
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02X}")).collect()
 }
@@ -467,9 +538,9 @@ pub fn available_width(layout: &PageLayout, obstacles: &[Rect], block: &TextBloc
     }
     let (right_limit, left_limit) = (right_limit.max(r.x1), left_limit.min(r.x0));
     match block.align {
-        // Multi-line paragraphs keep their measure; single lines may grow into free space.
+        // Justified paragraphs keep their measure; other text may grow into the free space beside it, up to the
+        // next text or drawing (in a table of contents, the page numbers).
         Align::Justify => r.width(),
-        Align::Left if block.lines.len() > 1 => r.width(),
         Align::Left => right_limit - r.x0,
         Align::Right => r.x1 - left_limit,
         Align::Center => r.width() + 2.0 * (r.x0 - left_limit).min(right_limit - r.x1),

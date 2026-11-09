@@ -1,0 +1,18 @@
+# Only source goes into the build. Never secrets, books, build output or downloaded binaries.
+.git
+.github
+.claude
+.env
+.env.*
+!.env.example
+target
+dist
+data
+vendor
+reference
+branding
+docs
+**/*.pdf
+**/*.epub
+crates/celsus-desktop/gen
+crates/celsus-desktop/icons

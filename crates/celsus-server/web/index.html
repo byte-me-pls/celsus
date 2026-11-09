@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Celsus</title>
+  <link rel="icon" href="favicon.png">
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="web.css">
+</head>
+<body>
+  <!-- Signed out: setup, sign-in, two-step code, invitation -->
+  <div id="gate" class="gate" hidden>
+    <div class="gate-card">
+      <div class="gate-brand"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name">Celsus</span></div>
+      <div id="gate-body"></div>
+    </div>
+  </div>
+
+  <!-- Signed in -->
+  <div id="app" hidden>
+    <header class="titlebar web-bar">
+      <div class="titlebar-brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span class="brand-name">Celsus</span>
+      </div>
+      <div class="titlebar-crumbs" id="crumbs"></div>
+    </header>
+    <div class="shell">
+      <aside class="sidebar">
+        <p class="sidebar-tagline" data-i18n="tagline"></p>
+        <nav id="nav">
+          <button class="nav-link" data-go="library">
+            <svg viewBox="0 0 24 24"><path d="M4 19.5V5a2 2 0 0 1 2-2h4v18H6a2 2 0 0 1-2-1.5z"/><path d="M10 3h4v18h-4"/><path d="M14 4.5l3.8-1 3.4 16.5-3.8.9z"/></svg>
+            <span data-i18n="navLibrary"></span><em id="count-books"></em>
+          </button>
+          <button class="nav-link" data-go="jobs">
+            <svg viewBox="0 0 24 24"><path d="M4 5h9M8.5 3v2M6 5c.6 3.6 2.8 6.5 6 8"/><path d="M11 5c-.6 3.4-2.9 6.4-7 8.5"/><path d="M13 21l4-10 4 10M14.5 17.5h5"/></svg>
+            <span data-i18n="navJobs"></span><em id="count-jobs"></em>
+          </button>
+          <button class="nav-link" data-go="account">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/></svg>
+            <span data-i18n="navAccount"></span>
+          </button>
+          <button class="nav-link" data-go="admin" id="nav-admin" hidden>
+            <svg viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z"/><path d="M9 12l2 2 4-4"/></svg>
+            <span data-i18n="navAdmin"></span>
+          </button>
+        </nav>
+        <div class="sidebar-bottom">
+          <div class="theme-switch" role="group">
+            <button data-theme-choice="dark" data-i18n="dark"></button>
+            <button data-theme-choice="light" data-i18n="light"></button>
+          </div>
+          <div class="profile-card web-profile">
+            <span class="avatar" id="avatar"></span>
+            <span class="profile-text"><b id="profile-name"></b><small id="profile-role"></small></span>
+            <button class="rd-icon" id="sign-out" data-i18n-title="signOut">
+              <svg viewBox="0 0 24 24"><path d="M15 4h4a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1h-4M10 17l5-5-5-5M15 12H3"/></svg>
+            </button>
+          </div>
+        </div>
+      </aside>
+      <main id="main"></main>
+    </div>
+  </div>
+
+  <datalist id="languages"></datalist>
+  <div id="toast" class="toast" hidden></div>
+  <div id="drop-overlay" class="drop-overlay" hidden><span data-i18n="dropHere"></span></div>
+  <script src="i18n/core.js"></script>
+  <script src="i18n/en.js"></script>
+  <script src="i18n/tr.js"></script>
+  <script src="i18n/de.js"></script>
+  <script src="i18n/fr.js"></script>
+  <script src="i18n/es.js"></script>
+  <script src="i18n/it.js"></script>
+  <script src="i18n/pt.js"></script>
+  <script src="i18n/nl.js"></script>
+  <script src="i18n/pl.js"></script>
+  <script src="i18n/ru.js"></script>
+  <script src="i18n/uk.js"></script>
+  <script src="i18n/ar.js"></script>
+  <script src="i18n/hi.js"></script>
+  <script src="i18n/id.js"></script>
+  <script src="i18n/zh.js"></script>
+  <script src="i18n/ja.js"></script>
+  <script src="i18n/ko.js"></script>
+  <script src="web.js"></script>
+  <script src="reader.js"></script>
+</body>
+</html>

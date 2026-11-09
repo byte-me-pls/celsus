@@ -38,7 +38,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             b.align,
             b.style.font_size,
             if b.style.bold { " bold" } else { "" },
-            if b.protected { " PROTECTED" } else { "" },
+            if b.protected {
+                " PROTECTED"
+            } else if b.keeps_lines() {
+                " LINES"
+            } else {
+                ""
+            },
             b.lines.len(),
             b.rect.x0,
             b.rect.y0,

@@ -4,12 +4,16 @@
 //! then be used directly as CIDs (`/CIDToGIDMap /Identity`), and the file shrinks to the glyphs actually drawn.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use crate::{Error, Result};
 
 #[derive(Debug, Clone)]
 pub struct TrueType {
-    data: Vec<u8>,
+    /// The whole file, shared: CJK fonts are tens of megabytes and every copy of a face points at the same bytes.
+    data: Arc<Vec<u8>>,
+    /// Which font of a collection (.ttc) this is; 0 for a single font.
+    index: u32,
     tables: BTreeMap<[u8; 4], (usize, usize)>,
     pub units_per_em: u16,
     pub ascender: i16,
@@ -44,7 +48,31 @@ fn bad(what: &str) -> Error {
 
 impl TrueType {
     pub fn parse(data: Vec<u8>) -> Result<Self> {
-        let version = u32_at(&data, 0).ok_or(bad("too short"))?;
+        Self::parse_shared(Arc::new(data), 0)
+    }
+
+    /// How many fonts a file holds: more than one for a collection (.ttc).
+    pub fn count_in(data: &[u8]) -> u32 {
+        if data.starts_with(b"ttcf") {
+            u32_at(data, 8).unwrap_or(0)
+        } else {
+            1
+        }
+    }
+
+    /// Font `index` of a file; collections (.ttc) hold several, a plain font only index 0.
+    pub fn parse_shared(data: Arc<Vec<u8>>, index: u32) -> Result<Self> {
+        let base = if data.starts_with(b"ttcf") {
+            if index >= Self::count_in(&data) {
+                return Err(bad("no such font in the collection"));
+            }
+            u32_at(&data, 12 + index as usize * 4).ok_or(bad("collection header"))? as usize
+        } else if index == 0 {
+            0
+        } else {
+            return Err(bad("not a font collection"));
+        };
+        let version = u32_at(&data, base).ok_or(bad("too short"))?;
         if version == 0x4F54544F {
             return Err(bad(
                 "CFF-based OpenType fonts are not supported; use a TrueType (.ttf) font",
@@ -53,10 +81,10 @@ impl TrueType {
         if version != 0x0001_0000 && version != 0x7472_7565 {
             return Err(bad("not a TrueType font"));
         }
-        let count = u16_at(&data, 4).ok_or(bad("header"))? as usize;
+        let count = u16_at(&data, base + 4).ok_or(bad("header"))? as usize;
         let mut tables = BTreeMap::new();
         for i in 0..count {
-            let rec = 12 + i * 16;
+            let rec = base + 12 + i * 16;
             let tag: [u8; 4] = data
                 .get(rec..rec + 4)
                 .ok_or(bad("table directory"))?
@@ -111,6 +139,7 @@ impl TrueType {
         }
         let mut font = TrueType {
             data,
+            index,
             tables,
             units_per_em,
             ascender,
@@ -126,6 +155,11 @@ impl TrueType {
         };
         font.cmap = font.read_cmap()?;
         Ok(font)
+    }
+
+    /// The file the font came from and its index in it, for a shaping engine that reads OpenType layout tables.
+    pub fn source(&self) -> (&[u8], u32) {
+        (&self.data, self.index)
     }
 
     fn table(&self, tag: &[u8; 4]) -> &[u8] {

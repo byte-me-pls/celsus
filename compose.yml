@@ -1,0 +1,95 @@
+# Celsus server with PostgreSQL, and optionally Caddy for automatic HTTPS.
+#
+#   cp deploy/celsus.env.example .env     # then fill it in (install.sh does this for you)
+#   docker compose up -d
+#
+# With a domain name: set CELSUS_DOMAIN and COMPOSE_PROFILES=https in .env; Caddy gets a certificate and is the
+# only thing reachable from outside. Without one, see "Home network only" in docs/server-setup.md.
+
+name: celsus
+
+services:
+  db:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: celsus
+      POSTGRES_DB: celsus
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - db:/var/lib/postgresql
+    networks: [back]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U celsus -d celsus"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    security_opt: ["no-new-privileges:true"]
+    shm_size: 128mb
+
+  celsus:
+    image: ghcr.io/byte-me-pls/celsus:${CELSUS_VERSION:-latest}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      CELSUS_DATABASE_URL: postgres://celsus:${POSTGRES_PASSWORD}@db:5432/celsus
+      CELSUS_PUBLIC_URL: ${CELSUS_PUBLIC_URL:-}
+      CELSUS_TRUSTED_PROXIES: ${CELSUS_PROXY_IP:-172.30.70.10}
+      CELSUS_INSECURE_HTTP: ${CELSUS_INSECURE_HTTP:-0}
+      CELSUS_MAX_UPLOAD_MB: ${CELSUS_MAX_UPLOAD_MB:-300}
+    volumes:
+      - data:/data
+    ports:
+      # Only this computer by default; install.sh opens it to the home network when there is no domain.
+      - "${CELSUS_BIND:-127.0.0.1}:${CELSUS_PORT:-8080}:8080"
+    networks:
+      front:
+      back:
+    # Lets a model server on this machine (Ollama, LM Studio) be reached as http://host.docker.internal:11434/v1
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 512
+
+  caddy:
+    image: caddy:2
+    profiles: [https]
+    restart: unless-stopped
+    depends_on: [celsus]
+    environment:
+      CELSUS_DOMAIN: ${CELSUS_DOMAIN:-}
+    ports:
+      - "${CELSUS_HTTP_PORT:-80}:80"
+      - "${CELSUS_HTTPS_PORT:-443}:443"
+      - "${CELSUS_HTTPS_PORT:-443}:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      front:
+        # Fixed, so Celsus can trust exactly this proxy's X-Forwarded-For.
+        ipv4_address: ${CELSUS_PROXY_IP:-172.30.70.10}
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+
+networks:
+  front:
+    ipam:
+      config:
+        # Change both if this range is already used on your machine.
+        - subnet: ${CELSUS_SUBNET:-172.30.70.0/24}
+  # The database is on a network with no way out and nothing published.
+  back:
+    internal: true
+
+volumes:
+  db:
+  data:
+  caddy-data:
+  caddy-config:

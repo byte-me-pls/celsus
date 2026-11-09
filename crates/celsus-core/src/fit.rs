@@ -72,40 +72,65 @@ pub fn wrap_indented(
     let mut lines: Vec<String> = Vec::new();
     let width_at = |n: usize| full_width - indent.of_line(n);
     for paragraph in text.split('\n') {
+        // Runs of spaces count as one; then the Unicode line breaking rules (UAX #14) say where a line may end:
+        // after spaces, and between the characters of Chinese and Japanese, never before closing punctuation.
+        let paragraph = paragraph.split_whitespace().collect::<Vec<_>>().join(" ");
         let mut line = String::new();
-        for word in paragraph.split_whitespace() {
-            let candidate = if line.is_empty() {
-                word.to_owned()
-            } else {
-                format!("{line} {word}")
-            };
-            if m.width(&candidate, size) <= width_at(lines.len()) {
+        let mut from = 0;
+        for (to, _) in unicode_linebreak::linebreaks(&paragraph) {
+            let piece = &paragraph[from..to];
+            from = to;
+            let candidate = format!("{line}{piece}");
+            if m.width(candidate.trim_end(), size) <= width_at(lines.len()) {
                 line = candidate;
                 continue;
             }
-            if !line.is_empty() {
-                lines.push(std::mem::take(&mut line));
+            if !line.trim().is_empty() {
+                lines.push(line.trim_end().to_owned());
             }
+            line = String::new();
+            let word = piece.trim_end();
             if m.width(word, size) <= width_at(lines.len()) {
-                line = word.to_owned();
+                line = piece.to_owned();
             } else {
+                // Longer than a line: break between characters, but never just before a combining mark.
                 for ch in word.chars() {
                     let mut next = line.clone();
                     next.push(ch);
-                    if !line.is_empty() && m.width(&next, size) > width_at(lines.len()) {
+                    if !line.is_empty()
+                        && !is_mark(ch)
+                        && m.width(&next, size) > width_at(lines.len())
+                    {
                         lines.push(std::mem::take(&mut line));
                         line.push(ch);
                     } else {
                         line = next;
                     }
                 }
+                if piece.ends_with(' ') {
+                    line.push(' ');
+                }
             }
         }
-        if !line.is_empty() {
-            lines.push(line);
+        if !line.trim().is_empty() {
+            lines.push(line.trim_end().to_owned());
         }
     }
     lines
+}
+
+/// Characters that belong to the one before them (accents, vowel signs) and must not start a line.
+fn is_mark(c: char) -> bool {
+    use unicode_linebreak::{BreakClass, break_property};
+    matches!(
+        break_property(c as u32),
+        BreakClass::CombiningMark | BreakClass::ZeroWidthJoiner
+    ) || matches!(c,
+        '\u{0E31}' | '\u{0E34}'..='\u{0E3A}' | '\u{0E47}'..='\u{0E4E}' // Thai
+        | '\u{0EB1}' | '\u{0EB4}'..='\u{0EBC}' | '\u{0EC8}'..='\u{0ECD}' // Lao
+        | '\u{17B6}'..='\u{17D3}' // Khmer
+        | '\u{102B}'..='\u{103E}' | '\u{1056}'..='\u{1059}' // Myanmar
+    )
 }
 
 /// The space a translation may use.
@@ -144,6 +169,27 @@ pub fn fit(
         .filter(|r| (0.9..=2.5).contains(r))
         .unwrap_or(opts.line_height);
     let floor = (size * opts.min_scale).max(opts.min_size).min(size);
+    // Text given as separate lines (a list, table of contents entries) keeps one line per entry: a smaller size
+    // is tried before any entry is broken.
+    let entries = text.split('\n').filter(|l| !l.trim().is_empty()).count();
+    if entries > 1 {
+        let mut s = size;
+        loop {
+            let lines = wrap_indented(text, width, indent, s, m);
+            let used = s * line_box + s * ratio * (lines.len().saturating_sub(1)) as f32;
+            if lines.len() == entries && used <= height + 0.2 {
+                return Some(Fitted {
+                    size: s,
+                    lines,
+                    leading: s * ratio,
+                });
+            }
+            if s <= floor + f32::EPSILON {
+                break;
+            }
+            s = (s - opts.step).max(floor);
+        }
+    }
     let mut s = size;
     loop {
         let lines = wrap_indented(text, width, indent, s, m);
@@ -208,6 +254,28 @@ mod tests {
             wrap_indented("bir iki üç dört beş", 50.0, indent, 10.0, &Mono),
             vec!["bir iki", "üç dört", "beş"]
         );
+    }
+
+    #[test]
+    fn list_entries_shrink_before_breaking() {
+        // The second entry is 14 chars = 70pt at 10pt in a 60pt box: it shrinks instead of wrapping.
+        let area = Area {
+            width: 60.0,
+            height: 30.0,
+            indent: Indent::default(),
+            line_box: None,
+        };
+        let f = fit(
+            "kısa\nuzun bir giriş",
+            area,
+            10.0,
+            None,
+            &Mono,
+            FitOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(f.lines, vec!["kısa", "uzun bir giriş"]);
+        assert!(f.size < 10.0 && f.size >= 6.2, "size {}", f.size);
     }
 
     #[test]
