@@ -93,7 +93,7 @@ All in `~/celsus/.env`:
 | `CELSUS_SUBNET`, `CELSUS_PROXY_IP` | The proxy network (default `172.30.70.0/24`, Caddy at `.10`); change both if that range is taken |
 
 Building the image yourself (`docker build -t ghcr.io/byte-me-pls/celsus .`) needs no BuildKit. On a Raspberry Pi
-or a busy server, `--build-arg CARGO_BUILD_JOBS=2` keeps memory and CPU use down.
+or a busy server, `--build-arg BUILD_JOBS=2` keeps memory and CPU use down.
 
 After changing `.env`: `docker compose up -d`.
 

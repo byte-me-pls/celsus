@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+Versions are 0.YYMM.N: year and month of the release, then a counter for further releases in that month.
+
+## 0.2611.0 (unreleased)
 
 First release.
 

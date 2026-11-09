@@ -406,7 +406,7 @@ dependencies = [
 
 [[package]]
 name = "celsus-core"
-version = "0.1.0"
+version = "0.2611.0"
 dependencies = [
  "celsus-pdf",
  "pdfium-render",
@@ -422,7 +422,7 @@ dependencies = [
 
 [[package]]
 name = "celsus-desktop"
-version = "0.1.0"
+version = "0.2611.0"
 dependencies = [
  "celsus-core",
  "celsus-pdf",
@@ -437,7 +437,7 @@ dependencies = [
 
 [[package]]
 name = "celsus-mcp"
-version = "0.1.0"
+version = "0.2611.0"
 dependencies = [
  "celsus-core",
  "celsus-pdf",
@@ -448,14 +448,14 @@ dependencies = [
 
 [[package]]
 name = "celsus-pdf"
-version = "0.1.0"
+version = "0.2611.0"
 dependencies = [
  "miniz_oxide 0.9.1",
 ]
 
 [[package]]
 name = "celsus-server"
-version = "0.1.0"
+version = "0.2611.0"
 dependencies = [
  "argon2",
  "axum",
@@ -482,7 +482,7 @@ dependencies = [
 
 [[package]]
 name = "celsus-store"
-version = "0.1.0"
+version = "0.2611.0"
 dependencies = [
  "celsus-core",
  "celsus-pdf",

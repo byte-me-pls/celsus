@@ -297,10 +297,7 @@ impl TrueType {
         }
         let mut out = Vec::new();
         let mut at = 10;
-        loop {
-            let (Some(flags), Some(component)) = (u16_at(g, at), u16_at(g, at + 2)) else {
-                break;
-            };
+        while let (Some(flags), Some(component)) = (u16_at(g, at), u16_at(g, at + 2)) {
             out.push(component);
             at += 4 + if flags & 1 != 0 { 4 } else { 2 };
             at += if flags & 8 != 0 {

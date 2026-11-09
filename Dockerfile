@@ -6,16 +6,16 @@
 ARG RUST_VERSION=1.94
 ARG DEBIAN=trixie
 # Fewer parallel compile jobs use less memory and CPU (a 4 GB Raspberry Pi, a busy server):
-#   --build-arg CARGO_BUILD_JOBS=2
-ARG CARGO_BUILD_JOBS=
+#   --build-arg BUILD_JOBS=2
+ARG BUILD_JOBS=
 
 # ---------- build ----------
 FROM rust:${RUST_VERSION}-${DEBIAN} AS build
-ARG CARGO_BUILD_JOBS
+ARG BUILD_JOBS
 WORKDIR /src
 COPY . .
 # Only the server is built; the desktop crate is in the workspace but never compiled here.
-RUN cargo build --release --locked -p celsus-server ${CARGO_BUILD_JOBS:+--jobs $CARGO_BUILD_JOBS} \
+RUN cargo build --release --locked -p celsus-server ${BUILD_JOBS:+--jobs $BUILD_JOBS} \
     && install -D -m 0755 target/release/celsus-server /out/celsus-server
 
 # ---------- run ----------
