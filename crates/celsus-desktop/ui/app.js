@@ -902,6 +902,9 @@ async function settingsAbout(box) {
       <div class="about"><span class="about-logo"></span><div><h2>Celsus</h2><span class="caption">${T.version} ${esc(version)}</span></div></div>
       <p class="hint" style="font-size:13px">${T.aboutText}</p></section>
     <section class="card"><div class="section-heading"><h2>${T.licenses}</h2></div><dl class="kv">
+      <dt>Celsus</dt><dd>MIT</dd>
+      <dt>pdf.js</dt><dd>Apache-2.0</dd>
+      <dt>rustybuzz</dt><dd>MIT</dd>
       <dt>DM Sans</dt><dd>SIL Open Font License 1.1</dd>
       <dt>Instrument Serif</dt><dd>SIL Open Font License 1.1</dd>
       <dt>Tauri</dt><dd>MIT / Apache-2.0</dd>

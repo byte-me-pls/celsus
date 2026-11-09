@@ -50,7 +50,7 @@ pub fn default_fonts_dir() -> String {
     } else if cfg!(target_os = "macos") {
         "/Library/Fonts".into()
     } else {
-        "/usr/share/fonts/truetype".into()
+        "/usr/share/fonts".into()
     }
 }
 
