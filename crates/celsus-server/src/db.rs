@@ -167,6 +167,11 @@ const MIGRATIONS: &[&str] = &[
         created_at BIGINT NOT NULL
     );
     "#,
+    // When each person was last active. Sessions end when they sign out, so this is kept on the account.
+    r#"
+    ALTER TABLE users ADD COLUMN last_seen BIGINT;
+    UPDATE users u SET last_seen = (SELECT MAX(last_seen) FROM sessions s WHERE s.user_id = u.id);
+    "#,
 ];
 
 pub fn pool(url: &str) -> Result<Pool, String> {

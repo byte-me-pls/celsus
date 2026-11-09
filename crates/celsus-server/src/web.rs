@@ -210,6 +210,10 @@ pub async fn guard(State(state): State<AppState>, mut req: Request, next: Next) 
     }
     if is_api {
         set(h, "cache-control", "no-store");
+    } else if !h.contains_key("cache-control") {
+        // Pages, scripts and styles are checked with the server on every load (a cheap 304 when unchanged), so an
+        // updated server never runs with yesterday's interface.
+        set(h, "cache-control", "no-cache");
     }
     res
 }

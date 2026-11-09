@@ -46,7 +46,8 @@ const state = {
 
 class ApiError extends Error {
   constructor(status, body) {
-    super(body?.message || `HTTP ${status}`);
+    // The server's own message is English; known errors are shown in the interface language.
+    super(T.errors?.[body?.error] || body?.message || `HTTP ${status}`);
     this.status = status;
     this.code = body?.error;
     this.retryAfter = body?.retry_after;
@@ -142,6 +143,8 @@ let reader = null;
 
 function showGate() {
   $("#app").hidden = true;
+  // The previous form (an invitation, say) must not stay usable while the right one is chosen.
+  $("#gate-body").innerHTML = "";
   $("#gate").hidden = false;
   routeGate();
 }
@@ -187,6 +190,8 @@ function gateForm(title, text, fields, submit, onSubmit, extra = "") {
 function signedIn(res) {
   state.me = res.user;
   state.csrf = res.csrf;
+  // The form is gone once signed in, with the password typed into it.
+  $("#gate-body").innerHTML = "";
   if (location.hash.startsWith("#/invite/")) history.replaceState(null, "", location.pathname);
   startApp();
 }
@@ -286,6 +291,8 @@ function go(view, params = {}) {
 }
 
 window.addEventListener("popstate", () => state.me && route(hashToRoute()));
+// Signed out, an invitation link opened in the same tab only changes the address; show its form.
+window.addEventListener("hashchange", () => !state.me && location.hash.startsWith("#/invite/") && routeGate());
 
 function route(r) {
   state.route = r;

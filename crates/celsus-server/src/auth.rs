@@ -200,6 +200,13 @@ pub async fn create_session(
         &[&sha256(token.as_bytes()), &public_id, &user_id, &csrf, &pending, &t, &expires, &client.ip, &client.user_agent],
     )
     .await?;
+    if !pending {
+        db.execute(
+            "UPDATE users SET last_seen = $2 WHERE id = $1",
+            &[&user_id, &t],
+        )
+        .await?;
+    }
     Ok(NewSession { token, csrf })
 }
 
@@ -321,6 +328,11 @@ pub async fn find_session(db: &impl GenericClient, token: &str) -> ApiResult<Opt
         db.execute(
             "UPDATE sessions SET last_seen = $2 WHERE token_hash = $1",
             &[&hash, &t],
+        )
+        .await?;
+        db.execute(
+            "UPDATE users SET last_seen = $2 WHERE id = $1",
+            &[&user.id, &t],
         )
         .await?;
     }

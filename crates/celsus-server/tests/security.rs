@@ -1132,6 +1132,16 @@ async fn responses_carry_security_headers_and_hide_internals() {
         "served over https"
     );
     assert!(h("server").is_empty(), "no server banner");
+    // The interface files are revalidated on every load, so an updated server is never paired with old scripts.
+    for path in ["/", "/web.js", "/i18n/core.js"] {
+        let r = s.get(&anon, path).await;
+        assert_eq!(r.status, StatusCode::OK, "{path}");
+        assert_eq!(
+            r.headers.get("cache-control").unwrap(),
+            "no-cache",
+            "{path}"
+        );
+    }
     // Unknown paths: a plain 404, also with headers.
     let r = s.get(&anon, "/api/../../etc/passwd").await;
     assert_eq!(r.status, StatusCode::NOT_FOUND);
@@ -1180,5 +1190,22 @@ async fn a_member_sees_only_their_own_sessions_and_cannot_end_others() {
         .await;
     assert_eq!(r.status, StatusCode::NOT_FOUND);
     assert_eq!(s.get(&owner, "/api/auth/me").await.status, StatusCode::OK);
+    s.finish().await;
+}
+
+#[tokio::test]
+async fn admins_see_when_members_were_last_active_after_they_sign_out() {
+    let s = Server::new().await;
+    let owner = s.owner().await;
+    let member = s.member(&owner, "reader@example.org", "member").await;
+    let r = s.post(&member, "/api/auth/logout", json!({})).await;
+    assert_eq!(r.status, StatusCode::OK);
+    let r = s.get(&owner, "/api/admin/users").await;
+    let users = r.body["users"].as_array().unwrap();
+    let reader = users
+        .iter()
+        .find(|u| u["email"] == "reader@example.org")
+        .unwrap();
+    assert!(reader["last_seen"].as_i64().is_some(), "{reader}");
     s.finish().await;
 }

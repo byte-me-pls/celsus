@@ -21,7 +21,7 @@ pub async fn users(State(state): State<AppState>, auth: Auth) -> ApiResult<Json<
     let rows = db
         .query(
             "SELECT u.id, u.email, u.name, u.role, u.disabled, u.totp_secret IS NOT NULL, u.created_at,
-                    (SELECT MAX(last_seen) FROM sessions s WHERE s.user_id = u.id)
+                    u.last_seen
              FROM users u ORDER BY u.id",
             &[],
         )

@@ -1,10 +1,13 @@
-# Tests on every push: the PDF library, translation core, desktop store, MCP server and the web server, the
-# server's security tests against a real PostgreSQL. Actions are pinned to commits, not tags.
+# Tests for main and pull requests: the PDF library, translation core, desktop store, MCP server and the web server
+# (with its security tests against a real PostgreSQL), every interface language, and the desktop app on Windows.
+# Actions are pinned to commits, not tags.
 name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
