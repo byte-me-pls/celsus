@@ -23,6 +23,8 @@ case "$host" in
     for target in aarch64-apple-darwin x86_64-apple-darwin; do
       rustup target add "$target"
       cargo build --release --locked -p celsus-mcp --target "$target"
+      # The app is built once for each processor before the two are joined, and each build looks for its own.
+      cp "target/$target/release/celsus-mcp" "$side/celsus-mcp-$target"
     done
     lipo -create -output "$side/celsus-mcp-universal-apple-darwin" \
       target/aarch64-apple-darwin/release/celsus-mcp target/x86_64-apple-darwin/release/celsus-mcp
