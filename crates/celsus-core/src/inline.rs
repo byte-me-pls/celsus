@@ -142,8 +142,11 @@ fn tag_at(text: &str) -> Option<(bool, &str, usize)> {
     let end = rest.bytes().take(6).position(|b| b == b'>')?;
     let name = &rest[..end];
     let word = name.trim_end_matches(|c: char| c.is_ascii_digit());
-    (NAMES.contains(&word) && name.len() - word.len() <= 1)
-        .then_some((closes, name, text.len() - rest.len() + end + 1))
+    (NAMES.contains(&word) && name.len() - word.len() <= 1).then_some((
+        closes,
+        name,
+        text.len() - rest.len() + end + 1,
+    ))
 }
 
 fn parts(text: &str) -> Vec<Part<'_>> {
@@ -328,7 +331,10 @@ mod tests {
             mark(0)
         );
         let tags = tagged(&text, &names);
-        assert_eq!(tags, "See <i>Domain Design</i> and run <code>make all</code> first.");
+        assert_eq!(
+            tags,
+            "See <i>Domain Design</i> and run <code>make all</code> first."
+        );
         assert_eq!(marked(&tags, &names).as_deref(), Some(text.as_str()));
         assert_eq!(without_tags(&tags), strip_marks(&text));
         assert_eq!(super::tags(&tags), ["code", "i"]);
@@ -337,8 +343,18 @@ mod tests {
     #[test]
     fn marks_are_put_in_order() {
         // The space between two italic words is theirs; the one after them is not.
-        let text = format!("{}the {}a {}title {}of {}it", mark(0), mark(1), mark(1), mark(0), mark(0));
-        assert_eq!(tidy(&text), format!("the {}a title{} of it", mark(1), mark(0)));
+        let text = format!(
+            "{}the {}a {}title {}of {}it",
+            mark(0),
+            mark(1),
+            mark(1),
+            mark(0),
+            mark(0)
+        );
+        assert_eq!(
+            tidy(&text),
+            format!("the {}a title{} of it", mark(1), mark(0))
+        );
         // A style does not run over a line break.
         let lines = format!("{}one\ntwo", mark(1));
         assert_eq!(tidy(&lines), format!("{}one{}\ntwo", mark(1), mark(0)));
@@ -355,17 +371,32 @@ mod tests {
         assert!(marked("<code>not of this block</code>", &names).is_none());
         assert!(marked("<i>over\nlines</i>", &names).is_none());
         // Text that only looks like a tag is text.
-        assert_eq!(marked("a <br> and x<y>z", &names).as_deref(), Some("a <br> and x<y>z"));
+        assert_eq!(
+            marked("a <br> and x<y>z", &names).as_deref(),
+            Some("a <br> and x<y>z")
+        );
         assert_eq!(without_tags("if a<b> then <b2>go</b2>"), "if a then go");
     }
 
     #[test]
     fn a_translation_keeps_the_tags_of_its_source() {
         let source = "See <i>Domain Design</i> and <i>Patterns</i>, then run <code>make</code>.";
-        assert!(tags_kept(source, "<code>make</code> komutundan önce <i>Domain Design ve Patterns</i> okunur."));
-        assert!(!tags_kept(source, "Önce Domain Design okunur, sonra <code>make</code>."));
-        assert!(!tags_kept(source, "<i>Domain Design okunur, sonra <code>make</code></i>."));
-        assert!(!tags_kept(source, "<i>Domain Design</i> ve <b>Patterns</b>, sonra <code>make</code>."));
+        assert!(tags_kept(
+            source,
+            "<code>make</code> komutundan önce <i>Domain Design ve Patterns</i> okunur."
+        ));
+        assert!(!tags_kept(
+            source,
+            "Önce Domain Design okunur, sonra <code>make</code>."
+        ));
+        assert!(!tags_kept(
+            source,
+            "<i>Domain Design okunur, sonra <code>make</code></i>."
+        ));
+        assert!(!tags_kept(
+            source,
+            "<i>Domain Design</i> ve <b>Patterns</b>, sonra <code>make</code>."
+        ));
         assert!(tags_kept("no tags here", "burada etiket yok"));
         assert!(!tags_kept("no tags here", "burada <b>etiket</b> yok"));
     }

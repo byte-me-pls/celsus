@@ -1868,7 +1868,9 @@ fn detect_align(lines: &[TextLine], block: &Rect, size: f32) -> Align {
     let flush = lines
         .iter()
         .all(|l| (l.rect.x0 - lines[0].rect.x0).abs() < 0.3);
-    if centers && !hanging && !flush && !(lefts && all_rights) {
+    // Lines that fill the block from edge to edge are centred too, but only by being as wide as it is.
+    let full = lefts && all_rights;
+    if centers && !hanging && !flush && !full {
         Align::Center
     } else if lefts && rights && lines.len() >= 2 {
         Align::Justify

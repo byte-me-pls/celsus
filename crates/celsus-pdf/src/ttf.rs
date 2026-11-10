@@ -97,12 +97,15 @@ fn face_at<R: Read + Seek>(file: &mut R, at: u64, index: u32) -> Option<FaceInfo
     let mut directory = vec![0u8; count.min(256) * 16];
     read_at(file, at + 12, &mut directory)?;
     let table = |tag: &[u8; 4]| {
-        directory.chunks_exact(16).find(|e| &e[..4] == tag).map(|e| {
-            (
-                u64::from(u32::from_be_bytes([e[8], e[9], e[10], e[11]])),
-                u32::from_be_bytes([e[12], e[13], e[14], e[15]]) as usize,
-            )
-        })
+        directory
+            .chunks_exact(16)
+            .find(|e| &e[..4] == tag)
+            .map(|e| {
+                (
+                    u64::from(u32::from_be_bytes([e[8], e[9], e[10], e[11]])),
+                    u32::from_be_bytes([e[12], e[13], e[14], e[15]]) as usize,
+                )
+            })
     };
     let mut info = FaceInfo {
         index,
@@ -637,14 +640,25 @@ mod tests {
             } else {
                 text.encode_utf16().flat_map(u16::to_be_bytes).collect()
             };
-            for v in [platform, 1, language, id, bytes.len() as u16, strings.len() as u16] {
+            for v in [
+                platform,
+                1,
+                language,
+                id,
+                bytes.len() as u16,
+                strings.len() as u16,
+            ] {
                 name.extend(v.to_be_bytes());
             }
             strings.extend(bytes);
         }
         name.extend(strings);
-        let tables: [(&[u8; 4], &[u8]); 4] =
-            [(b"OS/2", os2), (b"glyf", &[]), (b"head", head), (b"name", &name)];
+        let tables: [(&[u8; 4], &[u8]); 4] = [
+            (b"OS/2", os2),
+            (b"glyf", &[]),
+            (b"head", head),
+            (b"name", &name),
+        ];
         let mut out = vec![0, 1, 0, 0, 0, tables.len() as u8, 0, 0, 0, 0, 0, 0];
         let mut at = 12 + 16 * tables.len();
         for (tag, data) in tables {
@@ -684,16 +698,28 @@ mod tests {
         let faces = faces_in(&mut std::io::Cursor::new(&font));
         assert_eq!(faces.len(), 1);
         let face = &faces[0];
-        assert_eq!((face.family.as_str(), face.postscript.as_str()), ("Sample", "Sample-BoldItalic"));
-        assert_eq!((face.weight, face.italic, face.embeddable, face.truetype), (700, true, true, true));
-        assert_eq!((&face.panose[..4], face.ranges[0]), (&[2, 4, 5, 2][..], 0x207));
+        assert_eq!(
+            (face.family.as_str(), face.postscript.as_str()),
+            ("Sample", "Sample-BoldItalic")
+        );
+        assert_eq!(
+            (face.weight, face.italic, face.embeddable, face.truetype),
+            (700, true, true, true)
+        );
+        assert_eq!(
+            (&face.panose[..4], face.ranges[0]),
+            (&[2, 4, 5, 2][..], 0x207)
+        );
         assert_eq!(style_bits(&font), Some((true, true)));
 
         // A licence that keeps the font out of documents.
         os2[8..10].copy_from_slice(&2u16.to_be_bytes());
         let kept = described(&os2, &[(1, 0, 1, "Kept")], &head);
         let faces = faces_in(&mut std::io::Cursor::new(&kept));
-        assert_eq!((faces[0].family.as_str(), faces[0].embeddable), ("Kept", false));
+        assert_eq!(
+            (faces[0].family.as_str(), faces[0].embeddable),
+            ("Kept", false)
+        );
 
         assert!(faces_in(&mut std::io::Cursor::new(b"%PDF-1.7 not a font at all")).is_empty());
         assert!(faces_in(&mut std::io::Cursor::new(&font[..40])).is_empty());
@@ -705,7 +731,10 @@ mod tests {
         let faces = faces_in(&mut std::io::Cursor::new(&data));
         assert_eq!(faces.len(), 1);
         assert!(!faces[0].family.is_empty() && faces[0].truetype && faces[0].embeddable);
-        assert_eq!((faces[0].weight, faces[0].italic, faces[0].panose[0]), (400, false, 2));
+        assert_eq!(
+            (faces[0].weight, faces[0].italic, faces[0].panose[0]),
+            (400, false, 2)
+        );
     }
 
     #[test]

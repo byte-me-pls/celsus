@@ -148,7 +148,10 @@ impl<'d> BookWriter<'d> {
             let mut missing = shaper.missing(&inline::strip_marks(text));
             // Small raised letters are rare in fonts. Written as ordinary letters the text is still all there.
             let plain: String;
-            let text = if missing.iter().any(|c| crate::extract::plain_form(*c).is_some()) {
+            let text = if missing
+                .iter()
+                .any(|c| crate::extract::plain_form(*c).is_some())
+            {
                 plain = text
                     .chars()
                     .map(|c| match crate::extract::plain_form(c) {
@@ -264,13 +267,17 @@ impl<'d> BookWriter<'d> {
                 text: &e.text,
                 measure: shaper,
                 companion: e.companion,
-                initial: e.block.initial.filter(|_| !e.initial.is_empty()).map(|cap| {
-                    let width = shaper.width(&e.initial, cap.size);
-                    crate::layout::Rect {
-                        x1: cap.rect.x0 + width,
-                        ..cap.rect
-                    }
-                }),
+                initial: e
+                    .block
+                    .initial
+                    .filter(|_| !e.initial.is_empty())
+                    .map(|cap| {
+                        let width = shaper.width(&e.initial, cap.size);
+                        crate::layout::Rect {
+                            x1: cap.rect.x0 + width,
+                            ..cap.rect
+                        }
+                    }),
             })
             .collect();
         let placed = place::solve(layout, &extracted.obstacles, &items, rtl);
@@ -541,7 +548,6 @@ impl<'d> BookWriter<'d> {
     }
 }
 
-
 /// A contents entry keeps its row of dots as long as the room allows: the translated title is longer or shorter
 /// than the original one, so the dots between it and the page number are counted again for `width`.
 /// The fonts the pages of a document name in their resources.
@@ -614,7 +620,11 @@ impl Measure for Styled<'_> {
 
 fn refill_leader(text: &str, width: f32, measure: impl Fn(&str) -> f32) -> Option<String> {
     let span = crate::layout::leader_span(text)?;
-    let unit = if text[span.clone()].contains(char::is_whitespace) { " ." } else { "." };
+    let unit = if text[span.clone()].contains(char::is_whitespace) {
+        " ."
+    } else {
+        "."
+    };
     let head = text[..span.start].trim_end();
     let tail = text[span.end..].trim();
     let free = width - measure(head) - measure(tail) - measure(" ") * 2.0;

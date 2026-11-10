@@ -46,10 +46,10 @@ impl Runner {
     /// Stop whatever is running on a book, so a book that is being removed is not translated (and paid for)
     /// any further.
     pub fn cancel_book(&self, book: i64) {
-        if let Some((_, b, flag)) = &*self.current.lock().unwrap() {
-            if *b == book {
-                flag.store(true, Ordering::Relaxed);
-            }
+        if let Some((_, b, flag)) = &*self.current.lock().unwrap()
+            && *b == book
+        {
+            flag.store(true, Ordering::Relaxed);
         }
     }
 }

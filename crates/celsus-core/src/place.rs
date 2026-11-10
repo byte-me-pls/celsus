@@ -189,7 +189,11 @@ impl Node {
         let middle = (self.left + self.right) / 2.0;
         let gap = size * 0.4;
         let (mut left, mut right) = (0.0f32, 0.0f32);
-        for o in self.around.iter().filter(|o| o.y0 < y1 - 0.5 && o.y1 > y0 + 0.5) {
+        for o in self
+            .around
+            .iter()
+            .filter(|o| o.y0 < y1 - 0.5 && o.y1 > y0 + 0.5)
+        {
             if (o.x0 + o.x1) / 2.0 < middle {
                 left = left.max(o.x1 + gap - self.left);
             } else {
@@ -355,19 +359,34 @@ fn build(
         .filter(|b| is_running(b) && (b.lines.len() >= 3 || b.align == Align::Justify))
         .map(|b| b.rect)
         .collect();
-    let content_left = layout.blocks.iter().map(|b| b.rect.x0).fold(f32::MAX, f32::min);
-    let content_right = layout.blocks.iter().map(|b| b.rect.x1).fold(f32::MIN, f32::max);
+    let content_left = layout
+        .blocks
+        .iter()
+        .map(|b| b.rect.x0)
+        .fold(f32::MAX, f32::min);
+    let content_right = layout
+        .blocks
+        .iter()
+        .map(|b| b.rect.x1)
+        .fold(f32::MIN, f32::max);
     // A page with little on it (a title, the last lines of a chapter) does not show how wide its text area is:
     // it is taken to have the margins of an ordinary page.
     let (content_left, content_right) = if content_right - content_left < layout.width * 0.5 {
         let margin = content_left
             .min(layout.width - content_right)
             .clamp(0.0, layout.width * 0.12);
-        (content_left.min(margin), content_right.max(layout.width - margin))
+        (
+            content_left.min(margin),
+            content_right.max(layout.width - margin),
+        )
     } else {
         (content_left, content_right)
     };
-    let content_top = layout.blocks.iter().map(|b| b.rect.y0).fold(f32::MAX, f32::min);
+    let content_top = layout
+        .blocks
+        .iter()
+        .map(|b| b.rect.y0)
+        .fold(f32::MAX, f32::min);
     let content_bottom = layout.blocks.iter().map(|b| b.rect.y1).fold(0.0, f32::max);
     // Where text may end: a little into the bottom margin of a full page, and on a page that ends early, as far
     // down as a full page would go.
@@ -424,7 +443,12 @@ fn build(
         let mut align = b.align;
         if it.companion {
             // A page number at the end of its row keeps its right edge.
-            let row = || layout.blocks.iter().filter(|o| o.id != b.id && same_row(o, b));
+            let row = || {
+                layout
+                    .blocks
+                    .iter()
+                    .filter(|o| o.id != b.id && same_row(o, b))
+            };
             if row().any(|o| o.rect.x1 <= r.x0 + 1.0) && !row().any(|o| o.rect.x0 >= r.x1 - 1.0) {
                 align = Align::Right;
             }
@@ -433,7 +457,9 @@ fn build(
             let column = running
                 .iter()
                 .filter(|c| c.x0 <= r.x0 + 0.5 && c.x1 >= r.x1 - 0.5)
-                .fold(None, |u: Option<Rect>, c| Some(u.map_or(*c, |u| u.union(c))));
+                .fold(None, |u: Option<Rect>, c| {
+                    Some(u.map_or(*c, |u| u.union(c)))
+                });
             let (c0, c1) = column.map_or((0.0, layout.width), |c| (c.x0, c.x1));
             if ((r.x0 + r.x1) - (c0 + c1)).abs() / 2.0 < 1.5 && r.x0 - c0 > size * 1.5 {
                 align = Align::Center;
@@ -474,7 +500,11 @@ fn build(
                 lim_l = lim_l.max(o.x1 + gap);
             }
         }
-        for o in layout.blocks.iter().filter(|o| o.id != b.id && beside(&o.rect)) {
+        for o in layout
+            .blocks
+            .iter()
+            .filter(|o| o.id != b.id && beside(&o.rect))
+        {
             // A neighbour that grows towards this block shares the space between the two.
             let grows = |toward_left: bool| {
                 live.get(&o.id)
@@ -482,7 +512,11 @@ fn build(
                     .is_some_and(|(k, a)| {
                         k != Kind::Running
                             && (a == Align::Center
-                                || a == if toward_left { Align::Right } else { Align::Left })
+                                || a == if toward_left {
+                                    Align::Right
+                                } else {
+                                    Align::Left
+                                })
                     })
             };
             if o.rect.x0 >= r.x1 - 0.5 {
@@ -563,8 +597,8 @@ fn build(
             }
         }
         // Running heads and feet stay where they are on every page.
-        let mut anchored = b.lines.len() == 1
-            && (r.y0 > layout.height * 0.9 || r.y1 < layout.height * 0.08);
+        let mut anchored =
+            b.lines.len() == 1 && (r.y0 > layout.height * 0.9 || r.y1 < layout.height * 0.08);
         anchored |= fixed.iter().any(|f| same_row(f, b));
         if state.restrict[i] >= 2 {
             anchored = true;
@@ -578,9 +612,9 @@ fn build(
         if kind == Kind::Running && matches!(align, Align::Left | Align::Justify) {
             let width = right - left;
             let ran_over = |o: &Rect| {
-                b.lines.iter().any(|l| {
-                    core(l.rect.x0, l.rect.x1, l.baseline, size0).overlaps(o, 1.0)
-                })
+                b.lines
+                    .iter()
+                    .any(|l| core(l.rect.x0, l.rect.x1, l.baseline, size0).overlaps(o, 1.0))
             };
             let from_a_side = |o: &Rect| {
                 (o.x0 <= left + width * 0.15 && o.x1 < left + width * 0.6)
@@ -610,7 +644,11 @@ fn build(
                     .peekable();
                 level.peek().is_some() && level.all(|l| l.rect.x1 <= o.x0 + 0.5)
             };
-            let others = layout.blocks.iter().filter(|o| o.id != b.id).map(|o| &o.rect);
+            let others = layout
+                .blocks
+                .iter()
+                .filter(|o| o.id != b.id)
+                .map(|o| &o.rect);
             for o in drawings.iter().copied().chain(others) {
                 let known = around.iter().any(|a| a.x0 == o.x0 && a.y0 == o.y0);
                 if o.overlaps(&r, 0.5) && !known && past_the_end(o) {
@@ -815,13 +853,12 @@ fn shape_at(i: usize, item: &Item, node: &Node, level: usize, cache: &mut ShapeC
         }
         lines
     } else {
-        let indent = if node.kind == Kind::Single
-            || !matches!(node.align, Align::Left | Align::Justify)
-        {
-            Indent::default()
-        } else {
-            node.indent
-        };
+        let indent =
+            if node.kind == Kind::Single || !matches!(node.align, Align::Left | Align::Justify) {
+                Indent::default()
+            } else {
+                node.indent
+            };
         let clear = |n: usize| node.insets(n, size, leading);
         let width_at = |n: usize| {
             let (l, r) = clear(n);
@@ -1057,7 +1094,10 @@ fn attempt(
 /// paragraphs that had to go far down the ladder do not drag the others along. Returns whether anything changed.
 fn even_out(nodes: &[Option<Node>], items: &[Item], level: &mut [usize]) -> bool {
     // The rung where sizes fall under 85%.
-    let far = LADDER.iter().position(|s| s.scale < 0.85).unwrap_or(LADDER.len());
+    let far = LADDER
+        .iter()
+        .position(|s| s.scale < 0.85)
+        .unwrap_or(LADDER.len());
     let mut classes: std::collections::BTreeMap<(u32, bool, bool), Vec<usize>> = Default::default();
     for (i, nd) in nodes.iter().enumerate() {
         let Some(nd) = nd else { continue };
@@ -1156,8 +1196,7 @@ fn conflict(
                 if out && !still {
                     return Some(confine(i));
                 }
-            } else if !o.overlaps(r, 0.5) && boxes[i].iter().any(|b| b.overlaps(o, 0.6)) && !still
-            {
+            } else if !o.overlaps(r, 0.5) && boxes[i].iter().any(|b| b.overlaps(o, 0.6)) && !still {
                 return Some(confine(i));
             }
         }
@@ -1345,7 +1384,10 @@ mod tests {
         assert_eq!((p.lines.len(), p.size, p.squeeze), (1, 10.0, 1.0));
         assert!(p.lines[0].x + p.lines[0].width <= 175.0);
         // Twice as long: it has to become narrower and smaller, but stays on its line and clear of the other.
-        let out = solve_page(&layout, &[("label", "abcdefghij klmnopqrstu abcdefg".into())]);
+        let out = solve_page(
+            &layout,
+            &[("label", "abcdefghij klmnopqrstu abcdefg".into())],
+        );
         let p = out[0].as_ref().unwrap();
         assert_eq!(p.lines.len(), 1);
         assert!(p.size < 10.0 && p.size >= 8.5);
@@ -1363,8 +1405,16 @@ mod tests {
         let out = solve_page(&layout, &[("a", words(2.9))]);
         let a = out[0].as_ref().expect("the paragraph is placed");
         assert!(a.lines.len() >= 3);
-        for line in a.lines.iter().filter(|l| l.baseline > 126.0 && l.baseline < 138.0) {
-            assert!(line.x + line.width <= 200.0, "ends at {}", line.x + line.width);
+        for line in a
+            .lines
+            .iter()
+            .filter(|l| l.baseline > 126.0 && l.baseline < 138.0)
+        {
+            assert!(
+                line.x + line.width <= 200.0,
+                "ends at {}",
+                line.x + line.width
+            );
         }
     }
 

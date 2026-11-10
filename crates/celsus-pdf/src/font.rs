@@ -489,7 +489,10 @@ fn even_pitch(letters: &[(char, f32)], empty: Option<f32>) -> bool {
 
 /// The width, in ems, of the first glyph of a TrueType font: the one drawn where a shape is missing.
 fn empty_glyph_width(font: &[u8]) -> Option<f32> {
-    let short = |at: usize| font.get(at..at.checked_add(2)?).map(|b| u16::from_be_bytes([b[0], b[1]]));
+    let short = |at: usize| {
+        font.get(at..at.checked_add(2)?)
+            .map(|b| u16::from_be_bytes([b[0], b[1]]))
+    };
     let table = |tag: &[u8; 4]| {
         (0..usize::from(short(4)?)).find_map(|i| {
             let entry = font.get(12 + 16 * i..28 + 16 * i)?;
@@ -595,8 +598,11 @@ mod tex_tests {
 
     #[test]
     fn letters_of_one_width_make_a_fixed_pitch() {
-        let letters = ["a", "b", "c", "d", "e", "f", "g", "i", "l", "m", "n", "o", "t", "w"];
-        let fixed = |glyphs: Vec<(&str, f32)>, empty| even_pitch(&letter_widths(glyphs.into_iter()), empty);
+        let letters = [
+            "a", "b", "c", "d", "e", "f", "g", "i", "l", "m", "n", "o", "t", "w",
+        ];
+        let fixed =
+            |glyphs: Vec<(&str, f32)>, empty| even_pitch(&letter_widths(glyphs.into_iter()), empty);
         assert!(fixed(letters.iter().map(|&c| (c, 0.5)).collect(), None));
         // The wide forms of another script and what is not a letter do not count.
         let mut mixed: Vec<(&str, f32)> = letters.iter().map(|&c| (c, 0.5)).collect();
@@ -604,9 +610,14 @@ mod tex_tests {
         assert!(fixed(mixed, None));
         // A text face: the i is narrower than the m.
         let text = |c: &str| if c == "i" || c == "l" { 0.278 } else { 0.556 };
-        assert!(!fixed(letters.iter().map(|&c| (c, text(c))).collect(), None));
+        assert!(!fixed(
+            letters.iter().map(|&c| (c, text(c))).collect(),
+            None
+        ));
         // Numbers are of one width in most faces, and four letters are too few to tell.
-        let digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d"];
+        let digits = [
+            "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d",
+        ];
         assert!(!fixed(digits.iter().map(|&c| (c, 0.5)).collect(), None));
     }
 
@@ -619,7 +630,11 @@ mod tex_tests {
         assert!(!even_pitch(&letters, None));
         assert!(even_pitch(&letters, Some(0.364)));
         // Four letters of a text face that happen to be as wide as each other are still too few.
-        let word: Vec<(char, f32)> = "page".chars().map(|c| (c, 0.556)).chain(upper_of_a_text_face()).collect();
+        let word: Vec<(char, f32)> = "page"
+            .chars()
+            .map(|c| (c, 0.556))
+            .chain(upper_of_a_text_face())
+            .collect();
         assert!(!even_pitch(&word, Some(0.6)));
     }
 

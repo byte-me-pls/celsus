@@ -175,13 +175,21 @@ impl FontSet {
                     None => {
                         let Some(mut face) = std::fs::read(&pick.path)
                             .ok()
-                            .and_then(|data| TrueType::parse_shared(Arc::new(data), pick.index).ok())
+                            .and_then(|data| {
+                                TrueType::parse_shared(Arc::new(data), pick.index).ok()
+                            })
                             .map(|mut font| {
                                 // Books are set with lining figures far more often than not.
                                 if let Some(lining) = lining_figures(&font) {
                                     font.set_figures(lining);
                                 }
-                                FontFace::from_font(name, font, choice.class, pick.bold, pick.italic)
+                                FontFace::from_font(
+                                    name,
+                                    font,
+                                    choice.class,
+                                    pick.bold,
+                                    pick.italic,
+                                )
                             })
                         else {
                             continue;
@@ -402,7 +410,11 @@ fn lining_figures(font: &TrueType) -> Option<[u16; 10]> {
     let mut buffer = rustybuzz::UnicodeBuffer::new();
     buffer.push_str(FIGURES);
     let shaped = rustybuzz::shape(&face, &[lining()], buffer);
-    let glyphs: Vec<u16> = shaped.glyph_infos().iter().map(|g| g.glyph_id as u16).collect();
+    let glyphs: Vec<u16> = shaped
+        .glyph_infos()
+        .iter()
+        .map(|g| g.glyph_id as u16)
+        .collect();
     let glyphs: [u16; 10] = glyphs.try_into().ok()?;
     // A font without figures of its own has no other ones either: what comes back for it is the glyph for a
     // character it lacks.
@@ -628,7 +640,9 @@ mod tests {
                 PathBuf::from("/usr/share/fonts"),
             ])
             .find(|p| p.is_dir());
-        let mut files: Vec<PathBuf> = dir.map(|d| font_index(&d).into_values().collect()).unwrap_or_default();
+        let mut files: Vec<PathBuf> = dir
+            .map(|d| font_index(&d).into_values().collect())
+            .unwrap_or_default();
         files.sort();
         files
     }
@@ -636,7 +650,10 @@ mod tests {
     #[test]
     fn other_figures_are_drawn_and_measured_alike() {
         for path in installed().into_iter().take(120) {
-            let Some(mut font) = std::fs::read(&path).ok().and_then(|d| TrueType::parse(d).ok()) else {
+            let Some(mut font) = std::fs::read(&path)
+                .ok()
+                .and_then(|d| TrueType::parse(d).ok())
+            else {
                 continue;
             };
             let usual = font.text_width("0123456789", 10.0);
@@ -653,7 +670,12 @@ mod tests {
             let wide = wide as f32 / f32::from(font.units_per_em) * 10.0;
             assert!((font.text_width("0123456789", 10.0) - wide).abs() < 1e-3);
             // Letters are left alone, and the figures are of a like width.
-            assert_eq!(font.glyph('a'), TrueType::parse(std::fs::read(&path).unwrap()).unwrap().glyph('a'));
+            assert_eq!(
+                font.glyph('a'),
+                TrueType::parse(std::fs::read(&path).unwrap())
+                    .unwrap()
+                    .glyph('a')
+            );
             assert!((wide - usual).abs() < usual * 0.5, "{}", path.display());
         }
     }

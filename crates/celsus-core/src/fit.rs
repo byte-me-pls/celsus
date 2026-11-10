@@ -129,7 +129,8 @@ pub fn wrap_widths(
 
 /// Nothing to print: spaces, and the marks that say which style the words after them are in.
 fn blank(line: &str) -> bool {
-    line.chars().all(|c| c.is_whitespace() || inline::style_of(c).is_some())
+    line.chars()
+        .all(|c| c.is_whitespace() || inline::style_of(c).is_some())
 }
 
 /// Close `line` and open the next one in the style this one ends in.

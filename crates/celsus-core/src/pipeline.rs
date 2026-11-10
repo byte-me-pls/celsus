@@ -278,7 +278,8 @@ pub fn cache_key(to: &Language, source: &str) -> String {
 /// joined text, and those made before the words in another style were told apart under the text alone. Copy them
 /// under the current key so earlier work, paid for or done by hand, is not lost.
 pub fn adopt_earlier(cache: &mut dyn Cache, to: &Language, blocks: &[crate::layout::TextBlock]) {
-    let changed = |b: &&crate::layout::TextBlock| !b.protected && (b.keeps_lines() || !b.inline.is_empty());
+    let changed =
+        |b: &&crate::layout::TextBlock| !b.protected && (b.keeps_lines() || !b.inline.is_empty());
     for b in blocks.iter().filter(changed) {
         let key = cache_key(to, &b.source());
         if cache.get(&key).is_some() {

@@ -270,7 +270,10 @@ pub fn describe(problem: &Problem) -> String {
 pub fn check(source: &str, translation: &str) -> Vec<Problem> {
     // The tags around words printed in another style are looked at on their own; the rest is about the text.
     if inline::has_tags(source) || inline::has_tags(translation) {
-        let mut problems = check(&inline::without_tags(source), &inline::without_tags(translation));
+        let mut problems = check(
+            &inline::without_tags(source),
+            &inline::without_tags(translation),
+        );
         if !inline::tags_kept(source, translation) {
             problems.push(Problem::Tags);
         }
@@ -331,14 +334,26 @@ mod tests {
     #[test]
     fn tags_are_checked_apart_from_the_text() {
         let source = "Chapter 2 of <i>Domain Design</i> names the <b2>3</b2> layers.";
-        assert!(check(source, "<i>Domain Design</i> kitabının 2. bölümü <b2>3</b2> katmanı adlandırır.").is_empty());
+        assert!(
+            check(
+                source,
+                "<i>Domain Design</i> kitabının 2. bölümü <b2>3</b2> katmanı adlandırır."
+            )
+            .is_empty()
+        );
         // The number in a tag's name is not one of the text's.
         assert_eq!(
-            check(source, "<i>Domain Design</i> kitabının 2. bölümü <b2>üç</b2> katmanı adlandırır."),
+            check(
+                source,
+                "<i>Domain Design</i> kitabının 2. bölümü <b2>üç</b2> katmanı adlandırır."
+            ),
             [Problem::MissingNumber("3".into())]
         );
         assert_eq!(
-            check(source, "Domain Design kitabının 2. bölümü 3 katmanı adlandırır."),
+            check(
+                source,
+                "Domain Design kitabının 2. bölümü 3 katmanı adlandırır."
+            ),
             [Problem::Tags]
         );
     }

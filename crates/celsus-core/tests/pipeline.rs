@@ -183,7 +183,10 @@ fn a_provider_that_goes_away_keeps_the_finished_pages() {
         return;
     };
     let why = run.outcome.failed.expect("the run reports why it stopped");
-    assert!(why.contains("page 2") && why.contains("connection refused"), "{why}");
+    assert!(
+        why.contains("page 2") && why.contains("connection refused"),
+        "{why}"
+    );
     assert!(!run.outcome.cancelled);
     // Page 1 was translated, page 2 could not be, and page 3 came from the earlier run.
     assert_eq!(run.done, [(1, 0), (3, 0)]);

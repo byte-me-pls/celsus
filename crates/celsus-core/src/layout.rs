@@ -324,11 +324,19 @@ mod tests {
             paragraph.source(),
             "As the book <i>Domain Design</i> says, run <code>make</code> and wait."
         );
-        assert_eq!(paragraph.plain(), "As the book Domain Design says, run make and wait.");
+        assert_eq!(
+            paragraph.plain(),
+            "As the book Domain Design says, run make and wait."
+        );
         // Entries on their own lines: no tag runs from one into the next.
         let mut list = block(vec![
             line(100.0, 160.0, 0.0, "Part II"),
-            line(100.0, 400.0, 14.0, "The Building Blocks of a Model-Driven Design"),
+            line(
+                100.0,
+                400.0,
+                14.0,
+                "The Building Blocks of a Model-Driven Design",
+            ),
         ]);
         list.inline = vec![TextStyle {
             bold: true,

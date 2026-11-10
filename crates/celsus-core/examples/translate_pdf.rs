@@ -15,6 +15,9 @@ use celsus_core::BlockId;
 use celsus_core::fonts::FontSet;
 use celsus_core::render::BookWriter;
 
+/// A region as the regions file gives it: label, score, then the box as x0, y0, x1, y1.
+type RegionRow = (String, f32, f32, f32, f32, f32);
+
 /// A block that keeps its lines grows in each of them, as a list of entries does when it is translated.
 fn stand_in(source: &str, grow: usize) -> String {
     source
@@ -49,7 +52,11 @@ fn stand_in_line(source: &str, grow: usize) -> String {
         let filler: String = "ışığı ".chars().cycle().take(extra).collect();
         match celsus_core::layout::leader_span(&out) {
             Some(span) => {
-                let gap = if out[..span.start].ends_with(' ') { "" } else { " " };
+                let gap = if out[..span.start].ends_with(' ') {
+                    ""
+                } else {
+                    " "
+                };
                 out.insert_str(span.start, &format!("{gap}{} ", filler.trim_end()));
             }
             None => {
@@ -127,7 +134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => (1, all.len()),
     };
     // Regions per page, as {"page": [[label, score, x0, y0, x1, y1], ...]}.
-    let regions: BTreeMap<String, Vec<(String, f32, f32, f32, f32, f32)>> = match &regions {
+    let regions: BTreeMap<String, Vec<RegionRow>> = match &regions {
         Some(path) => serde_json::from_slice(&std::fs::read(path)?)?,
         None => BTreeMap::new(),
     };
@@ -139,16 +146,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .get(&n.to_string())
             .map(|list| {
                 list.iter()
-                    .map(|(label, score, x0, y0, x1, y1)| celsus_core::extract::Region {
-                        label: label.clone(),
-                        score: *score,
-                        rect: celsus_core::layout::Rect {
-                            x0: *x0,
-                            y0: *y0,
-                            x1: *x1,
-                            y1: *y1,
+                    .map(
+                        |(label, score, x0, y0, x1, y1)| celsus_core::extract::Region {
+                            label: label.clone(),
+                            score: *score,
+                            rect: celsus_core::layout::Rect {
+                                x0: *x0,
+                                y0: *y0,
+                                x1: *x1,
+                                y1: *y1,
+                            },
                         },
-                    })
+                    )
                     .collect()
             })
             .unwrap_or_default();

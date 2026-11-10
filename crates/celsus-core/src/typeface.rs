@@ -36,17 +36,41 @@ const SERIF_MARGIN: f32 = 0.8;
 
 /// How often each letter comes up in running text, in percent, with a floor for the rare ones.
 const OFTEN: [f32; 26] = [
-    8.2, 1.5, 2.8, 4.3, 12.7, 2.2, 2.0, 6.1, 7.0, 1.0, 1.0, 4.0, 2.4, 6.7, 7.5, 1.9, 1.0, 6.0, 6.3, 9.1,
-    2.8, 1.0, 2.4, 1.0, 2.0, 1.0,
+    8.2, 1.5, 2.8, 4.3, 12.7, 2.2, 2.0, 6.1, 7.0, 1.0, 1.0, 4.0, 2.4, 6.7, 7.5, 1.9, 1.0, 6.0, 6.3,
+    9.1, 2.8, 1.0, 2.4, 1.0, 2.0, 1.0,
 ];
 const CAPITAL: f32 = 0.3;
 
 /// Families drawn to the same widths: text set in one keeps its line breaks in another.
 const SAME_WIDTHS: &[&[&str]] = &[
-    &["Arial", "Helvetica", "Helvetica Neue", "Liberation Sans", "Arimo", "Nimbus Sans"],
-    &["Times New Roman", "Times", "Liberation Serif", "Tinos", "Nimbus Roman"],
-    &["Courier New", "Courier", "Liberation Mono", "Cousine", "Nimbus Mono"],
-    &["Palatino Linotype", "Palatino", "Book Antiqua", "URW Palladio"],
+    &[
+        "Arial",
+        "Helvetica",
+        "Helvetica Neue",
+        "Liberation Sans",
+        "Arimo",
+        "Nimbus Sans",
+    ],
+    &[
+        "Times New Roman",
+        "Times",
+        "Liberation Serif",
+        "Tinos",
+        "Nimbus Roman",
+    ],
+    &[
+        "Courier New",
+        "Courier",
+        "Liberation Mono",
+        "Cousine",
+        "Nimbus Mono",
+    ],
+    &[
+        "Palatino Linotype",
+        "Palatino",
+        "Book Antiqua",
+        "URW Palladio",
+    ],
     &["Calibri", "Carlito"],
     &["Cambria", "Caladea"],
 ];
@@ -55,8 +79,26 @@ const SAME_WIDTHS: &[&[&str]] = &[
 /// `Times New Roman,Bold` and `Times New Roman` are one family.
 pub(crate) fn family_key(name: &str) -> String {
     const ENDINGS: &[&str] = &[
-        "bolditalic", "boldoblique", "bold", "italic", "oblique", "regular", "roman", "medium", "semibold",
-        "demibold", "demi", "light", "book", "psmt", "mt", "ps", "std", "pro", "lt", "com",
+        "bolditalic",
+        "boldoblique",
+        "bold",
+        "italic",
+        "oblique",
+        "regular",
+        "roman",
+        "medium",
+        "semibold",
+        "demibold",
+        "demi",
+        "light",
+        "book",
+        "psmt",
+        "mt",
+        "ps",
+        "std",
+        "pro",
+        "lt",
+        "com",
     ];
     let family = name.split(['-', ',']).next().unwrap_or(name);
     let mut key: String = family
@@ -187,7 +229,10 @@ fn look_through(dir: &Path) -> Vec<InstalledFamily> {
             let slot = usize::from(bold) * 2 + usize::from(face.italic);
             let off = |weight: u16| weight.abs_diff(if bold { 700 } else { 400 });
             let held = &mut families.entry(key).or_default()[slot];
-            if held.as_ref().is_none_or(|h| off(face.weight) < off(h.weight)) {
+            if held
+                .as_ref()
+                .is_none_or(|h| off(face.weight) < off(h.weight))
+            {
                 *held = Some(Installed {
                     path: path.clone(),
                     index: face.index,
@@ -214,7 +259,10 @@ fn look_through(dir: &Path) -> Vec<InstalledFamily> {
             if class != Family::Mono && faces.iter().any(Option::is_none) {
                 return None;
             }
-            let covers = faces.iter().flatten().fold(u32::MAX, |all, f| all & f.ranges);
+            let covers = faces
+                .iter()
+                .flatten()
+                .fold(u32::MAX, |all, f| all & f.ranges);
             Some(InstalledFamily {
                 key,
                 class,
@@ -271,7 +319,10 @@ impl Seen {
             if self.letters[slot] < FEW_LETTERS {
                 continue;
             }
-            if let Some(d) = family.widths(slot).and_then(|w| distance(&self.widths[slot], w)) {
+            if let Some(d) = family
+                .widths(slot)
+                .and_then(|w| distance(&self.widths[slot], w))
+            {
                 sum += d;
                 faces += 1;
             }
@@ -284,8 +335,25 @@ impl Seen {
 /// its name. Many files say nothing.
 fn class_of(font: &Font) -> Option<Family> {
     const SANS: &[&str] = &[
-        "sans", "gothic", "grotesk", "grotesque", "helvet", "arial", "verdana", "futura", "univers",
-        "frutiger", "myriad", "calibri", "tahoma", "segoe", "roboto", "lato", "avenir", "optima", "trebuchet",
+        "sans",
+        "gothic",
+        "grotesk",
+        "grotesque",
+        "helvet",
+        "arial",
+        "verdana",
+        "futura",
+        "univers",
+        "frutiger",
+        "myriad",
+        "calibri",
+        "tahoma",
+        "segoe",
+        "roboto",
+        "lato",
+        "avenir",
+        "optima",
+        "trebuchet",
     ];
     let name = font.name.to_ascii_lowercase();
     if font.fixed_pitch {
@@ -424,9 +492,11 @@ fn nearest(seen: &Seen, usable: &[&InstalledFamily], chosen: &[usize]) -> Option
     match seen.class {
         Some(class) => best_of(class).map(|(i, _)| i),
         None => match (best_of(Family::Sans), best_of(Family::Serif)) {
-            (Some((sans, plain)), Some((serif, with))) => {
-                Some(if with < plain * SERIF_MARGIN { serif } else { sans })
-            }
+            (Some((sans, plain)), Some((serif, with))) => Some(if with < plain * SERIF_MARGIN {
+                serif
+            } else {
+                sans
+            }),
             (sans, serif) => sans.or(serif).map(|(i, _)| i),
         },
     }
@@ -527,7 +597,10 @@ mod tests {
         assert_eq!(pick(&shown(None, 0.476), &[]), Some("plain"));
         // A family the document already uses is kept over one a hair nearer, not over one far nearer.
         assert_eq!(pick(&shown(Some(Family::Sans), 0.506), &[0]), Some("plain"));
-        assert_eq!(pick(&shown(Some(Family::Sans), 0.506), &[2]), Some("plainwide"));
+        assert_eq!(
+            pick(&shown(Some(Family::Sans), 0.506), &[2]),
+            Some("plainwide")
+        );
         // Nothing to compare: too few letters.
         let mut thin = shown(None, 0.5);
         thin.letters[0] = 5;
@@ -542,9 +615,8 @@ mod tests {
             installed("Arial", Family::Sans, 0.5),
         ];
         let usable: Vec<&InstalledFamily> = families.iter().collect();
-        let stand_in = |name: &str| {
-            same_widths(&family_key(name), &usable).map(|i| usable[i].key.as_str())
-        };
+        let stand_in =
+            |name: &str| same_widths(&family_key(name), &usable).map(|i| usable[i].key.as_str());
         assert_eq!(stand_in("Helvetica-Bold"), Some("arial"));
         assert_eq!(stand_in("Times-Roman"), None);
         assert_eq!(stand_in("Garamond"), None);
