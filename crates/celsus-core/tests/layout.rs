@@ -34,12 +34,18 @@ fn page(content: &str) -> Vec<u8> {
         pdf.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
     }
     let xref = pdf.len();
-    pdf.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes());
+    pdf.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
     for o in offsets {
         pdf.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
     }
     pdf.extend_from_slice(
-        format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1).as_bytes(),
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
     );
     pdf
 }
@@ -108,6 +114,37 @@ fn a_page_number_ends_its_entry() {
 }
 
 #[test]
+fn a_table_in_the_next_column_does_not_cut_a_paragraph() {
+    // Six lines of a paragraph on the left. On the right, the cells of a table, each a text of its own,
+    // stand between its lines in the order of the page.
+    let mut content = String::new();
+    for i in 0..6 {
+        let y = 700 - 13 * i;
+        content.push_str(&format!(
+            "BT /F1 10 Tf 72 {y} Td ({}) Tj ET
+",
+            TITLES[i % 4]
+        ));
+    }
+    for (row, y) in [705, 679, 653].into_iter().enumerate() {
+        for (column, x) in [330, 390, 450, 510].into_iter().enumerate() {
+            let word = ["north", "south", "east", "west"][(row + column) % 4];
+            content.push_str(&format!(
+                "BT /F1 10 Tf {x} {y} Td ({word}) Tj ET
+"
+            ));
+        }
+    }
+    let found = blocks(&content);
+    assert!(
+        found
+            .iter()
+            .any(|b| b.matches(TITLES[0]).count() == 2 && b.matches(TITLES[1]).count() == 2),
+        "{found:?}"
+    );
+}
+
+#[test]
 fn a_word_in_another_type_stays_in_its_line() {
     // A grey label lies on the start of the line. The word set apart further on lies on neither of the two
     // texts: it belongs to the line it was written in, not to the label.
@@ -116,7 +153,9 @@ fn a_word_in_another_type_stays_in_its_line() {
          BT /F1 10 Tf 72 700 Td 0 g (The interpreter reports ) Tj 0.3 g (not) Tj 0 g ( the error we saw) Tj ET",
     );
     assert!(
-        found.iter().any(|b| b.contains("reports not the error we saw")),
+        found
+            .iter()
+            .any(|b| b.contains("reports not the error we saw")),
         "{found:?}"
     );
     assert!(found.iter().any(|b| b == "Runtime problems"), "{found:?}");
@@ -130,7 +169,9 @@ fn art_under_the_panel_of_a_text_does_not_cut_it() {
         "0.2 g 200 690 100 40 re f\n1 g 60 600 500 150 re f\n{line}"
     ));
     assert!(
-        hidden.iter().any(|b| b.contains("run on over the art that lies below")),
+        hidden
+            .iter()
+            .any(|b| b.contains("run on over the art that lies below")),
         "{hidden:?}"
     );
     // Drawn the other way round the shape is there to see, and what is printed on it is a text of its own.
@@ -138,7 +179,9 @@ fn art_under_the_panel_of_a_text_does_not_cut_it() {
         "1 g 60 600 500 150 re f\n0.2 g 200 690 100 40 re f\n{line}"
     ));
     assert!(
-        !shown.iter().any(|b| b.contains("run on over the art that lies below")),
+        !shown
+            .iter()
+            .any(|b| b.contains("run on over the art that lies below")),
         "{shown:?}"
     );
 }
@@ -150,7 +193,10 @@ fn a_step_in_the_baseline_starts_another_text() {
         "BT /F1 10 Tf 72 700 Td (Input buffer) Tj ET\n\
          BT /F1 10 Tf 132 700 Td (Output buffer) Tj ET",
     );
-    assert!(level.iter().any(|b| b == "Input buffer Output buffer"), "{level:?}");
+    assert!(
+        level.iter().any(|b| b == "Input buffer Output buffer"),
+        "{level:?}"
+    );
     // Set a point higher, the second one was placed by itself.
     let stepped = blocks(
         "BT /F1 10 Tf 72 700 Td (Input buffer) Tj ET\n\
@@ -173,7 +219,10 @@ fn a_line_alone_on_its_page_keeps_its_size() {
     let pages = doc.pages().unwrap();
     let extracted = extract_page(&doc, &pages[0], 1).unwrap();
     let block = &extracted.layout.blocks[0];
-    let translations = BTreeMap::from([(block.id.clone(), "Bu kitap Kanada'da basılmıştır".to_string())]);
+    let translations = BTreeMap::from([(
+        block.id.clone(),
+        "Bu kitap Kanada'da basılmıştır".to_string(),
+    )]);
     let mut writer = BookWriter::new(&doc, &fonts);
     let report = writer
         .translate_page(&pages[0], &extracted, &translations, &lang)
@@ -187,12 +236,23 @@ fn a_line_alone_on_its_page_keeps_its_size() {
         .content
         .runs
         .iter()
-        .filter(|r| r.glyphs.iter().any(|g| g.visible && !g.text.trim().is_empty()))
+        .filter(|r| {
+            r.glyphs
+                .iter()
+                .any(|g| g.visible && !g.text.trim().is_empty())
+        })
         .map(|r| r.size)
         .collect();
     assert!(!sizes.is_empty(), "the translation was written");
     assert!(sizes.iter().all(|s| (s - 9.0).abs() < 0.1), "{sizes:?}");
-    assert_eq!(read.layout.blocks.iter().map(|b| b.lines.len()).sum::<usize>(), 1);
+    assert_eq!(
+        read.layout
+            .blocks
+            .iter()
+            .map(|b| b.lines.len())
+            .sum::<usize>(),
+        1
+    );
 }
 
 #[test]
@@ -226,7 +286,11 @@ fn a_face_of_one_width_is_a_listing() {
     };
     // What a program printed is left as it is, and its face is known by the widths alone.
     let listing = read("F3");
-    assert!(listing[0].style.monospace && listing[0].protected, "{:?}", listing[0].style);
+    assert!(
+        listing[0].style.monospace && listing[0].protected,
+        "{:?}",
+        listing[0].style
+    );
     assert_eq!(listing[0].style.font_name.as_deref(), Some("Listing"));
     let prose = read("F1");
     assert!(!prose[0].style.monospace && !prose[0].protected);
@@ -250,7 +314,10 @@ fn words_in_italics_are_set_apart_for_the_translator() {
     );
     assert!(!block.style.italic && block.inline.len() == 1 && block.inline[0].italic);
     // A text in one style has nothing to tell apart.
-    assert_eq!(blocks("BT /F4 10 Tf 72 700 Td (All of this line is in italics) Tj ET"), ["All of this line is in italics"]);
+    assert_eq!(
+        blocks("BT /F4 10 Tf 72 700 Td (All of this line is in italics) Tj ET"),
+        ["All of this line is in italics"]
+    );
 }
 
 #[test]
@@ -267,7 +334,12 @@ fn words_in_italics_are_written_in_italics() {
         let id = extracted.layout.blocks[0].id.clone();
         let mut writer = BookWriter::new(&doc, &fonts);
         writer
-            .translate_page(&pages[0], &extracted, &BTreeMap::from([(id, translation.to_owned())]), &lang)
+            .translate_page(
+                &pages[0],
+                &extracted,
+                &BTreeMap::from([(id, translation.to_owned())]),
+                &lang,
+            )
             .unwrap();
         let out = celsus_pdf::Document::load(writer.finish().unwrap()).unwrap();
         let pages = out.pages().unwrap();
@@ -279,7 +351,11 @@ fn words_in_italics_are_written_in_italics() {
     );
     assert_eq!(written.len(), 1, "{written:?}");
     if written[0].inline.iter().any(|s| s.italic) {
-        assert!(written[0].source().contains("<i>Alan Tasarımı</i>"), "{}", written[0].source());
+        assert!(
+            written[0].source().contains("<i>Alan Tasarımı</i>"),
+            "{}",
+            written[0].source()
+        );
     } else {
         eprintln!("no italic face found, skipping");
     }
@@ -288,7 +364,11 @@ fn words_in_italics_are_written_in_italics() {
         "Katmanlar, ekibin her üyesinin alan modeli üzerindeki çalışma başlamadan önce okuması gereken \
          <i>Alan Tasarımı kitabında anlatılır.",
     );
-    assert!(plain[0].inline.is_empty() && !plain[0].plain().contains('<'), "{}", plain[0].source());
+    assert!(
+        plain[0].inline.is_empty() && !plain[0].plain().contains('<'),
+        "{}",
+        plain[0].source()
+    );
 }
 
 #[test]
@@ -303,7 +383,8 @@ fn a_sign_no_text_face_has_is_borrowed() {
         return;
     }
     // The number in a circle that points back to a line of a listing: the note is translated all the same.
-    let source = page("BT /F1 10 Tf 72 700 Td (1. The first note explains the command above) Tj ET");
+    let source =
+        page("BT /F1 10 Tf 72 700 Td (1. The first note explains the command above) Tj ET");
     let doc = celsus_pdf::Document::load(source).unwrap();
     let pages = doc.pages().unwrap();
     let extracted = extract_page(&doc, &pages[0], 1).unwrap();
@@ -328,11 +409,15 @@ fn texts_printed_over_each_other_are_read_apart() {
          BT /F2 10 Tf 74 700 Td (Runtime problems are shown here) Tj ET",
     );
     assert!(
-        found.iter().any(|b| b.contains("The interpreter reports the error")),
+        found
+            .iter()
+            .any(|b| b.contains("The interpreter reports the error")),
         "{found:?}"
     );
     assert!(
-        found.iter().any(|b| b.contains("Runtime problems are shown here")),
+        found
+            .iter()
+            .any(|b| b.contains("Runtime problems are shown here")),
         "{found:?}"
     );
 }
@@ -354,7 +439,8 @@ fn a_translation_longer_than_the_clipped_original_is_not_cut() {
     let pages = doc.pages().unwrap();
     let extracted = extract_page(&doc, &pages[0], 1).unwrap();
     let block = &extracted.layout.blocks[0];
-    let long = "Burada daha uzun bir çeviri var ve tek satıra sığmadığı için ikinci bir satıra iniyor";
+    let long =
+        "Burada daha uzun bir çeviri var ve tek satıra sığmadığı için ikinci bir satıra iniyor";
     let translations = BTreeMap::from([(block.id.clone(), long.to_string())]);
     let mut writer = BookWriter::new(&doc, &fonts);
     let report = writer

@@ -8,7 +8,9 @@ use std::collections::{BTreeMap, HashMap};
 use celsus_pdf::interp::{self, PageContent};
 use celsus_pdf::{Document, Page};
 
-use crate::layout::{Align, BlockId, Initial, PageLayout, Rect, Span, TextBlock, TextLine, TextStyle, join_lines};
+use crate::layout::{
+    Align, BlockId, Initial, PageLayout, Rect, Span, TextBlock, TextLine, TextStyle, join_lines,
+};
 
 /// A glyph of the page content: run index and glyph index inside that run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -74,8 +76,16 @@ impl Region {
     fn is_text(&self) -> bool {
         matches!(
             self.label.as_str(),
-            "text" | "list_item" | "caption" | "footnote" | "section_header" | "title" | "page_header"
-                | "page_footer" | "code" | "formula"
+            "text"
+                | "list_item"
+                | "caption"
+                | "footnote"
+                | "section_header"
+                | "title"
+                | "page_header"
+                | "page_footer"
+                | "code"
+                | "formula"
         )
     }
 }
@@ -115,7 +125,8 @@ pub fn extract_page_in(
         let inside: Vec<&&Region> = guesses
             .iter()
             .filter(|q| {
-                area(&q.rect) < area(&r.rect) * 0.6 && shared(&q.rect, &r.rect) > area(&q.rect) * 0.8
+                area(&q.rect) < area(&r.rect) * 0.6
+                    && shared(&q.rect, &r.rect) > area(&q.rect) * 0.8
             })
             .collect();
         let cells = inside.iter().enumerate().any(|(i, a)| {
@@ -140,7 +151,9 @@ pub fn extract_page_in(
         text_regions
             .iter()
             .enumerate()
-            .filter(|(_, t)| cx >= t.rect.x0 && cx <= t.rect.x1 && cy >= t.rect.y0 && cy <= t.rect.y1)
+            .filter(|(_, t)| {
+                cx >= t.rect.x0 && cx <= t.rect.x1 && cy >= t.rect.y0 && cy <= t.rect.y1
+            })
             .min_by(|a, b| {
                 let area = |t: &Region| (t.rect.x1 - t.rect.x0) * (t.rect.y1 - t.rect.y0);
                 area(a.1).total_cmp(&area(b.1))
@@ -496,7 +509,9 @@ pub fn extract_page_in(
         lines
             .iter()
             .zip(&is_number)
-            .filter(|(b, is)| **is && ((a.rect.x1 - b.rect.x1).abs() < 1.5 || (a.rect.x0 - b.rect.x0).abs() < 1.5))
+            .filter(|(b, is)| {
+                **is && ((a.rect.x1 - b.rect.x1).abs() < 1.5 || (a.rect.x0 - b.rect.x0).abs() < 1.5)
+            })
             .count()
             >= 3
     };
@@ -520,7 +535,9 @@ pub fn extract_page_in(
     let mut widths: HashMap<(usize, i32), f32> = HashMap::new();
     for (l, r) in lines.iter().zip(&line_region) {
         if let Some(r) = r {
-            *widths.entry((*r, (l.size * 4.0).round() as i32)).or_default() += l.rect.x1 - l.rect.x0;
+            *widths
+                .entry((*r, (l.size * 4.0).round() as i32))
+                .or_default() += l.rect.x1 - l.rect.x0;
         }
     }
     let usual_size = |region: usize| {
@@ -553,10 +570,19 @@ pub fn extract_page_in(
                 .flat_map(|(o, _)| o.glyphs.iter().map(|&g| &glyphs[g]))
                 .filter(|g| !g.space)
                 .collect();
-            let ink: Vec<&G> = l.glyphs.iter().map(|&g| &glyphs[g]).filter(|g| !g.space).collect();
+            let ink: Vec<&G> = l
+                .glyphs
+                .iter()
+                .map(|&g| &glyphs[g])
+                .filter(|g| !g.space)
+                .collect();
             let on_top = ink
                 .iter()
-                .filter(|g| under.iter().any(|u| shared(&g.rect, &u.rect) > area(&g.rect).min(area(&u.rect)) * 0.1))
+                .filter(|g| {
+                    under
+                        .iter()
+                        .any(|u| shared(&g.rect, &u.rect) > area(&g.rect).min(area(&u.rect)) * 0.1)
+                })
                 .count();
             on_top >= 2 && on_top * 2 >= ink.len()
         })
@@ -596,7 +622,9 @@ pub fn extract_page_in(
         .iter()
         .map(|l| {
             let text = line_text(&glyphs, &l.glyphs);
-            let text = text.trim().trim_matches(['"', '\'','“', '”', '‘', '’', '(', ')']);
+            let text = text
+                .trim()
+                .trim_matches(['"', '\'', '“', '”', '‘', '’', '(', ')']);
             (
                 text.chars().next().is_some_and(char::is_uppercase),
                 text.ends_with(['.', '!', '?']),
@@ -617,7 +645,9 @@ pub fn extract_page_in(
             // An entry whose lines hang under its first one ends where a line comes back out to the left:
             // the items of a list, the sources at the end of a chapter.
             if g.len() >= 2
-                && g[1..].iter().all(|&i| lines[i].rect.x0 > first.rect.x0 + line.size * 0.7)
+                && g[1..]
+                    .iter()
+                    .all(|&i| lines[i].rect.x0 > first.rect.x0 + line.size * 0.7)
                 && line.rect.x0 < prev.rect.x0 - line.size * 0.7
                 && (line.rect.x0 - first.rect.x0).abs() < line.size * 0.3
             {
@@ -674,7 +704,11 @@ pub fn extract_page_in(
             // A line is short when the next line's first word would still have fit on it. Ragged text ends
             // many lines well before the edge, in the middle of a sentence, because the next word is long.
             let first_word = {
-                let mut ink = line.glyphs.iter().map(|&i| &glyphs[i]).skip_while(|g| g.space);
+                let mut ink = line
+                    .glyphs
+                    .iter()
+                    .map(|&i| &glyphs[i])
+                    .skip_while(|g| g.space);
                 ink.next().map_or(0.0, |first| {
                     // Not every page draws its spaces: a gap between two letters ends the word as well.
                     let mut end = first;
@@ -709,12 +743,23 @@ pub fn extract_page_in(
             };
             // A first-line indent only counts when the block so far sits flush left (not a hanging indent).
             // Its own first line may be indented the same way.
-            let flush = g[1..].iter().all(|&i| (lines[i].rect.x0 - block_x0).abs() < 1.0);
+            let flush = g[1..]
+                .iter()
+                .all(|&i| (lines[i].rect.x0 - block_x0).abs() < 1.0);
             let indented = g.len() >= 2 && flush && line.rect.x0 > prev.rect.x0 + size * 0.7;
             !((short_prev && !centred) || indented || spaced)
         });
+        // A text that many others were begun after is left alone. Only those that share its width count:
+        // the cells of a table in the next column are read in between, and are not in the way.
+        let near = |gi: usize| {
+            let across = |g: &&Vec<usize>| {
+                g.iter()
+                    .any(|&i| lines[i].rect.x0 < line.rect.x1 && lines[i].rect.x1 > line.rect.x0)
+            };
+            groups[gi + 1..].iter().filter(across).count() < 8
+        };
         match target {
-            Some(gi) if line_region[li].is_some() || gi + 8 >= groups.len() => groups[gi].push(li),
+            Some(gi) if line_region[li].is_some() || near(gi) => groups[gi].push(li),
             _ => groups.push(vec![li]),
         }
     }
@@ -771,7 +816,8 @@ pub fn extract_page_in(
                     end += 1;
                 }
                 // The heading of a column ends where the weight of the type changes, however few cells follow.
-                let headed = at > 0 && end > at && cell[g[at - 1]] && bold[g[at]] != bold[g[at - 1]];
+                let headed =
+                    at > 0 && end > at && cell[g[at - 1]] && bold[g[at]] != bold[g[at - 1]];
                 if end - at >= 3 || headed {
                     if !rest.is_empty() {
                         parts.push(std::mem::take(&mut rest));
@@ -855,7 +901,11 @@ pub fn extract_page_in(
         let initial = (group.len() >= 2)
             .then(|| &lines[group[0]].initial)
             .and_then(|cap| {
-                let ink: Vec<&G> = cap.iter().map(|&i| &glyphs[i]).filter(|g| !g.space).collect();
+                let ink: Vec<&G> = cap
+                    .iter()
+                    .map(|&i| &glyphs[i])
+                    .filter(|g| !g.space)
+                    .collect();
                 let first = ink.first()?;
                 let rect = ink.iter().fold(first.rect, |r, g| r.union(&g.rect));
                 Some(Initial {
@@ -924,7 +974,10 @@ pub fn extract_page_in(
         if b.align == Align::Left
             && ((first.x0 + first.x1) - (second.x0 + second.x1)).abs() / 2.0 < tol
             && second.x0 > first.x0 + b.style.font_size * 0.7
-            && !lefts.iter().enumerate().any(|(j, x0)| j != i && (x0 - b.rect.x0).abs() < 1.0)
+            && !lefts
+                .iter()
+                .enumerate()
+                .any(|(j, x0)| j != i && (x0 - b.rect.x0).abs() < 1.0)
         {
             b.align = Align::Center;
         }
@@ -1078,7 +1131,10 @@ fn uncovered(paths: &[interp::PathItem]) -> Vec<Option<[f32; 4]>> {
         .iter()
         .enumerate()
         .filter(|(_, q)| {
-            q.is_rect && q.filled && q.bounds[2] - q.bounds[0] > 20.0 && q.bounds[3] - q.bounds[1] > 20.0
+            q.is_rect
+                && q.filled
+                && q.bounds[2] - q.bounds[0] > 20.0
+                && q.bounds[3] - q.bounds[1] > 20.0
         })
         .map(|(i, q)| (i, q.bounds))
         .collect();
@@ -1466,7 +1522,11 @@ const LOWERED: &str = "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑₕᵢ
 
 fn script_form(c: char, raised: bool) -> Option<char> {
     let c = if matches!(c, '−' | '–') { '-' } else { c };
-    let (plain, set) = if raised { (PLAIN_RAISED, RAISED) } else { (PLAIN_LOWERED, LOWERED) };
+    let (plain, set) = if raised {
+        (PLAIN_RAISED, RAISED)
+    } else {
+        (PLAIN_LOWERED, LOWERED)
+    };
     set.chars().nth(plain.chars().position(|p| p == c)?)
 }
 
@@ -1491,7 +1551,9 @@ fn attach_scripts(glyphs: &mut [G], rows: &mut Vec<Vec<usize>>) {
         for &i in row.iter().filter(|&&i| !glyphs[i].space) {
             let g = &glyphs[i];
             match groups.last_mut() {
-                Some(group) if g.rect.x0 - glyphs[*group.last().unwrap()].rect.x1 < g.size * 1.2 => {
+                Some(group)
+                    if g.rect.x0 - glyphs[*group.last().unwrap()].rect.x1 < g.size * 1.2 =>
+                {
                     group.push(i)
                 }
                 _ => groups.push(vec![i]),
@@ -1519,7 +1581,13 @@ fn attach_scripts(glyphs: &mut [G], rows: &mut Vec<Vec<usize>>) {
             let raised = glyphs[rows[host][0]].baseline > first.baseline;
             let texts: Option<Vec<String>> = group
                 .iter()
-                .map(|&i| glyphs[i].text.chars().map(|c| script_form(c, raised)).collect())
+                .map(|&i| {
+                    glyphs[i]
+                        .text
+                        .chars()
+                        .map(|c| script_form(c, raised))
+                        .collect()
+                })
                 .collect();
             if let Some(texts) = texts {
                 moves.extend(group.iter().zip(texts).map(|(&i, t)| (ri, host, i, t)));
@@ -1578,7 +1646,8 @@ fn look(content: &PageContent, run: usize, base: &TextStyle) -> Look {
         let own = (base.color >> (16 - 8 * k)) & 0xFF;
         u32::from(r.color[k]).abs_diff(own) > 40
     });
-    let color = (u32::from(r.color[0]) << 16) | (u32::from(r.color[1]) << 8) | u32::from(r.color[2]);
+    let color =
+        (u32::from(r.color[0]) << 16) | (u32::from(r.color[1]) << 8) | u32::from(r.color[2]);
     (
         r.font.bold,
         r.font.italic,
@@ -1629,7 +1698,11 @@ fn styled_text(
         return (line_text(glyphs, members), Vec::new());
     }
     let own = own_look(base);
-    let ink: Vec<&G> = members.iter().map(|&i| &glyphs[i]).filter(|g| !g.space).collect();
+    let ink: Vec<&G> = members
+        .iter()
+        .map(|&i| &glyphs[i])
+        .filter(|g| !g.space)
+        .collect();
     // The style each glyph is printed in, if it is one of the block's.
     let printed: Vec<Option<usize>> = ink
         .iter()
@@ -1792,7 +1865,9 @@ fn detect_align(lines: &[TextLine], block: &Rect, size: f32) -> Align {
         .any(|l| l.rect.x0 > lines[0].rect.x0 + size * 0.7)
         && (lines[0].rect.x0 - block.x0).abs() < tol;
     // Lines of nearly one length that begin at exactly one place are set from the left.
-    let flush = lines.iter().all(|l| (l.rect.x0 - lines[0].rect.x0).abs() < 0.3);
+    let flush = lines
+        .iter()
+        .all(|l| (l.rect.x0 - lines[0].rect.x0).abs() < 0.3);
     if centers && !hanging && !flush && !(lefts && all_rights) {
         Align::Center
     } else if lefts && rights && lines.len() >= 2 {
@@ -1809,19 +1884,22 @@ fn is_index_entry(line: &str) -> bool {
     let number = |w: &str| {
         let w = w.trim_end_matches(['.', ',', ';']);
         w.starts_with(|c: char| c.is_ascii_digit())
-            && w.chars().all(|c| c.is_ascii_digit() || matches!(c, '-' | '–' | '—'))
+            && w.chars()
+                .all(|c| c.is_ascii_digit() || matches!(c, '-' | '–' | '—'))
     };
     let words: Vec<&str> = line.split_whitespace().collect();
     let numbers = words.iter().rev().take_while(|w| number(w)).count();
     numbers >= 1
-        && (numbers == words.len() || (words[words.len() - numbers - 1].ends_with(',') && words.len() <= 12))
+        && (numbers == words.len()
+            || (words[words.len() - numbers - 1].ends_with(',') && words.len() <= 12))
 }
 
 fn ends_in_page_number(line: &str) -> bool {
     let number = |w: &str| {
         let w = w.trim_end_matches(['.', ',', ';']);
         w.starts_with(|c: char| c.is_ascii_digit())
-            && w.chars().all(|c| c.is_ascii_digit() || matches!(c, '-' | '–' | '—'))
+            && w.chars()
+                .all(|c| c.is_ascii_digit() || matches!(c, '-' | '–' | '—'))
     };
     let mut words = line.split_whitespace().rev();
     match (words.next(), words.next()) {
@@ -1835,20 +1913,38 @@ fn ends_in_page_number(line: &str) -> bool {
 /// widest text block it shares horizontal space with), not of its own block: two table-of-contents entries grouped
 /// into one block have a "longest" line that still stops far short of where running text would end.
 fn mark_separate_lines(blocks: &mut [TextBlock]) {
-    let text: Vec<(f32, f32)> = blocks
+    // Each text block with whether it reads as running text: three lines or more, of some length.
+    let text: Vec<(f32, f32, bool)> = blocks
         .iter()
         .filter(|b| !b.protected)
-        .map(|b| (b.rect.x0, b.rect.x1))
+        .map(|b| {
+            let chars: usize = b.lines.iter().map(|l| l.text.trim().chars().count()).sum();
+            (
+                b.rect.x0,
+                b.rect.x1,
+                b.lines.len() >= 3 && chars >= 30 * b.lines.len(),
+            )
+        })
         .collect();
     for b in blocks
         .iter_mut()
         .filter(|b| !b.protected && b.lines.len() >= 2)
     {
         let (x0, x1) = (b.rect.x0, b.rect.x1);
+        // A headline, a deck or a footnote set across two columns is not the column of the text under it.
+        // It shows by reaching well into running text that stands wholly beside this block.
+        let beside = |c: &&(f32, f32, bool)| {
+            c.2 && (c.0 >= x1 - 1.0 || c.1 <= x0 + 1.0) && c.1 - c.0 >= 0.5 * (x1 - x0)
+        };
+        let across = |a0: f32, a1: f32| {
+            text.iter()
+                .filter(beside)
+                .any(|c| a1.min(c.1) - a0.max(c.0) >= 0.25 * (c.1 - c.0))
+        };
         let column = text
             .iter()
-            .filter(|(a0, a1)| *a0 < x1 && *a1 > x0)
-            .fold((x0, x1), |(l, r), (a0, a1)| (l.min(*a0), r.max(*a1)));
+            .filter(|(a0, a1, _)| *a0 < x1 && *a1 > x0 && !across(*a0, *a1))
+            .fold((x0, x1), |(l, r), (a0, a1, _)| (l.min(*a0), r.max(*a1)));
         // Entries can fill their lines as well: those of an index end in page numbers, and a list of
         // sentences ends each line with a full stop.
         let ending = |test: fn(&str) -> bool| {
@@ -1967,11 +2063,72 @@ mod tests {
         assert_eq!(uncovered(&[panel, art])[1], Some(art.bounds));
         // A panel over its lower half leaves the upper half.
         let half = path([50.0, 50.0, 400.0, 200.0], true, false, true);
-        assert_eq!(uncovered(&[art, half])[0], Some([100.0, 200.0, 300.0, 300.0]));
+        assert_eq!(
+            uncovered(&[art, half])[0],
+            Some([100.0, 200.0, 300.0, 300.0])
+        );
         // The line around a box stays when the box is filled again at the same size.
         let frame = path([100.0, 100.0, 300.0, 300.0], true, true, false);
         let fill = path([100.0, 100.0, 300.0, 300.0], true, false, true);
         assert_eq!(uncovered(&[frame, fill])[0], Some(frame.bounds));
+    }
+
+    #[test]
+    fn a_headline_across_two_columns_is_not_the_column_of_the_text_under_it() {
+        let block = |id: &str, x0: f32, x1: f32, y: f32, lines: usize| {
+            let line = |i: usize| TextLine {
+                rect: Rect {
+                    x0,
+                    y0: y + 12.0 * i as f32,
+                    x1,
+                    y1: y + 12.0 * i as f32 + 10.0,
+                },
+                text: "running text that fills the measure of its column".into(),
+                baseline: y + 12.0 * i as f32 + 8.0,
+                spans: Vec::new(),
+            };
+            TextBlock {
+                id: BlockId(id.into()),
+                rect: Rect {
+                    x0,
+                    y0: y,
+                    x1,
+                    y1: y + 12.0 * lines as f32,
+                },
+                lines: (0..lines).map(line).collect(),
+                style: TextStyle {
+                    font_name: None,
+                    font_size: 10.0,
+                    color: 0,
+                    bold: false,
+                    italic: false,
+                    serif: true,
+                    monospace: false,
+                },
+                align: Align::Justify,
+                protected: false,
+                separate_lines: false,
+                initial: None,
+                inline: Vec::new(),
+            }
+        };
+        // A deck over both columns, then two columns of running text.
+        let mut page = vec![
+            block("deck", 40.0, 430.0, 60.0, 1),
+            block("left", 40.0, 260.0, 100.0, 5),
+            block("right", 280.0, 500.0, 100.0, 5),
+        ];
+        mark_separate_lines(&mut page);
+        assert!(!page[1].separate_lines, "the left column is running text");
+        assert!(!page[2].separate_lines);
+
+        // Without a second column the wide block is the measure, and lines that stop halfway are entries.
+        let mut page = vec![
+            block("wide", 40.0, 430.0, 60.0, 1),
+            block("entries", 40.0, 220.0, 100.0, 5),
+        ];
+        mark_separate_lines(&mut page);
+        assert!(page[1].separate_lines);
     }
 
     #[test]
