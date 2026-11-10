@@ -25,7 +25,7 @@ addLocale("tr", {
     confirmDelete: (t) => `"${t}" silinsin mi? Bu geri alınamaz.`, deleted: "Kitap silindi", savedTo: (p) => `Kaydedildi: ${p}`,
     // jobs
     jobsTitle: "Çeviriler", noJobs: "Henüz çeviri işi yok. Bir kitabı açıp çeviri başlatabilirsin.",
-    st_queued: "Sırada", st_running: "Çevriliyor", st_done: "Bitti", st_failed: "Hata", st_cancelled: "Durduruldu",
+    st_queued: "Sırada", st_running: "Çevriliyor", st_done: "Bitti", st_failed: "Hata", st_cancelled: "Durduruldu", st_stopping: "Durduruluyor…",
     cancel: "Durdur", retry: "Yeniden dene", openBook: "Kitabı aç", tokens: (n) => `${n.toLocaleString("tr")} token`, waitingS: (s) => `Sınır: ${s} sn bekleniyor`,
     jobPages: (n) => `${n} sayfa`,
     // reader
@@ -121,7 +121,7 @@ addLocale("tr", {
     historyTitle: "Geçmiş", noHistory: "Henüz çeviri işi yok.", deleteTitle: "Kitabı sil", deleteText: "Kitap, çevirileri ve geçmişi sunucudan silinir.", deleteButton: "Sil",
     confirmDelete: (t) => `"${t}" silinsin mi? Bu geri alınamaz.`, deleted: "Kitap silindi", readOnly: "Bu kitabı başkası ekledi; okuyup çevirebilirsin.",
     // jobs
-    jobsTitle: "Çeviriler", noJobs: "Henüz çeviri işi yok.", st_queued: "Sırada", st_running: "Çevriliyor", st_done: "Bitti", st_failed: "Hata", st_cancelled: "Durduruldu",
+    jobsTitle: "Çeviriler", noJobs: "Henüz çeviri işi yok.", st_queued: "Sırada", st_running: "Çevriliyor", st_done: "Bitti", st_failed: "Hata", st_cancelled: "Durduruldu", st_stopping: "Durduruluyor…",
     cancel: "Durdur", retry: "Yeniden dene", openBook: "Kitabı aç", tokens: (n) => `${n.toLocaleString("tr")} token`,
     // account
     accountTitle: "Hesabım", profile: "Profil", role: "Rol", roles: { owner: "Sahip", admin: "Yönetici", member: "Üye" },

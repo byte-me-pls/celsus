@@ -241,7 +241,7 @@ async fn run_job(state: &AppState, id: &str, cancel: Arc<AtomicBool>) -> Result<
     let st = state.clone();
     let handle = Handle::current();
     let job_id = id.to_owned();
-    let (bytes, outcome) = tokio::task::spawn_blocking(move || {
+    let (bytes, outcome, unfinished) = tokio::task::spawn_blocking(move || {
         let fonts = FontSet::for_language(&fonts_dir, &target);
         let doc = celsus_pdf::Document::open(&source).map_err(|e| e.to_string())?;
         let mut cache = PgCache {
@@ -250,38 +250,53 @@ async fn run_job(state: &AppState, id: &str, cancel: Arc<AtomicBool>) -> Result<
             book_id: cache_book,
         };
         let mut done = 0i32;
+        // Pages of this job where the model gave no usable answer for some of the text.
+        let mut unfinished = 0usize;
         let mut progress = |p: Progress| {
-            if let Progress::PageDone { page, kept, .. } = p {
+            if let Progress::PageDone { page, kept, missing, .. } = p {
                 if wanted.contains(&page) {
-                    done += 1;
+                    if missing == 0 {
+                        done += 1;
+                    } else {
+                        unfinished += 1;
+                    }
                 }
                 handle.block_on(async {
                     if let Ok(db) = st.pool.get().await {
-                        let _ = db
-                            .execute(
-                                "INSERT INTO translated_pages (book_id, lang, page, kept) VALUES ($1, $2, $3, $4)
-                                 ON CONFLICT (book_id, lang, page) DO UPDATE SET kept = $4",
-                                &[&book_id, &lang, &(page as i32), &(kept as i32)],
-                            )
-                            .await;
+                        // A page with text left untranslated is not marked, so it counts as missing.
+                        if missing == 0 {
+                            let _ = db
+                                .execute(
+                                    "INSERT INTO translated_pages (book_id, lang, page, kept) VALUES ($1, $2, $3, $4)
+                                     ON CONFLICT (book_id, lang, page) DO UPDATE SET kept = $4",
+                                    &[&book_id, &lang, &(page as i32), &(kept as i32)],
+                                )
+                                .await;
+                        }
                         let _ = db.execute("UPDATE jobs SET done_pages = $2 WHERE id = $1", &[&job_id, &done]).await;
                     }
                 });
             }
         };
-        translate_document(&doc, &fonts, &client, &options, &mut cache, &mut progress, &cancel).map_err(|e| e.to_string())
+        let (bytes, outcome) =
+            translate_document(&doc, &fonts, &client, &options, &mut cache, &mut progress, &cancel)
+                .map_err(|e| e.to_string())?;
+        Ok::<_, String>((bytes, outcome, unfinished))
     })
     .await
     .map_err(|e| e.to_string())??;
-    // Write next to the old file and swap, so readers never see half a PDF.
-    let _guard = state.outputs.lock(&lock_book, &lock_lang).await;
-    let tmp = output.with_extension("pdf.part");
-    tokio::fs::write(&tmp, &bytes)
-        .await
-        .map_err(|e| e.to_string())?;
-    tokio::fs::rename(&tmp, &output)
-        .await
-        .map_err(|e| e.to_string())?;
+    // A run that stopped early still has its finished pages; only one that wrote nothing leaves the file alone.
+    if outcome.pages > 0 {
+        // Write next to the old file and swap, so readers never see half a PDF.
+        let _guard = state.outputs.lock(&lock_book, &lock_lang).await;
+        let tmp = output.with_extension("pdf.part");
+        tokio::fs::write(&tmp, &bytes)
+            .await
+            .map_err(|e| e.to_string())?;
+        tokio::fs::rename(&tmp, &output)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
     let db = state.pool.get().await.map_err(|e| e.to_string())?;
     db.execute(
         "UPDATE jobs SET prompt_tokens = $2, completion_tokens = $3, model = $4 WHERE id = $1",
@@ -294,5 +309,13 @@ async fn run_job(state: &AppState, id: &str, cancel: Arc<AtomicBool>) -> Result<
     )
     .await
     .map_err(|e| e.to_string())?;
+    if let Some(why) = outcome.failed {
+        return Err(why);
+    }
+    if unfinished > 0 && !outcome.cancelled {
+        return Err(format!(
+            "The model gave no usable answer for some text on {unfinished} page(s). Translate the missing pages again."
+        ));
+    }
     Ok(outcome.cancelled)
 }

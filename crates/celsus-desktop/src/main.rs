@@ -253,6 +253,7 @@ fn book_update(
 
 #[tauri::command]
 fn book_delete(handle: AppHandle, app: State<App>, id: i64) -> Res<()> {
+    app.runner.cancel_book(id);
     library::remove_book(&app.db.lock().unwrap(), &app.library, id)?;
     let _ = handle.emit("library-changed", ());
     Ok(())
@@ -309,7 +310,7 @@ async fn book_estimate(handle: AppHandle, id: i64, pages: Vec<i64>) -> Res<u64> 
                 .blocks
                 .iter()
                 .filter(|b| !b.protected)
-                .map(|b| b.source().chars().count() as u64)
+                .map(|b| b.plain().chars().count() as u64)
                 .sum::<u64>();
         }
     }
@@ -477,13 +478,32 @@ fn job_create(
 ) -> Res<db::Job> {
     lang.parse::<celsus_core::Language>()
         .map_err(|e| e.to_string())?;
+    // One spelling per language: "TR" and "tr" are the same translation, and the same file.
+    let lang = lang.trim().to_lowercase();
+    let mut pages = pages;
+    pages.sort_unstable();
+    pages.dedup();
     if pages.is_empty() {
         return Err("Choose at least one page.".into());
     }
     let job = {
         let conn = app.db.lock().unwrap();
-        let id = db::insert_job(&conn, book_id, &lang, &pages)?;
-        db::job(&conn, id)?
+        if db::model_for(&conn, "translate")?.is_none() {
+            return Err("no_model".into());
+        }
+        // The same request sent twice (a double click) is one job.
+        let same = db::jobs(&conn, Some(book_id))?.into_iter().find(|j| {
+            matches!(j.status.as_str(), "queued" | "running")
+                && j.target_lang == lang
+                && j.pages == pages
+        });
+        match same {
+            Some(j) => return Ok(j),
+            None => {
+                let id = db::insert_job(&conn, book_id, &lang, &pages)?;
+                db::job(&conn, id)?
+            }
+        }
     };
     app.runner.wake();
     let _ = handle.emit("job-updated", job.clone());
@@ -691,7 +711,6 @@ fn settings_get(app: State<App>) -> Res<BTreeMap<String, String>> {
     let mut s = db::all_settings(&app.db.lock().unwrap())?;
     s.entry("fonts_dir".into())
         .or_insert_with(default_fonts_dir);
-    s.entry("target_lang".into()).or_insert_with(|| "tr".into());
     s.entry("batch_chars".into())
         .or_insert_with(|| "5000".into());
     Ok(s)

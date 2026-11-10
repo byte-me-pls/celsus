@@ -381,6 +381,17 @@ async fn jobs_are_checked_and_only_their_people_can_stop_them() {
     let veli = s.member(&owner, "veli@lib.test", "member").await;
     let id = id_of(&upload(&s, &ali, sample_pdf("x"), "?visibility=shared").await);
     let path = format!("/api/books/{id}/jobs");
+    // Without a model nothing can be translated, and the answer says so instead of queueing a job that fails.
+    let r = s.post(&ali, &path, json!({"lang": "tr", "pages": [1]})).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert_eq!(r.body["error"], "no_model");
+    assert!(
+        s.get(&ali, "/api/jobs").await.body["jobs"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    choose_fake_model(&s, &owner).await;
     for bad in [
         json!({"lang": "tr", "pages": []}),
         json!({"lang": "tr", "pages": [0]}),
@@ -394,7 +405,6 @@ async fn jobs_are_checked_and_only_their_people_can_stop_them() {
             "{bad}"
         );
     }
-    // Nothing translates without a model, so the job stays visible as queued or failed; that is fine here.
     let job = s
         .post(&ali, &path, json!({"lang": "tr", "pages": [1, 1, 1]}))
         .await;
@@ -576,14 +586,12 @@ async fn fake_model() -> String {
     format!("http://{addr}/v1")
 }
 
-#[tokio::test]
-async fn a_job_translates_end_to_end() {
-    let s = Server::new().await;
-    let owner = s.owner().await;
+/// Make the stand-in model the one that translates.
+async fn choose_fake_model(s: &Server, owner: &Browser) {
     let url = fake_model().await;
     let pid = s
         .post(
-            &owner,
+            owner,
             "/api/admin/providers",
             json!({"name": "Fake", "url": url, "allow_local": true}),
         )
@@ -592,13 +600,20 @@ async fn a_job_translates_end_to_end() {
         .as_i64()
         .unwrap();
     s.send(
-        &owner,
+        owner,
         Method::PUT,
         "/api/admin/models",
         Some(json!({"task": "translate", "provider_id": pid, "model": "fake"})),
         &[],
     )
     .await;
+}
+
+#[tokio::test]
+async fn a_job_translates_end_to_end() {
+    let s = Server::new().await;
+    let owner = s.owner().await;
+    choose_fake_model(&s, &owner).await;
     let id = id_of(&upload(&s, &owner, sample_pdf("Hello world"), "").await);
     let job = s
         .post(

@@ -41,6 +41,7 @@ const state = {
   jobs: [],
   live: new Map(),
   settings: { target_lang: UI_LANG === "zh" ? "zh-hans" : UI_LANG },
+  stopping: new Set(), // running jobs the user has asked to stop
   filter: "all",
   query: "",
 };
@@ -630,7 +631,7 @@ const drawing = new Set();
 async function renderPictures(book) {
   const list = $("#pic-list");
   if (!list) return;
-  const lang = ($("#b-target")?.value.trim() || state.settings.target_lang || "tr").toLowerCase();
+  const lang = ($("#b-target")?.value.trim() || state.settings.target_lang || (UI_LANG === "zh" ? "zh-hans" : UI_LANG)).toLowerCase();
   const page = Math.max(1, Math.min(book.pages, Number($("#pic-page").value) || 1));
   $("#pic-lang").textContent = langName(lang);
   const base = `/api/books/${encodeURIComponent(book.id)}/pictures`;
@@ -728,23 +729,35 @@ async function renderBookStatus(book) {
 
 function jobRow(job, showBook = true) {
   const pct = job.total_pages ? (100 * job.done_pages) / job.total_pages : 0;
+  const stopping = job.status === "running" && state.stopping.has(job.id);
   const sub = job.error
-    ? `<p class="error">${esc(job.error)}</p>`
+    ? `<p class="error">${esc(T.errors?.[job.error] || job.error)}</p>`
     : `<p>${esc(langName(job.lang))} · ${esc(T.pagesN(job.total_pages))} · ${esc(fmtDate(job.created_at))} · ${esc(job.by)}${job.tokens ? ` · ${esc(T.tokens(job.tokens))}` : ""}</p>`;
   const actions = [];
-  if (job.status === "queued" || job.status === "running") actions.push(`<button class="quiet-button" data-cancel="${esc(job.id)}">${esc(T.cancel)}</button>`);
+  if ((job.status === "queued" || job.status === "running") && !stopping) actions.push(`<button class="quiet-button" data-cancel="${esc(job.id)}">${esc(T.cancel)}</button>`);
   if (job.status === "failed" || job.status === "cancelled") actions.push(`<button class="quiet-button" data-retry="${esc(job.id)}">${esc(T.retry)}</button>`);
   if (showBook) actions.push(`<button class="quiet-button" data-open="${esc(job.book_id)}">${esc(T.openBook)}</button>`);
   return `<div class="job-row">
     <div class="job-main"><h3>${esc(showBook ? job.book_title : `${T.pagesN(job.total_pages)} · ${langName(job.lang)}`)}</h3>${sub}</div>
-    <span><span class="chip ${esc(job.status)}">${esc(T["st_" + job.status])}</span></span>
+    <span><span class="chip ${esc(job.status)}">${esc(stopping ? T.st_stopping : T["st_" + job.status])}</span></span>
     <div class="job-progress"><span>${job.done_pages}/${job.total_pages}</span><div class="meter"><span class="w" data-w="${pct}"></span></div></div>
     <div class="job-actions">${actions.join("")}</div>
   </div>`;
 }
 
 function bindJobActions(root) {
-  for (const b of $$("[data-cancel]", root)) b.onclick = async () => { await apiCall("POST", `/api/jobs/${b.dataset.cancel}/cancel`, {}); poll(true); };
+  for (const b of $$("[data-cancel]", root)) b.onclick = async () => {
+    const id = b.dataset.cancel;
+    // A running job stops after the request it is waiting for; say so at once.
+    if (state.jobs.find((j) => j.id === id)?.status === "running") {
+      state.stopping.add(id);
+      const chip = b.closest(".job-row")?.querySelector(".chip");
+      if (chip) chip.textContent = T.st_stopping;
+      b.remove();
+    }
+    await apiCall("POST", `/api/jobs/${id}/cancel`, {});
+    poll(true);
+  };
   for (const b of $$("[data-retry]", root)) b.onclick = async () => { await apiCall("POST", `/api/jobs/${b.dataset.retry}/retry`, {}); poll(true); };
   for (const b of $$("[data-open]", root)) b.onclick = () => go("book", { id: b.dataset.open });
 }
@@ -767,10 +780,15 @@ async function poll(soon = false) {
   if (!soon) {
     try {
       await refreshCounts();
-    } catch { return; }
+    } catch {
+      // The server did not answer this time (a restart, a dropped connection): ask again later.
+      pollTimer = setTimeout(() => poll(), 10000);
+      return;
+    }
     let finished = false;
     for (const j of state.jobs) {
       const before = lastJobs.get(j.id);
+      if (j.status !== "running") state.stopping.delete(j.id);
       if (before && (before.status !== j.status || before.done_pages !== j.done_pages)) {
         emit("job-progress", { job_id: j.id, book_id: j.book_id, done: j.done_pages, total: j.total_pages, page: 0 });
         if (before.status !== j.status) emit("job-updated", j);
@@ -919,7 +937,7 @@ async function drawKeys(me) {
     const days = Number($("#k-days").value) || null;
     const r = await apiCall("POST", "/api/keys", { name: $("#k-name").value, scopes, expires_in_days: days });
     await drawKeys(me);
-    $("#k-new").innerHTML = `<div class="new-key"><p class="hint">${esc(T.newKey)}</p><code class="secret">${esc(r.key)}</code><button class="quiet-button" id="k-copy">${esc(T.copyCodes.split(" ")[0])}</button></div>`;
+    $("#k-new").innerHTML = `<div class="new-key"><p class="hint">${esc(T.newKey)}</p><code class="secret">${esc(r.key)}</code><button class="quiet-button" id="k-copy">${esc(T.copy)}</button></div>`;
     $("#k-copy").onclick = async () => { await navigator.clipboard.writeText(r.key); toast(T.copied); };
   };
 }
@@ -965,7 +983,7 @@ async function adminMembers(box) {
   $("#inv-make").onclick = async () => {
     const r = await apiCall("POST", "/api/admin/invites", { role: $("#inv-role")?.value || "member" });
     const link = `${location.origin}/#/invite/${encodeURIComponent(r.token)}`;
-    $("#inv-out").innerHTML = `<div class="new-key"><p class="hint">${esc(T.inviteLink)}</p><code class="secret">${esc(link)}</code><button class="quiet-button" id="inv-copy">${esc(T.copyCodes.split(" ")[0])}</button></div>`;
+    $("#inv-out").innerHTML = `<div class="new-key"><p class="hint">${esc(T.inviteLink)}</p><code class="secret">${esc(link)}</code><button class="quiet-button" id="inv-copy">${esc(T.copy)}</button></div>`;
     $("#inv-copy").onclick = async () => { await navigator.clipboard.writeText(link); toast(T.copied); };
   };
 }

@@ -18,8 +18,8 @@ use tauri::{AppHandle, Emitter};
 
 use celsus_store::{db, library, secrets};
 
-/// The running job's id and its cancel flag.
-type Current = Arc<Mutex<Option<(i64, Arc<AtomicBool>)>>>;
+/// The running job: its id, its book and its cancel flag.
+type Current = Arc<Mutex<Option<(i64, i64, Arc<AtomicBool>)>>>;
 
 #[derive(Clone)]
 pub struct Runner {
@@ -35,11 +35,21 @@ impl Runner {
     /// Stop the job if it is the one running; returns false if it is not.
     pub fn cancel_running(&self, job: i64) -> bool {
         match &*self.current.lock().unwrap() {
-            Some((id, flag)) if *id == job => {
+            Some((id, _, flag)) if *id == job => {
                 flag.store(true, Ordering::Relaxed);
                 true
             }
             _ => false,
+        }
+    }
+
+    /// Stop whatever is running on a book, so a book that is being removed is not translated (and paid for)
+    /// any further.
+    pub fn cancel_book(&self, book: i64) {
+        if let Some((_, b, flag)) = &*self.current.lock().unwrap() {
+            if *b == book {
+                flag.store(true, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -78,7 +88,8 @@ fn worker(app: AppHandle, db_path: &Path, library: &Path, wake: Receiver<()>, cu
         match db::next_queued(&conn) {
             Ok(Some(id)) => {
                 let cancel = Arc::new(AtomicBool::new(false));
-                *current.lock().unwrap() = Some((id, cancel.clone()));
+                let book = db::job(&conn, id).map(|j| j.book_id).unwrap_or(-1);
+                *current.lock().unwrap() = Some((id, book, cancel.clone()));
                 let outcome = run(&app, &conn, library, id, &cancel);
                 *current.lock().unwrap() = None;
                 let (status, error) = match outcome {
@@ -113,8 +124,7 @@ fn run(
     db::set_status(conn, id, "running", None)?;
     let _ = app.emit("job-updated", db::job(conn, id)?);
 
-    let (provider, model) = db::model_for(conn, "translate")?
-        .ok_or("Choose a translation model in Settings → Models first.")?;
+    let (provider, model) = db::model_for(conn, "translate")?.ok_or("no_model")?;
     let client = OpenAiCompatible::new(
         provider.url.clone(),
         secrets::get_key(provider.id),
@@ -151,6 +161,8 @@ fn run(
 
     let total = wanted.len();
     let mut done = 0usize;
+    // Pages of this job where the model gave no usable answer for some of the text.
+    let mut unfinished = 0usize;
     let (mut replaced, mut kept) = (0i64, 0i64);
     let mut progress = |p: Progress| {
         let mut message = None;
@@ -160,12 +172,20 @@ fn run(
                 page: n,
                 replaced: r,
                 kept: k,
+                missing,
                 ..
             } => {
                 page = n;
-                let _ = db::mark_page(conn, book.id, &job.target_lang, n as i64, k as i64);
+                // A page with text left untranslated is not marked, so "missing pages" picks it up again.
+                if missing == 0 {
+                    let _ = db::mark_page(conn, book.id, &job.target_lang, n as i64, k as i64);
+                }
                 if wanted.contains(&(n as i64)) {
-                    done += 1;
+                    if missing == 0 {
+                        done += 1;
+                    } else {
+                        unfinished += 1;
+                    }
                     replaced += r as i64;
                     kept += k as i64;
                 }
@@ -210,11 +230,7 @@ fn run(
         cancel,
     )
     .map_err(|e| e.to_string())?;
-    std::fs::write(
-        library::output_file(library, book.id, &job.target_lang),
-        bytes,
-    )
-    .map_err(|e| e.to_string())?;
+    // The counters first: what a failed run used was still spent.
     db::job_counters(
         conn,
         id,
@@ -227,5 +243,25 @@ fn run(
         outcome.usage.completion_tokens as i64,
         &model,
     )?;
+    // A run that stopped early still has its finished pages; only one that wrote nothing leaves the file alone.
+    if outcome.pages > 0 {
+        let output = library::output_file(library, book.id, &job.target_lang);
+        // Written beside the old file and swapped in, so a crash cannot leave half a PDF.
+        let part = output.with_extension("pdf.part");
+        std::fs::write(&part, &bytes).map_err(|e| e.to_string())?;
+        if std::fs::rename(&part, &output).is_err() {
+            // The old file is open somewhere; write over it instead.
+            std::fs::write(&output, &bytes).map_err(|e| e.to_string())?;
+            let _ = std::fs::remove_file(&part);
+        }
+    }
+    if let Some(why) = outcome.failed {
+        return Err(why);
+    }
+    if unfinished > 0 && !outcome.cancelled {
+        return Err(format!(
+            "The model gave no usable answer for some text on {unfinished} page(s). Translate the missing pages again."
+        ));
+    }
     Ok(outcome.cancelled)
 }

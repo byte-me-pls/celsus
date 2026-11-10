@@ -325,7 +325,7 @@ async fn a_book_is_translated_over_mcp_with_an_api_key() {
         .layout
         .blocks
         .iter()
-        .map(|b| b.source())
+        .map(|b| b.plain())
         .collect();
     assert!(text.contains("Bölüm 7"), "{text}");
     let pages = s.get(&owner, &format!("/api/books/{book}/pages/tr")).await;

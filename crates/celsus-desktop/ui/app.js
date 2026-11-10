@@ -4,6 +4,8 @@ const { listen } = window.__TAURI__.event;
 /* ============================== strings ============================== */
 
 const T = uiStrings("app");
+// A new library translates into the language the interface is shown in.
+const DEFAULT_TARGET = UI_LANG === "zh" ? "zh-hans" : UI_LANG;
 
 // The full list (about 130 languages) comes from the backend; these are shown until it arrives.
 let LANGUAGES = [
@@ -47,9 +49,16 @@ async function call(cmd, args) {
   try {
     return await invoke(cmd, args);
   } catch (e) {
-    toast(String(e), true);
+    // Some failures come as a code, shown in the interface language.
+    toast(T.errors?.[String(e)] || String(e), true);
     throw e;
   }
+}
+
+async function loadSettings() {
+  const s = await invoke("settings_get");
+  if (!s.target_lang) s.target_lang = DEFAULT_TARGET;
+  return s;
 }
 
 const state = {
@@ -58,6 +67,7 @@ const state = {
   jobs: [],
   settings: {},
   live: new Map(), // job id -> latest progress
+  stopping: new Set(), // running jobs the user has asked to stop
   covers: new Map(), // book id -> object URL
   filter: "all",
   query: "",
@@ -278,7 +288,7 @@ async function renderBook(id) {
   await refreshCounts();
   const book = await call("book_get", { id });
   setCrumbs(T.navLibrary, book.title, T.translateAction);
-  const target = bookForm.lang || state.settings.target_lang || "tr";
+  const target = bookForm.lang || state.settings.target_lang || DEFAULT_TARGET;
   bookForm = { ...bookForm, bookId: id, lang: bookForm.bookId === id ? bookForm.lang : target };
   if (bookForm.last > book.pages || bookForm.bookId !== id) bookForm.last = Math.min(book.pages, 5);
   main.innerHTML = `
@@ -386,7 +396,7 @@ async function renderBook(id) {
 }
 
 async function chosenPages(book) {
-  const lang = $("#b-target")?.value.trim() || "tr";
+  const lang = ($("#b-target")?.value.trim() || DEFAULT_TARGET).toLowerCase();
   if (bookForm.mode === "all") return Array.from({ length: book.pages }, (_, i) => i + 1);
   if (bookForm.mode === "missing") {
     const done = new Set((await invoke("book_pages", { id: book.id, lang })).map(([p]) => p));
@@ -417,14 +427,22 @@ function estimate(book) {
 async function enqueue(book) {
   const pages = await chosenPages(book);
   if (!pages.length) { toast(T.nothingToDo); return; }
-  const lang = $("#b-target").value.trim() || "tr";
-  if ($("#b-source").value.trim() !== book.source_lang) {
-    await call("book_update", { id: book.id, title: book.title, author: book.author, subject: book.subject, sourceLang: $("#b-source").value });
+  const lang = ($("#b-target").value.trim() || DEFAULT_TARGET).toLowerCase();
+  // One click, one job: the button waits until this one is in the queue.
+  const button = $("#b-enqueue");
+  if (button.disabled) return;
+  button.disabled = true;
+  try {
+    if ($("#b-source").value.trim() !== book.source_lang) {
+      await call("book_update", { id: book.id, title: book.title, author: book.author, subject: book.subject, sourceLang: $("#b-source").value });
+    }
+    await call("job_create", { bookId: book.id, lang, pages });
+    toast(T.enqueued);
+    await refreshCounts();
+    renderBookStatus(book);
+  } finally {
+    button.disabled = false;
   }
-  await call("job_create", { bookId: book.id, lang, pages });
-  toast(T.enqueued);
-  await refreshCounts();
-  renderBookStatus(book);
 }
 
 async function renderBookStatus(book) {
@@ -482,7 +500,7 @@ const drawing = new Set(); // "book/lang/page/image" being redrawn
 async function renderPictures(book) {
   const list = $("#pic-list");
   if (!list) return;
-  const lang = ($("#b-target")?.value.trim() || state.settings.target_lang || "tr").toLowerCase();
+  const lang = ($("#b-target")?.value.trim() || state.settings.target_lang || DEFAULT_TARGET).toLowerCase();
   const page = Math.max(1, Math.min(book.pages, Number($("#pic-page").value) || 1));
   $("#pic-lang").textContent = langName(lang);
   const images = await call("page_images", { id: book.id, page, lang });
@@ -549,24 +567,35 @@ function jobRow(job, showBook = true) {
   const done = live && job.status === "running" ? live.done : job.done_pages;
   const pct = job.total_pages ? (100 * done) / job.total_pages : 0;
   const tokens = job.prompt_tokens + job.completion_tokens;
+  const stopping = job.status === "running" && state.stopping.has(job.id);
   const sub = job.error
-    ? `<p class="error">${esc(job.error)}</p>`
+    ? `<p class="error">${esc(T.errors?.[job.error] || job.error)}</p>`
     : `<p>${esc(langName(job.target_lang))} · ${T.jobPages(job.pages.length)} · ${fmtDate(job.created_at)}${tokens ? ` · ${T.tokens(tokens)}` : ""}</p>`;
   const waiting = live?.message?.startsWith("wait:") && job.status === "running" ? ` · ${T.waitingS(live.message.slice(5))}` : "";
   const actions = [];
-  if (job.status === "queued" || job.status === "running") actions.push(`<button class="quiet-button" data-cancel="${job.id}">${T.cancel}</button>`);
+  if ((job.status === "queued" || job.status === "running") && !stopping) actions.push(`<button class="quiet-button" data-cancel="${job.id}">${T.cancel}</button>`);
   if (job.status === "failed" || job.status === "cancelled") actions.push(`<button class="quiet-button" data-retry="${job.id}">${T.retry}</button>`);
   if (showBook) actions.push(`<button class="quiet-button" data-open="${job.book_id}">${T.openBook}</button>`);
   return `<div class="job-row" data-job-row="${job.id}">
     <div class="job-main"><h3>${showBook ? esc(job.book_title) : T.jobPages(job.pages.length) + " · " + esc(langName(job.target_lang))}</h3>${sub}</div>
-    <span><span class="chip ${job.status}">${T["st_" + job.status]}</span></span>
+    <span><span class="chip ${job.status}">${stopping ? T.st_stopping : T["st_" + job.status]}</span></span>
     <div class="job-progress"><span data-job-text="${job.id}">${done}/${job.total_pages}${waiting}</span><div class="meter"><span data-job-meter="${job.id}" style="width:${pct}%"></span></div></div>
     <div class="job-actions">${actions.join("")}</div>
   </div>`;
 }
 
 function bindJobActions(root) {
-  for (const b of $$("[data-cancel]", root)) b.onclick = () => call("job_cancel", { id: Number(b.dataset.cancel) });
+  for (const b of $$("[data-cancel]", root)) b.onclick = () => {
+    const id = Number(b.dataset.cancel);
+    // A running job stops after the request it is waiting for; say so at once.
+    if (state.jobs.find((j) => j.id === id)?.status === "running") {
+      state.stopping.add(id);
+      const chip = b.closest(".job-row")?.querySelector(".chip");
+      if (chip) chip.textContent = T.st_stopping;
+      b.remove();
+    }
+    call("job_cancel", { id });
+  };
   for (const b of $$("[data-retry]", root)) b.onclick = () => call("job_retry", { id: Number(b.dataset.retry) });
   for (const b of $$("[data-open]", root)) b.onclick = () => go("book", { id: Number(b.dataset.open) });
 }
@@ -585,7 +614,7 @@ async function renderJobs() {
 /* ============================== settings ============================== */
 
 async function renderSettings(tab) {
-  state.settings = await invoke("settings_get");
+  state.settings = await loadSettings();
   const tabs = [["general", T.tGeneral], ["connections", T.tConnections], ["models", T.tModels], ["translation", T.tTranslation], ["fonts", T.tFonts], ["storage", T.tStorage], ["about", T.tAbout]];
   main.innerHTML = `<div class="page-heading"><h1>${T.settingsTitle}</h1></div>
     <div class="settings-layout">
@@ -624,7 +653,7 @@ function settingsGeneral(box) {
   $("#g-theme").value = theme;
   $("#g-ui").onchange = (e) => { try { if (e.target.value === "system") localStorage.removeItem("celsus-ui-lang"); else localStorage.setItem("celsus-ui-lang", e.target.value); } catch {} location.reload(); };
   $("#g-theme").onchange = (e) => setTheme(e.target.value);
-  $("#g-target").onchange = (e) => saveSettings({ target_lang: e.target.value.trim() || "tr" });
+  $("#g-target").onchange = (e) => saveSettings({ target_lang: e.target.value.trim().toLowerCase() || DEFAULT_TARGET });
 }
 
 function settingsSimple(box, fields, extra = "") {
@@ -914,7 +943,7 @@ async function settingsAbout(box) {
 /* ============================== profile ============================== */
 
 async function renderProfile() {
-  state.settings = await invoke("settings_get");
+  state.settings = await loadSettings();
   const u = await invoke("usage_stats");
   const name = state.settings.profile_name || "";
   main.innerHTML = `<div class="page-heading"><h1>${T.profileTitle}</h1></div>
@@ -953,6 +982,7 @@ listen("library-changed", async () => {
 });
 
 listen("job-updated", async ({ payload: job }) => {
+  if (job.status !== "running") state.stopping.delete(job.id);
   await refreshCounts();
   const v = state.route.view;
   if (v === "jobs") renderJobs();
@@ -999,7 +1029,7 @@ invoke("languages").then((list) => {
 applyStrings();
 setTheme(document.documentElement.dataset.theme || "dark");
 (async () => {
-  state.settings = await invoke("settings_get").catch(() => ({}));
+  state.settings = await loadSettings().catch(() => ({ target_lang: DEFAULT_TARGET }));
   await refreshProfile().catch(() => {});
   go("library");
 })();

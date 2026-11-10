@@ -495,7 +495,7 @@ class Reader {
     const pop = $("#rd-pop");
     if (!pop.hidden) { pop.hidden = true; return; }
     const v = this.view;
-    const lang = v.lang !== "orig" ? v.lang : state.settings.target_lang || "tr";
+    const lang = v.lang !== "orig" ? v.lang : state.settings.target_lang || (UI_LANG === "zh" ? "zh-hans" : UI_LANG);
     const done = new Set((await invoke("book_pages", { id: this.book.id, lang }).catch(() => [])).map(([p]) => p));
     const missing = Array.from({ length: this.book.pages }, (_, i) => i + 1).filter((p) => !done.has(p));
     const p = this.page;

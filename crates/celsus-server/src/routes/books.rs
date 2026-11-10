@@ -463,6 +463,27 @@ pub async fn create_job(
             "You already have many jobs waiting.",
         ));
     }
+    // Better said now than by a job that fails a moment later.
+    let model: Option<String> = db
+        .query_opt("SELECT value FROM settings WHERE key = 'model.translate'", &[])
+        .await?
+        .map(|r| r.get(0));
+    if !model.is_some_and(|v| v.contains(':')) {
+        return Err(ApiError::model(
+            "No model is chosen for translation. An admin can choose one under Connections and models."
+                .into(),
+        ));
+    }
+    // The same request sent twice (a double click) is one job.
+    if let Some(same) = db
+        .query_opt(
+            "SELECT id FROM jobs WHERE book_id = $1 AND lang = $2 AND pages = $3 AND status IN ('queued', 'running')",
+            &[&book.id, &lang, &pages],
+        )
+        .await?
+    {
+        return Ok(Json(json!({ "id": same.get::<_, String>(0) })));
+    }
     let job_id = library::new_id();
     db.execute(
         "INSERT INTO jobs (id, book_id, created_by, lang, pages, status, created_at) VALUES ($1, $2, $3, $4, $5, 'queued', $6)",
