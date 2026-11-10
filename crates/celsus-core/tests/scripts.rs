@@ -247,7 +247,7 @@ fn every_script_is_written_and_read_back() {
         let back = celsus_pdf::Document::load(bytes).unwrap();
         let back_pages = back.pages().unwrap();
         let read = extract_page(&back, &back_pages[0], 1).unwrap();
-        let all: String = read.layout.blocks.iter().map(|b| b.source()).collect();
+        let all: String = read.layout.blocks.iter().map(|b| b.plain()).collect();
         let squash = |s: &str| -> Vec<char> {
             let mut v: Vec<char> = s.chars().filter(|c| !c.is_whitespace()).collect();
             v.sort_unstable();

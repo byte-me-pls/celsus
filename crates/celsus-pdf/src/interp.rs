@@ -96,6 +96,8 @@ pub struct TextRun {
     pub angle: f32,
     /// The transformation matrix in effect, to draw new text at the same depth in the content.
     pub ctm: Matrix,
+    /// Bounding box of the clipping path in effect: anything drawn at this depth shows only inside it.
+    pub clip: Bounds,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -106,6 +108,8 @@ pub struct PathItem {
     pub stroked: bool,
     pub filled: bool,
     pub fill: [u8; 3],
+    /// How many text runs had been drawn before it: a filled path covers the earlier text it lies on.
+    pub after: usize,
 }
 
 #[derive(Debug, Default)]
@@ -123,6 +127,7 @@ struct GState {
     ctm: Matrix,
     fill: [u8; 3],
     stroke: [u8; 3],
+    line_width: f64,
     fill_components: usize,
     stroke_components: usize,
     font: Option<(Rc<Font>, Vec<u8>)>,
@@ -143,6 +148,7 @@ impl Default for GState {
             ctm: IDENTITY,
             fill: [0, 0, 0],
             stroke: [0, 0, 0],
+            line_width: 1.0,
             fill_components: 1,
             stroke_components: 1,
             font: None,
@@ -336,6 +342,7 @@ impl Interpreter<'_> {
                     ];
                     gs.ctm = multiply(&m, &gs.ctm);
                 }
+                b"w" => gs.line_width = num(o, 0),
                 // Colour.
                 b"g" => (gs.fill, gs.fill_components) = (to_rgb(&[num(o, 0)]), 1),
                 b"G" => (gs.stroke, gs.stroke_components) = (to_rgb(&[num(o, 0)]), 1),
@@ -505,13 +512,39 @@ impl Interpreter<'_> {
                     let stroked = matches!(name, b"S" | b"s" | b"B" | b"B*" | b"b" | b"b*");
                     let filled = matches!(name, b"f" | b"F" | b"f*" | b"B" | b"B*" | b"b" | b"b*");
                     if stroked || filled {
+                        let [a, b, c, d, ..] = gs.ctm;
+                        let pen = gs.line_width * (a * d - b * c).abs().sqrt();
                         for sp in &subpaths {
+                            let (mut bounds, is_rect) = (bounds_of(sp), is_axis_rect(sp));
+                            // A rule drawn with a broad pen is a bar: the label on it stands inside a box.
+                            if stroked && !filled && is_rect && pen > 4.0 {
+                                let half = (pen / 2.0) as f32;
+                                let (w, h) = (bounds[2] - bounds[0], bounds[3] - bounds[1]);
+                                if h <= w {
+                                    bounds[1] -= half;
+                                    bounds[3] += half;
+                                }
+                                if w <= h {
+                                    bounds[0] -= half;
+                                    bounds[2] += half;
+                                }
+                                self.out.paths.push(PathItem {
+                                    bounds,
+                                    is_rect,
+                                    stroked: false,
+                                    filled: true,
+                                    fill: gs.stroke,
+                                    after: self.out.runs.len(),
+                                });
+                                continue;
+                            }
                             self.out.paths.push(PathItem {
-                                bounds: bounds_of(sp),
-                                is_rect: is_axis_rect(sp),
+                                bounds,
+                                is_rect,
                                 stroked,
                                 filled,
                                 fill: gs.fill,
+                                after: self.out.runs.len(),
                             });
                         }
                     }
@@ -696,6 +729,7 @@ impl Interpreter<'_> {
             gs.fill
         };
         self.out.runs.push(TextRun {
+            clip: gs.clip,
             source,
             op,
             glyphs,

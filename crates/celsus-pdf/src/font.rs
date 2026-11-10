@@ -31,6 +31,8 @@ pub struct Font {
     /// Ascent and descent in text space units (fractions of the font size).
     pub ascent: f32,
     pub descent: f32,
+    /// The plain letters the font lists, each with its width at size 1: what its design can be told by.
+    pub letters: Vec<(char, f32)>,
     simple_unicode: Vec<Option<String>>,
     simple_widths: Vec<f32>,
     cmap: CMap,
@@ -64,9 +66,12 @@ impl Font {
             .get_in(dict, "BaseFont")
             .and_then(|n| n.as_name().map(|n| String::from_utf8_lossy(n).into_owned()))
             .unwrap_or_default();
+        // Six letters by the rule; some writers put six hexadecimal digits there.
         let name = match base.split_once('+') {
             Some((prefix, rest))
-                if prefix.len() == 6 && prefix.bytes().all(|b| b.is_ascii_uppercase()) =>
+                if prefix.len() == 6
+                    && (prefix.bytes().all(|b| b.is_ascii_uppercase())
+                        || prefix.bytes().all(|b| b.is_ascii_hexdigit())) =>
             {
                 rest.to_owned()
             }
@@ -88,6 +93,7 @@ impl Font {
             fixed_pitch: false,
             ascent: 0.8,
             descent: -0.2,
+            letters: Vec::new(),
             simple_unicode: vec![None; 256],
             simple_widths: vec![0.0; 256],
             cmap: CMap::default(),
@@ -113,10 +119,27 @@ impl Font {
             .get_in(descriptor_owner, "FontDescriptor")
             .and_then(|d| d.as_dict().cloned());
         font.apply_descriptor(doc, descriptor.as_ref());
+        // The font itself, where it is a TrueType one put into the file. The largest ones (Chinese, Japanese)
+        // are not unpacked for the little they would add.
+        let program = descriptor
+            .as_ref()
+            .and_then(|d| doc.get_in(d, "FontFile2"))
+            .and_then(|o| {
+                let stream = o.as_stream()?;
+                let size = doc.get_in(&stream.dict, "Length1").and_then(|l| l.as_i64());
+                (size.unwrap_or(0) <= 4 << 20).then(|| doc.stream_data(stream).ok())?
+            });
+        // A font without a name worth the word still says in its own header whether it is bold or italic.
+        if let Some((bold, italic)) = program.as_deref().and_then(crate::ttf::style_bits) {
+            font.bold |= bold;
+            font.italic |= italic;
+        }
 
         match kind {
             FontKind::Composite => font.load_composite(doc, dict, descendant.as_ref()),
-            FontKind::Simple | FontKind::Type3 => font.load_simple(doc, dict, descriptor.as_ref()),
+            FontKind::Simple | FontKind::Type3 => {
+                font.load_simple(doc, dict, descriptor.as_ref(), program.as_deref())
+            }
         }
         font
     }
@@ -160,6 +183,13 @@ impl Font {
             || ["bold", "black", "heavy", "semibold", "demi", ",bd", "-bd"]
                 .iter()
                 .any(|k| lower.contains(k));
+        // Books set with TeX: the names say more than the flags do.
+        if let Some(tex) = tex_style(&lower) {
+            self.serif |= tex.serif;
+            self.bold |= tex.bold;
+            self.italic |= tex.italic;
+            self.fixed_pitch |= tex.mono;
+        }
         if let Some(a) = num("Ascent").filter(|a| *a > 100.0 && *a < 2000.0) {
             self.ascent = (a / 1000.0) as f32;
         }
@@ -171,7 +201,13 @@ impl Font {
         }
     }
 
-    fn load_simple(&mut self, doc: &Document, dict: &Dict, descriptor: Option<&Dict>) {
+    fn load_simple(
+        &mut self,
+        doc: &Document,
+        dict: &Dict,
+        descriptor: Option<&Dict>,
+        program: Option<&[u8]>,
+    ) {
         // Widths.
         let first = doc
             .get_in(dict, "FirstChar")
@@ -199,6 +235,7 @@ impl Font {
         }
         let missing = self.default_width;
         let widths = doc.get_in(dict, "Widths").and_then(|w| numbers(&w));
+        let listed = first..first + widths.as_ref().map_or(0, Vec::len);
         match widths {
             Some(w) => {
                 for (i, v) in w.iter().enumerate() {
@@ -275,6 +312,22 @@ impl Font {
         for (code, name) in differences {
             self.simple_unicode[usize::from(code)] = glyph_name_to_unicode(&name);
         }
+        // Only the codes the font lists a width for: the others all share the width of a missing glyph.
+        let letters = letter_widths(listed.filter(|&code| code < 256).filter_map(|code| {
+            let text = match &self.to_unicode {
+                Some(map) => map.unicode.get(&(code as u32)),
+                None => self.simple_unicode[code].as_ref(),
+            }?;
+            Some((text.as_str(), self.simple_widths[code]))
+        }));
+        // A subset may list every code, and give the ones it leaves empty the width of the glyph the font
+        // draws for a code it has no shape for.
+        self.fixed_pitch |= even_pitch(&letters, None)
+            || (letters.len() >= FEW_LETTERS
+                && program
+                    .and_then(empty_glyph_width)
+                    .is_some_and(|empty| even_pitch(&letters, Some(empty))));
+        self.letters = letters;
     }
 
     fn load_composite(&mut self, doc: &Document, dict: &Dict, descendant: Option<&Dict>) {
@@ -339,6 +392,15 @@ impl Font {
                 }
             }
         }
+        if let Some(map) = &self.to_unicode {
+            let letters = letter_widths(map.unicode.iter().map(|(&code, text)| {
+                let cid = self.cmap.cid(code);
+                let width = self.cid_widths.get(&cid).copied();
+                (text.as_str(), width.unwrap_or(self.default_width))
+            }));
+            self.fixed_pitch |= even_pitch(&letters, None);
+            self.letters = letters;
+        }
     }
 
     /// Split a shown string into glyphs.
@@ -386,6 +448,58 @@ impl Font {
             })
             .collect()
     }
+}
+
+/// A handful of letters of one width proves nothing about a font.
+const FEW_LETTERS: usize = 12;
+
+/// The plain letters among the glyphs of a font, each with its width.
+fn letter_widths<'a>(glyphs: impl Iterator<Item = (&'a str, f32)>) -> Vec<(char, f32)> {
+    glyphs
+        .filter_map(|(text, width)| {
+            let mut chars = text.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) if c.is_ascii_alphabetic() && width > 0.0 => Some((c, width)),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// Whether the letters of a font all advance by the same amount: that is what makes a face fixed pitch,
+/// whatever its name and its flags say. Letters as wide as `empty`, the glyph for a missing shape, are
+/// codes nothing is drawn from.
+fn even_pitch(letters: &[(char, f32)], empty: Option<f32>) -> bool {
+    let same = |a: f32, b: f32| (a - b).abs() <= b * 0.01;
+    let mut seen: Vec<char> = Vec::new();
+    let mut pitch = None;
+    for &(c, width) in letters {
+        if empty.is_some_and(|e| same(width, e)) {
+            continue;
+        }
+        if !same(width, *pitch.get_or_insert(width)) {
+            return false;
+        }
+        if !seen.contains(&c) {
+            seen.push(c);
+        }
+    }
+    seen.len() >= FEW_LETTERS
+}
+
+/// The width, in ems, of the first glyph of a TrueType font: the one drawn where a shape is missing.
+fn empty_glyph_width(font: &[u8]) -> Option<f32> {
+    let short = |at: usize| font.get(at..at.checked_add(2)?).map(|b| u16::from_be_bytes([b[0], b[1]]));
+    let table = |tag: &[u8; 4]| {
+        (0..usize::from(short(4)?)).find_map(|i| {
+            let entry = font.get(12 + 16 * i..28 + 16 * i)?;
+            (&entry[..4] == tag)
+                .then(|| u32::from_be_bytes([entry[8], entry[9], entry[10], entry[11]]) as usize)
+        })
+    };
+    let per_em = short(table(b"head")?.checked_add(18)?)?;
+    let width = short(table(b"hmtx")?)?;
+    (per_em > 0).then(|| f32::from(width) / f32::from(per_em))
 }
 
 /// Drop control characters and private-use code points that carry no text.
@@ -437,5 +551,116 @@ fn standard_width(name: &str, code: u8) -> f32 {
                 556.0
             }
         }
+    }
+}
+
+struct TexStyle {
+    serif: bool,
+    bold: bool,
+    italic: bool,
+    mono: bool,
+}
+
+/// The style of a Computer Modern text font from its (lower-case) name, e.g. `abcdef+cmbx12`: the family TeX
+/// sets books in, whose names carry none of the usual words. Fonts of formulas and symbols are left alone.
+fn tex_style(lower: &str) -> Option<TexStyle> {
+    let name = lower.rsplit('+').next().unwrap_or(lower);
+    let family = name.trim_end_matches(|c: char| c.is_ascii_digit());
+    if family.len() == name.len() {
+        return None;
+    }
+    let (serif, bold, italic, mono) = match family {
+        "cmr" | "cmcsc" | "cmdunh" | "cmu" => (true, false, false, false),
+        "cmb" | "cmbx" => (true, true, false, false),
+        "cmti" | "cmsl" => (true, false, true, false),
+        "cmbxti" | "cmbxsl" => (true, true, true, false),
+        "cmss" => (false, false, false, false),
+        "cmssbx" | "cmssdc" => (false, true, false, false),
+        "cmssi" => (false, false, true, false),
+        "cmtt" | "cmtcsc" => (false, false, false, true),
+        "cmitt" | "cmsltt" => (false, false, true, true),
+        _ => return None,
+    };
+    Some(TexStyle {
+        serif,
+        bold,
+        italic,
+        mono,
+    })
+}
+
+#[cfg(test)]
+mod tex_tests {
+    use super::{empty_glyph_width, even_pitch, letter_widths, tex_style};
+
+    #[test]
+    fn letters_of_one_width_make_a_fixed_pitch() {
+        let letters = ["a", "b", "c", "d", "e", "f", "g", "i", "l", "m", "n", "o", "t", "w"];
+        let fixed = |glyphs: Vec<(&str, f32)>, empty| even_pitch(&letter_widths(glyphs.into_iter()), empty);
+        assert!(fixed(letters.iter().map(|&c| (c, 0.5)).collect(), None));
+        // The wide forms of another script and what is not a letter do not count.
+        let mut mixed: Vec<(&str, f32)> = letters.iter().map(|&c| (c, 0.5)).collect();
+        mixed.extend([("\u{3042}", 1.0), ("", 0.364), ("fi", 0.9)]);
+        assert!(fixed(mixed, None));
+        // A text face: the i is narrower than the m.
+        let text = |c: &str| if c == "i" || c == "l" { 0.278 } else { 0.556 };
+        assert!(!fixed(letters.iter().map(|&c| (c, text(c))).collect(), None));
+        // Numbers are of one width in most faces, and four letters are too few to tell.
+        let digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d"];
+        assert!(!fixed(digits.iter().map(|&c| (c, 0.5)).collect(), None));
+    }
+
+    #[test]
+    fn the_codes_a_subset_leaves_empty_do_not_hide_the_pitch() {
+        // Every code is listed; the capitals are not in the subset and have the width of the empty glyph.
+        let lower = "abcdefgiklnoprstuxy".chars().map(|c| (c, 0.5));
+        let upper = ('A'..='Z').map(|c| (c, 0.364));
+        let letters: Vec<(char, f32)> = lower.chain(upper).collect();
+        assert!(!even_pitch(&letters, None));
+        assert!(even_pitch(&letters, Some(0.364)));
+        // Four letters of a text face that happen to be as wide as each other are still too few.
+        let word: Vec<(char, f32)> = "page".chars().map(|c| (c, 0.556)).chain(upper_of_a_text_face()).collect();
+        assert!(!even_pitch(&word, Some(0.6)));
+    }
+
+    fn upper_of_a_text_face() -> impl Iterator<Item = (char, f32)> {
+        ('A'..='Z').map(|c| (c, 0.6))
+    }
+
+    #[test]
+    fn the_empty_glyph_of_a_truetype_font_is_measured() {
+        // Two tables: `head` with 1000 units to the em, `hmtx` whose first width is 364.
+        let mut font = vec![0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0];
+        for (tag, offset, len) in [(b"head", 44u32, 54u32), (b"hmtx", 98, 4)] {
+            font.extend_from_slice(tag);
+            font.extend_from_slice(&[0; 4]);
+            font.extend_from_slice(&offset.to_be_bytes());
+            font.extend_from_slice(&len.to_be_bytes());
+        }
+        let mut head = [0u8; 54];
+        head[18..20].copy_from_slice(&1000u16.to_be_bytes());
+        font.extend_from_slice(&head);
+        font.extend_from_slice(&[0x01, 0x6c, 0, 0]);
+        assert_eq!(empty_glyph_width(&font), Some(0.364));
+        // Cut short, or not a font at all.
+        assert_eq!(empty_glyph_width(&font[..60]), None);
+        assert_eq!(empty_glyph_width(b"%PDF-1.4"), None);
+    }
+
+    #[test]
+    fn computer_modern_names_give_the_style() {
+        let s = tex_style("cmr12").unwrap();
+        assert!(s.serif && !s.bold && !s.italic && !s.mono);
+        let s = tex_style("abcdef+cmbx10").unwrap();
+        assert!(s.serif && s.bold);
+        let s = tex_style("cmti12").unwrap();
+        assert!(s.serif && s.italic);
+        assert!(tex_style("cmtt10").unwrap().mono);
+        assert!(!tex_style("cmss10").unwrap().serif);
+        // Formula fonts, and names that only look alike.
+        assert!(tex_style("cmmi10").is_none());
+        assert!(tex_style("cmsy10").is_none());
+        assert!(tex_style("cmr").is_none());
+        assert!(tex_style("arial").is_none());
     }
 }

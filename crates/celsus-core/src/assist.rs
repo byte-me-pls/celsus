@@ -22,7 +22,10 @@ pub fn instructions(to: &Language) -> String {
     format!(
         "Translate every block into {to}. Keep the author's meaning, negation, register and tone; write natural, \
          grammatical {to}. Translate short labels from figures and tables too. Keep numbers, formulas, code, \
-         identifiers, URLs and proper names exactly as written. Do not add notes, explanations, glosses in \
+         identifiers, URLs and proper names exactly as written. Words printed in another style come with tags around \
+         them, such as <i>...</i>, <b>...</b>, <code>...</code> or <c>...</c>: keep every tag exactly as written, \
+         around the words that say the same in the translation, closed and never one inside another, and add no \
+         tags of your own. Do not add notes, explanations, glosses in \
          parentheses or ellipses that are not in the source. Use the book's subject to choose the right sense of a \
          word, and translate recurring terms the same way every time. Send every block back with \
          submit_translations, keeping its page and id. Blocks are independent pieces of the page: translate each \
@@ -80,7 +83,7 @@ fn page_text(e: &ExtractedPage) -> String {
         .blocks
         .iter()
         .filter(|b| !b.protected)
-        .map(|b| b.source())
+        .map(|b| b.plain())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -313,7 +316,7 @@ pub fn text_size(doc: &Document, pages: &[usize]) -> u64 {
                     .blocks
                     .iter()
                     .filter(|b| !b.protected)
-                    .map(|b| b.source().chars().count() as u64)
+                    .map(|b| b.plain().chars().count() as u64)
                     .sum::<u64>(),
             )
         })
@@ -329,7 +332,7 @@ pub fn opening_text(doc: &Document, max_chars: usize) -> String {
     for (i, page) in pages.iter().enumerate().take(14) {
         if let Ok(e) = extract_page(doc, page, i as u32 + 1) {
             for b in &e.layout.blocks {
-                text.push_str(&b.source());
+                text.push_str(&b.plain());
                 text.push('\n');
             }
         }

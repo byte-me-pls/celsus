@@ -2,32 +2,28 @@
 //!
 //! For every translated block the original glyphs are taken out of the content stream (nothing else on the page
 //! is touched) and the translation is drawn in its place with the closest bundled font, at the original size and
-//! colour. A translation that is longer than the original is wrapped and, if needed, set slightly smaller, but
-//! never below a readable size: such a block keeps its original text and is reported instead.
+//! colour. Where each line goes is worked out for the page as a whole (see [`crate::place`]); a block that
+//! cannot be set at a readable size keeps its original text and is reported instead.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
+use std::rc::Rc;
 
 use celsus_pdf::edit::{Insertion, edit};
 use celsus_pdf::embed::FontEmbedder;
-use celsus_pdf::interp::{Matrix, PageContent, Source, TextRun, invert};
+use celsus_pdf::font::Font;
+use celsus_pdf::interp::{Bounds, Matrix, PageContent, Source, TextRun, invert};
 use celsus_pdf::write::{Saver, real};
 use celsus_pdf::{Dict, Document, ObjRef, Object, Page, Stream};
 use serde::{Deserialize, Serialize};
 
 use crate::extract::{ExtractedPage, GlyphRef};
-use crate::fit::{self, FitOptions, Measure};
+use crate::fit::Measure;
 use crate::fonts::FontSet;
-use crate::layout::{Align, BlockId, PageLayout, Rect, TextBlock};
+use crate::inline;
+use crate::layout::{BlockId, TextBlock};
+use crate::place;
 use crate::shape::Shaper;
-
-/// Translations may shrink to 70% of the original size, and never below 6 pt.
-pub const READABLE: FitOptions = FitOptions {
-    min_scale: 0.7,
-    min_size: 6.0,
-    line_height: 1.15,
-    step: 0.25,
-};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "reason")]
@@ -50,22 +46,18 @@ pub struct PageReport {
 /// Collects translated pages of one document and writes the result.
 pub struct BookWriter<'d> {
     doc: &'d Document,
-    fonts: &'d FontSet,
+    /// The faces to write with: the general ones, and those that stand in for the document's own families.
+    fonts: Rc<FontSet>,
     saver: Saver<'d>,
     embedders: HashMap<usize, (FontEmbedder, ObjRef)>,
     /// Form XObjects already rewritten (shared forms are edited once).
     forms_done: BTreeSet<ObjRef>,
 }
 
-struct Plan<'b> {
-    block: &'b TextBlock,
-    /// Fonts for this block, best first (see [`FontSet::chain_for`]).
-    chain: Vec<usize>,
-    fitted: fit::Fitted,
-}
-
 impl<'d> BookWriter<'d> {
-    pub fn new(doc: &'d Document, fonts: &'d FontSet) -> Self {
+    pub fn new(doc: &'d Document, fonts: &FontSet) -> Self {
+        // Settled here for the whole document, whichever of its pages are written and in whatever order.
+        let fonts = Rc::new(fonts.matched(&document_fonts(doc)));
         BookWriter {
             doc,
             fonts,
@@ -96,21 +88,53 @@ impl<'d> BookWriter<'d> {
         let rtl = to.is_rtl();
         let script = crate::languages::info(to).map(|i| i.script);
         let layout = &extracted.layout;
+        let fonts = Rc::clone(&self.fonts);
+        let fonts: &FontSet = &fonts;
         let mut report = PageReport {
             page: layout.page,
             ..Default::default()
         };
-        let mut plans = Vec::new();
+        // What to place: the translations, and with them short pieces of text that are not translated but stand
+        // on the same line as one (a bullet, the number of a list entry, the page number in a table of
+        // contents). Those move with their line when the page needs it.
+        struct Entry<'b> {
+            block: &'b TextBlock,
+            /// With marks where the words set apart inside the block begin and end.
+            text: String,
+            /// The fonts of the block's own style, then of each style inside it that the text uses.
+            chains: Vec<Vec<usize>>,
+            companion: bool,
+            /// The opening letters, set as a large initial.
+            initial: String,
+        }
+        let mut entries: Vec<Entry> = Vec::new();
         for (id, text) in translations {
             let text = text.trim();
             let Some(block) = layout.blocks.iter().find(|b| &b.id == id) else {
                 report.kept.push(Issue::UnknownBlock { id: id.clone() });
                 continue;
             };
+            // The words set apart inside the block come back with tags around them. Tags that are out of order
+            // are left out and the text is set in the block's own style, as text that runs right to left is.
+            let tagged: String;
+            let text = if !block.inline.is_empty() {
+                let names = inline::names(&block.style, &block.inline);
+                let bare = inline::strip_marks(text);
+                tagged = (!rtl)
+                    .then(|| inline::marked(&bare, &names))
+                    .flatten()
+                    .unwrap_or_else(|| inline::without_tags(&bare));
+                tagged.trim()
+            } else if inline::has_marks(text) {
+                tagged = inline::strip_marks(text);
+                tagged.trim()
+            } else {
+                text
+            };
             if text.is_empty() {
                 continue;
             }
-            let chain = self.fonts.chain_for(&block.style, script);
+            let chain = fonts.chain_for(&block.style, script);
             if chain.is_empty() {
                 report.kept.push(Issue::MissingGlyphs {
                     id: id.clone(),
@@ -118,10 +142,25 @@ impl<'d> BookWriter<'d> {
                 });
                 continue;
             }
-            let shaper = Shaper::new(self.fonts, chain.clone(), rtl);
             // No font for some character: the original stays, and the report says which characters were missing,
             // rather than printing gaps.
-            let missing = shaper.missing(text);
+            let shaper = Shaper::new(fonts, chain.clone(), rtl);
+            let mut missing = shaper.missing(&inline::strip_marks(text));
+            // Small raised letters are rare in fonts. Written as ordinary letters the text is still all there.
+            let plain: String;
+            let text = if missing.iter().any(|c| crate::extract::plain_form(*c).is_some()) {
+                plain = text
+                    .chars()
+                    .map(|c| match crate::extract::plain_form(c) {
+                        Some(p) if missing.contains(&c) => p,
+                        _ => c,
+                    })
+                    .collect();
+                missing = shaper.missing(&inline::strip_marks(&plain));
+                plain.as_str()
+            } else {
+                text
+            };
             if !missing.is_empty() {
                 report.kept.push(Issue::MissingGlyphs {
                     id: id.clone(),
@@ -129,102 +168,178 @@ impl<'d> BookWriter<'d> {
                 });
                 continue;
             }
-            let leading = (block.lines.len() > 1).then(|| {
-                (block.lines.last().unwrap().baseline - block.lines[0].baseline)
-                    / (block.lines.len() - 1) as f32
-            });
-            // Free space below the block is used before the text is made smaller, keeping some paragraph spacing.
-            let room = (next_block_gap(layout, &extracted.obstacles, block)
-                - block.style.font_size * 0.5)
-                .max(0.0);
-            let indent = indent_of(block);
-            let width =
-                available_width(layout, &extracted.obstacles, block).max(block.style.font_size);
-            let measure: &dyn Measure = &shaper;
-            let line_box = (block.lines[0].rect.height() / block.style.font_size).clamp(0.6, 1.5);
-            let area = fit::Area {
-                width,
-                height: block.rect.height() + room,
-                indent,
-                line_box: Some(line_box),
-            };
-            // A one-line heading, label or running head stays on one line if a readable size allows it.
-            let single = (block.lines.len() == 1)
+            // A paragraph that opened with a large initial opens with one again: the first letter of the
+            // translation, with whatever stands before it.
+            let cut = (!rtl && place::takes_initial(block))
                 .then(|| {
-                    let one_line = fit::Area {
-                        height: block.rect.height(),
-                        ..area
-                    };
-                    fit::fit(
-                        text,
-                        one_line,
-                        block.style.font_size,
-                        leading,
-                        measure,
-                        READABLE,
-                    )
+                    text.char_indices()
+                        .filter(|(_, c)| inline::style_of(*c).is_none())
+                        .take(3)
+                        .find(|(_, c)| c.is_alphanumeric())
+                })
+                .flatten()
+                .map_or(0, |(at, c)| at + c.len_utf8());
+            let initial = inline::strip_marks(&text[..cut]);
+            // What follows the initial goes on in the style the initial stood in.
+            let mut rest = String::with_capacity(text.len());
+            rest.extend(inline::last_mark(&text[..cut]));
+            rest.push_str(text[cut..].trim_start());
+            let mut chains = vec![chain];
+            if inline::has_marks(&rest) {
+                chains.extend(block.inline.iter().map(|s| fonts.chain_for(s, script)));
+            }
+            let refilled = (block.lines.len() == 1)
+                .then(|| {
+                    let measure = Styled::new(fonts, &chains, rtl);
+                    refill_leader(&rest, block.rect.x1 - block.rect.x0, |t| {
+                        measure.width(t, block.style.font_size)
+                    })
                 })
                 .flatten();
-            match single.or_else(|| {
-                fit::fit(
-                    text,
-                    area,
-                    block.style.font_size,
-                    leading,
-                    measure,
-                    READABLE,
-                )
-            }) {
-                Some(fitted) => plans.push(Plan {
-                    block,
-                    chain,
-                    fitted,
-                }),
-                None => report.kept.push(Issue::DoesNotFit { id: id.clone() }),
+            entries.push(Entry {
+                block,
+                text: refilled.unwrap_or(rest),
+                chains,
+                companion: false,
+                initial,
+            });
+        }
+        let translated = entries.len();
+        for b in &layout.blocks {
+            if !b.protected || b.lines.len() != 1 || translations.contains_key(&b.id) {
+                continue;
             }
+            let text = b.lines[0].text.trim();
+            if text.is_empty() || text.chars().count() > 6 {
+                continue;
+            }
+            let beside_translation = entries[..translated].iter().any(|e| {
+                let t = e.block;
+                t.lines.len() <= 3
+                    && (t.lines[0].baseline - b.lines[0].baseline).abs() <= 1.0
+                    && (t.rect.x1 <= b.rect.x0 + 1.0 || b.rect.x1 <= t.rect.x0 + 1.0)
+            });
+            if !beside_translation {
+                continue;
+            }
+            // It has to be drawn again if it moves, which is only safe for upright text in an ordinary font: a
+            // bullet from a symbol font is some other character in any other font.
+            let refs = extracted.glyphs.get(&b.id).map_or(&[][..], Vec::as_slice);
+            let plain = !refs.is_empty()
+                && refs.iter().all(|g| {
+                    let run = &extracted.content.runs[g.run];
+                    let name = run.font.name.to_ascii_lowercase();
+                    run.angle.abs() < 0.01
+                        && !["symbol", "dingbat", "wingding", "webding", "math", "extra"]
+                            .iter()
+                            .any(|s| name.contains(s))
+                });
+            let chain = fonts.chain_for(&b.style, script);
+            if !plain
+                || chain.is_empty()
+                || !Shaper::new(fonts, chain.clone(), false)
+                    .missing(text)
+                    .is_empty()
+            {
+                continue;
+            }
+            entries.push(Entry {
+                block: b,
+                text: text.into(),
+                chains: vec![chain],
+                companion: true,
+                initial: String::new(),
+            });
         }
 
-        // Glyphs to take out, per run.
-        let mut removals: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-        for plan in &plans {
-            for g in extracted.glyphs.get(&plan.block.id).into_iter().flatten() {
-                removals.entry(g.run).or_default().insert(g.glyph);
-            }
-        }
+        let shapers: Vec<Styled> = entries
+            .iter()
+            .map(|e| Styled::new(fonts, &e.chains, rtl && !e.companion))
+            .collect();
+        let items: Vec<place::Item> = entries
+            .iter()
+            .zip(&shapers)
+            .map(|(e, shaper)| place::Item {
+                block: e.block,
+                text: &e.text,
+                measure: shaper,
+                companion: e.companion,
+                initial: e.block.initial.filter(|_| !e.initial.is_empty()).map(|cap| {
+                    let width = shaper.width(&e.initial, cap.size);
+                    crate::layout::Rect {
+                        x1: cap.rect.x0 + width,
+                        ..cap.rect
+                    }
+                }),
+            })
+            .collect();
+        let placed = place::solve(layout, &extracted.obstacles, &items, rtl);
+        drop(items);
+
         // New text. Each block is drawn where its original text was drawn (right after the text object that held
         // it), so it keeps its depth: text that a later drawing covered stays covered.
         let [cx0, _, _, cy1] = page.crop_box;
         let content = &extracted.content;
+        let mut removals: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
         let mut drawn_last = String::new();
         let mut insertions: Vec<Insertion> = Vec::new();
         let mut used_faces = BTreeSet::new();
-        for plan in &plans {
-            let refs = extracted
-                .glyphs
-                .get(&plan.block.id)
-                .map_or(&[][..], Vec::as_slice);
-            let place = insertion_point(content, refs);
-            let mut draw = String::new();
-            let shaper = Shaper::new(self.fonts, plan.chain.clone(), rtl);
-            let b = plan.block;
-            let size = plan.fitted.size;
-            let align = match b.align {
-                Align::Left | Align::Justify if rtl => Align::Right,
-                // Separate entries are never stretched to the full measure.
-                Align::Justify if b.keeps_lines() => Align::Left,
-                a => a,
+        let mut drawn = 0usize;
+        for ((entry, shaper), placed) in entries.iter().zip(&shapers).zip(&placed) {
+            let b = entry.block;
+            let Some(placed) = placed else {
+                if !entry.companion {
+                    report.kept.push(Issue::DoesNotFit { id: b.id.clone() });
+                }
+                continue;
             };
-            // Entries of a table of contents keep each line's own indent when the line count is unchanged.
-            let own_indents = !rtl && b.keeps_lines() && plan.fitted.lines.len() == b.lines.len();
-            let c = b.style.color;
-            let rgb =
-                [(c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF].map(|v| real(f64::from(v) / 255.0));
-            let width = available_width(layout, &extracted.obstacles, b).max(b.style.font_size);
-            // Keep the first baseline where it was, scaled with the size.
-            let first = b.rect.y0 + (b.lines[0].baseline - b.rect.y0) * size / b.style.font_size;
+            // A companion whose line stayed where it was is left alone.
+            if entry.companion && placed.shift.abs() < 0.3 {
+                continue;
+            }
+            let refs = extracted.glyphs.get(&b.id).map_or(&[][..], Vec::as_slice);
+            for g in refs {
+                removals.entry(g.run).or_default().insert(g.glyph);
+            }
+            let (size, squeeze) = (placed.size, placed.squeeze);
+            // The original may have been drawn under a clipping path (a printable area, a frame). A translation
+            // that reaches past it would be cut there, so it is drawn after the page's own content instead.
+            // The same goes for a background painted later (the white ground of a figure further down): it left
+            // the original alone, but would cover a translation that grew onto it.
+            let last_run = refs.iter().map(|g| g.run).max().unwrap_or(0);
+            let was = [
+                cx0 as f32 + b.rect.x0,
+                cy1 as f32 - b.rect.y1,
+                cx0 as f32 + b.rect.x1,
+                cy1 as f32 - b.rect.y0,
+            ];
+            let touches = |p: &[f32; 4], r: &[f32; 4]| {
+                p[0] < r[2] - 1.0 && p[2] > r[0] + 1.0 && p[1] < r[3] - 1.0 && p[3] > r[1] + 1.0
+            };
+            let covers: Vec<[f32; 4]> = content
+                .paths
+                .iter()
+                .filter(|p| p.filled && p.after > last_run && !touches(&p.bounds, &was))
+                .map(|p| p.bounds)
+                .collect();
+            let at = insertion_point(content, refs).filter(|(_, _, clip)| {
+                placed.lines.iter().all(|line| {
+                    let (x, y) = (cx0 as f32 + line.x, cy1 as f32 - line.baseline);
+                    let ink = [x, y - size * 0.25, x + line.width, y + size * 0.75];
+                    x >= clip[0] - 1.0
+                        && x + line.width <= clip[2] + 1.0
+                        && y - size * 0.25 >= clip[1] - 1.0
+                        && y + size * 0.75 <= clip[3] + 1.0
+                        && !covers.iter().any(|p| touches(p, &ink))
+                })
+            });
+            let ink = |c: u32| {
+                [(c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF].map(|v| real(f64::from(v) / 255.0))
+            };
+            let rgb = ink(b.style.color);
             // Inserted right after an operator: start on a new line so the two never run together.
-            draw.push_str("\nq ");
-            if let Some((_, ctm)) = &place
+            let mut draw = String::from("\nq ");
+            if let Some((_, ctm, _)) = &at
                 && let Some(inv) = invert(ctm)
             {
                 writeln!(draw, "{} cm", inv.map(real).join(" ")).unwrap();
@@ -232,59 +347,81 @@ impl<'d> BookWriter<'d> {
             // Text state is part of the graphics state the original may have left set.
             writeln!(
                 draw,
-                "{} {} {} rg 0 Tc 0 Tw 100 Tz 0 Ts 0 Tr BT",
-                rgb[0], rgb[1], rgb[2]
+                "{} {} {} rg 0 Tc 0 Tw {} Tz 0 Ts 0 Tr BT",
+                rgb[0],
+                rgb[1],
+                rgb[2],
+                real(f64::from(squeeze * 100.0))
             )
             .unwrap();
-            let last = plan.fitted.lines.len() - 1;
-            for (n, line) in plan.fitted.lines.iter().enumerate() {
-                let shaped = shaper.shape_line(line, size);
-                let w = shaped.width;
-                let indent = if own_indents {
-                    b.lines[n].rect.x0 - b.rect.x0
-                } else if rtl {
-                    0.0
-                } else {
-                    indent_of(b).of_line(n)
-                };
-                let x = match align {
-                    Align::Left | Align::Justify => b.rect.x0 + indent,
-                    Align::Center => (b.rect.x0 + b.rect.x1 - w) / 2.0,
-                    Align::Right => b.rect.x1 - w,
-                };
-                let baseline = first + plan.fitted.leading * n as f32;
-                let (px, py) = (cx0 + f64::from(x), cy1 - f64::from(baseline));
-                writeln!(draw, "1 0 0 1 {} {} Tm", real(px), real(py)).unwrap();
-                // Justified lines spread the free space over their spaces.
-                let spaces = shaped
-                    .runs
-                    .iter()
-                    .flat_map(|r| &r.glyphs)
-                    .filter(|g| g.text == " ")
-                    .count();
-                let stretch = width - indent - w;
-                let per_space = if align == Align::Justify
-                    && n < last
-                    && spaces > 0
-                    && stretch > 0.0
-                    && stretch < width * 0.25
-                {
-                    stretch / spaces as f32
-                } else {
-                    0.0
-                };
+            if let Some(cap) = b.initial.filter(|_| !entry.initial.is_empty()) {
+                let shaped = shaper.of(0).shape_line(&entry.initial, cap.size);
+                let (px, py) = (
+                    cx0 + f64::from(cap.rect.x0),
+                    cy1 - f64::from(cap.rect.y1 + placed.shift),
+                );
+                writeln!(draw, "100 Tz 1 0 0 1 {} {} Tm", real(px), real(py)).unwrap();
                 for run in &shaped.runs {
                     self.font_ref(run.face);
                     used_faces.insert(run.face);
-                    let font = &self.fonts.faces()[run.face].font;
+                    let font = &fonts.faces()[run.face].font;
                     let embedder = &mut self.embedders.get_mut(&run.face).unwrap().0;
-                    write_run(&mut draw, run, font, embedder, size, per_space);
+                    write_run(&mut draw, run, font, embedder, cap.size, 0.0);
+                }
+                writeln!(draw, "{} Tz", real(f64::from(squeeze * 100.0))).unwrap();
+            }
+            // Words set apart inside the block may have a colour of their own.
+            let mut colour = b.style.color;
+            for line in &placed.lines {
+                // Each stretch of the line in the fonts of its style.
+                let shaped: Vec<_> = inline::pieces(&line.text)
+                    .into_iter()
+                    .map(|(style, text)| (style, shaper.of(style).shape_line(text, size)))
+                    .collect();
+                let (px, py) = (cx0 + f64::from(line.x), cy1 - f64::from(line.baseline));
+                writeln!(draw, "1 0 0 1 {} {} Tm", real(px), real(py)).unwrap();
+                // Justified lines spread the free space over their spaces. A line far too short for that (the
+                // words would drift apart) is left ragged.
+                let spaces = shaped
+                    .iter()
+                    .flat_map(|(_, piece)| &piece.runs)
+                    .flat_map(|r| &r.glyphs)
+                    .filter(|g| g.text == " ")
+                    .count();
+                let per_space = match line.fill {
+                    Some(fill)
+                        if spaces > 0 && fill > line.width && fill - line.width < fill * 0.25 =>
+                    {
+                        // The scaling of the letters applies to this too, so it is taken out again.
+                        (fill - line.width) / spaces as f32 / squeeze
+                    }
+                    _ => 0.0,
+                };
+                for (style, piece) in &shaped {
+                    let wanted = style
+                        .checked_sub(1)
+                        .and_then(|k| b.inline.get(k))
+                        .map_or(b.style.color, |s| s.color);
+                    if wanted != colour && !piece.runs.is_empty() {
+                        colour = wanted;
+                        writeln!(draw, "{} rg", ink(colour).join(" ")).unwrap();
+                    }
+                    for run in &piece.runs {
+                        self.font_ref(run.face);
+                        used_faces.insert(run.face);
+                        let font = &fonts.faces()[run.face].font;
+                        let embedder = &mut self.embedders.get_mut(&run.face).unwrap().0;
+                        write_run(&mut draw, run, font, embedder, size, per_space);
+                    }
                 }
             }
             draw.push_str("ET Q\n");
-            report.replaced.push(b.id.clone());
-            match place {
-                Some((at, _)) => insertions.push(Insertion {
+            drawn += 1;
+            if !entry.companion {
+                report.replaced.push(b.id.clone());
+            }
+            match at {
+                Some((at, _, _)) => insertions.push(Insertion {
                     source: Source::Page,
                     at,
                     data: draw.into_bytes(),
@@ -294,7 +431,7 @@ impl<'d> BookWriter<'d> {
         }
         let mut edited = edit(content, &removals, &insertions);
 
-        if plans.is_empty() {
+        if drawn == 0 {
             return Ok(report);
         }
 
@@ -389,46 +526,116 @@ impl<'d> BookWriter<'d> {
         faces.sort_unstable();
         for face in faces {
             let (embedder, target) = &self.embedders[&face];
-            let name = std::path::Path::new(&self.fonts.faces()[face].name)
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| format!("CelsusFont{face}"));
+            let written = &self.fonts.faces()[face];
+            let name = if written.postscript.is_empty() {
+                std::path::Path::new(&written.name)
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| format!("CelsusFont{face}"))
+            } else {
+                written.postscript.clone()
+            };
             embedder.write(&mut self.saver, &name, *target);
         }
         self.saver.save()
     }
 }
 
-/// First-line and hanging indents of a block, measured from its left edge.
-fn indent_of(block: &TextBlock) -> fit::Indent {
-    if block.lines.len() < 2 || !matches!(block.align, Align::Left | Align::Justify) {
-        return fit::Indent::default();
-    }
-    let size = block.style.font_size;
-    let first = block.lines[0].rect.x0 - block.rect.x0;
-    let mut rest: Vec<f32> = block.lines[1..]
-        .iter()
-        .map(|l| l.rect.x0 - block.rect.x0)
-        .collect();
-    rest.sort_by(f32::total_cmp);
-    let rest = rest[rest.len() / 2];
-    let keep = |v: f32| {
-        if v > size * 0.4 && v < size * 6.0 {
-            v
-        } else {
-            0.0
+
+/// A contents entry keeps its row of dots as long as the room allows: the translated title is longer or shorter
+/// than the original one, so the dots between it and the page number are counted again for `width`.
+/// The fonts the pages of a document name in their resources.
+fn document_fonts(doc: &Document) -> Vec<Font> {
+    // More than any book has; a file made to waste time stops here.
+    const MOST: usize = 4096;
+    let mut seen = BTreeSet::new();
+    let mut fonts = Vec::new();
+    for page in doc.pages().unwrap_or_default() {
+        let Some(named) = doc.get_in(&page.resources, "Font") else {
+            continue;
+        };
+        let Some(named) = named.as_dict() else {
+            continue;
+        };
+        for entry in named.values() {
+            let id = entry.as_ref();
+            if fonts.len() >= MOST || id.is_some_and(|id| !seen.insert(id)) {
+                continue;
+            }
+            if let Some(dict) = doc.resolve(entry).ok().as_deref().and_then(Object::as_dict) {
+                fonts.push(Font::load(doc, dict, id));
+            }
         }
-    };
-    fit::Indent {
-        first: keep(first),
-        rest: keep(rest),
+    }
+    fonts
+}
+
+/// The fonts of a block: of its own style, and of each style of the words set apart inside it. Text measured
+/// with it says with marks where each style begins (see [`crate::inline`]).
+struct Styled<'f> {
+    shapers: Vec<Shaper<'f>>,
+}
+
+impl<'f> Styled<'f> {
+    fn new(fonts: &'f FontSet, chains: &[Vec<usize>], rtl: bool) -> Self {
+        Styled {
+            shapers: chains
+                .iter()
+                .map(|chain| Shaper::new(fonts, chain.clone(), rtl))
+                .collect(),
+        }
+    }
+
+    /// The fonts of a style; the block's own where the text uses none of the others.
+    fn of(&self, style: usize) -> &Shaper<'f> {
+        self.shapers.get(style).unwrap_or(&self.shapers[0])
     }
 }
 
+impl Measure for Styled<'_> {
+    fn width(&self, text: &str, size: f32) -> f32 {
+        if self.shapers.len() == 1 {
+            return self.shapers[0].width(text, size);
+        }
+        inline::pieces(text)
+            .into_iter()
+            .map(|(style, piece)| self.of(style).width(piece, size))
+            .sum()
+    }
+
+    fn ascent(&self) -> f32 {
+        self.shapers[0].ascent()
+    }
+
+    fn descent(&self) -> f32 {
+        self.shapers[0].descent()
+    }
+}
+
+fn refill_leader(text: &str, width: f32, measure: impl Fn(&str) -> f32) -> Option<String> {
+    let span = crate::layout::leader_span(text)?;
+    let unit = if text[span.clone()].contains(char::is_whitespace) { " ." } else { "." };
+    let head = text[..span.start].trim_end();
+    let tail = text[span.end..].trim();
+    let free = width - measure(head) - measure(tail) - measure(" ") * 2.0;
+    let dots = ((free / measure(unit).max(0.1)) as usize).clamp(3, 400);
+    let mut out = String::with_capacity(text.len());
+    out.push_str(head);
+    if unit == "." && !head.is_empty() {
+        out.push(' ');
+    }
+    out.push_str(&unit.repeat(dots));
+    if !tail.is_empty() {
+        out.push(' ');
+        out.push_str(tail);
+    }
+    Some(out)
+}
+
 /// Where to draw a block's translation: just after the text object (`ET`) that drew its last glyph in the page's
-/// own content, with the transformation matrix in effect there. `None` (text inside a form XObject) means
-/// drawing at the end of the page instead.
-fn insertion_point(content: &PageContent, glyphs: &[GlyphRef]) -> Option<(usize, Matrix)> {
+/// own content, with the transformation matrix and the clipping area in effect there. `None` (text inside a form
+/// XObject) means drawing at the end of the page instead.
+fn insertion_point(content: &PageContent, glyphs: &[GlyphRef]) -> Option<(usize, Matrix, Bounds)> {
     let runs: Vec<&TextRun> = glyphs.iter().map(|g| &content.runs[g.run]).collect();
     if runs.is_empty() || runs.iter().any(|r| r.source != Source::Page) {
         return None;
@@ -442,7 +649,7 @@ fn insertion_point(content: &PageContent, glyphs: &[GlyphRef]) -> Option<(usize,
         .find(|(_, o)| o.operator == b"ET")?
         .0;
     // The matrix cannot change inside a text object, so the run's matrix still holds after its ET.
-    Some((ops[et].end, last.ctm))
+    Some((ops[et].end, last.ctm, last.clip))
 }
 
 /// Draw one shaped run: glyph ids in a `TJ` array, with adjustments wherever the shaped position differs from the
@@ -502,72 +709,4 @@ fn write_run(
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02X}")).collect()
-}
-
-/// How wide the translation of `block` may be. A line can grow into the empty space beside it, in the direction
-/// its alignment allows, up to the nearest text at the same height or the edge of the page's text area.
-pub fn available_width(layout: &PageLayout, obstacles: &[Rect], block: &TextBlock) -> f32 {
-    let r = &block.rect;
-    let gap = block.style.font_size * 0.5;
-    let content_left = layout.blocks.iter().map(|b| b.rect.x0).fold(r.x0, f32::min);
-    let content_right = layout.blocks.iter().map(|b| b.rect.x1).fold(r.x1, f32::max);
-    let others = layout
-        .blocks
-        .iter()
-        .filter(|o| o.id != block.id)
-        .map(|o| o.rect);
-    let beside: Vec<Rect> = others
-        .chain(obstacles.iter().copied())
-        .filter(|o| o.y0 < r.y1 && o.y1 > r.y0)
-        .collect();
-    // A box drawn around the block limits it at its inner edges.
-    let enclosing = obstacles.iter().filter(|o| {
-        o.x0 <= r.x0 + 0.5 && o.x1 >= r.x1 - 0.5 && o.y0 <= r.y0 + 0.5 && o.y1 >= r.y1 - 0.5
-    });
-    let (mut right_limit, mut left_limit) = (content_right, content_left);
-    for o in enclosing {
-        right_limit = right_limit.min(o.x1 - 2.0);
-        left_limit = left_limit.max(o.x0 + 2.0);
-    }
-    for o in &beside {
-        if o.x0 >= r.x1 - 0.5 {
-            right_limit = right_limit.min(o.x0 - gap);
-        } else if o.x1 <= r.x0 + 0.5 {
-            left_limit = left_limit.max(o.x1 + gap);
-        }
-    }
-    let (right_limit, left_limit) = (right_limit.max(r.x1), left_limit.min(r.x0));
-    match block.align {
-        // Justified paragraphs keep their measure; other text may grow into the free space beside it, up to the
-        // next text or drawing (in a table of contents, the page numbers).
-        Align::Justify => r.width(),
-        Align::Left => right_limit - r.x0,
-        Align::Right => r.x1 - left_limit,
-        Align::Center => r.width() + 2.0 * (r.x0 - left_limit).min(right_limit - r.x1),
-    }
-}
-
-/// Free vertical space below `block` before the next text, drawing or image that overlaps it horizontally.
-pub fn next_block_gap(layout: &PageLayout, obstacles: &[Rect], block: &TextBlock) -> f32 {
-    let r = &block.rect;
-    let below = |o: &Rect| o.y0 >= r.y1 - 0.5 && o.x0 < r.x1 && o.x1 > r.x0;
-    // A drawing that already encloses the block (a box around a label) limits it at its own bottom edge.
-    let enclosing = |o: &Rect| {
-        o.x0 <= r.x0 + 0.5 && o.x1 >= r.x1 - 0.5 && o.y0 <= r.y0 + 0.5 && o.y1 >= r.y1 - 0.5
-    };
-    let texts = layout
-        .blocks
-        .iter()
-        .filter(|o| o.id != block.id)
-        .map(|o| o.rect)
-        .filter(below)
-        .map(|o| o.y0);
-    let drawings = obstacles.iter().filter(|o| below(o)).map(|o| o.y0);
-    let boxes = obstacles.iter().filter(|o| enclosing(o)).map(|o| o.y1);
-    texts
-        .chain(drawings)
-        .chain(boxes)
-        .map(|y| y - r.y1)
-        .fold(layout.height - r.y1, f32::min)
-        .max(0.0)
 }

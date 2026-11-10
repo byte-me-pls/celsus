@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::inline;
+
 /// `[x0, y0, x1, y1]` in points.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Rect {
@@ -68,6 +70,14 @@ pub enum Align {
     Justify,
 }
 
+/// From byte `at` of a line's text on, the words are set in another style: `style` 0 is the block's own, `k`
+/// the block's `inline[k - 1]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Span {
+    pub at: u32,
+    pub style: u8,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextLine {
     pub rect: Rect,
@@ -75,6 +85,17 @@ pub struct TextLine {
     /// Distance of the baseline from the top of the page.
     #[serde(default)]
     pub baseline: f32,
+    /// Where the style changes inside the line. A line starts in the block's own style.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spans: Vec<Span>,
+}
+
+/// A large first letter with the first lines of a paragraph standing beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Initial {
+    /// From the top of the letter down to its baseline.
+    pub rect: Rect,
+    pub size: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -89,6 +110,35 @@ pub struct TextBlock {
     /// Its lines are separate entries (a table of contents, a list), worked out against the whole column.
     #[serde(default)]
     pub separate_lines: bool,
+    /// The paragraph opens with a large initial. Its letters are the first of the first line's text, but the
+    /// rectangles of the lines do not include it.
+    #[serde(default)]
+    pub initial: Option<Initial>,
+    /// The styles of words set apart inside the block: a title in italics, a term in bold, a command in a
+    /// fixed-width face, a link in another colour.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inline: Vec<TextStyle>,
+}
+
+/// The leader of a contents entry: five or more dots in a row, with or without spaces between them. Gives the
+/// bytes from the first dot to the end of the last.
+pub fn leader_span(text: &str) -> Option<std::ops::Range<usize>> {
+    let (mut start, mut end, mut dots) = (0, 0, 0);
+    for (at, c) in text.char_indices() {
+        match c {
+            '.' | '\u{2026}' | '\u{00b7}' => {
+                if dots == 0 {
+                    start = at;
+                }
+                dots += if c == '\u{2026}' { 3 } else { 1 };
+                end = at + c.len_utf8();
+            }
+            c if c.is_whitespace() => {}
+            _ if dots >= 5 => break,
+            _ => dots = 0,
+        }
+    }
+    (dots >= 5).then_some(start..end)
 }
 
 /// Whether most lines before the last stop well short of `right`, the edge running text would reach in a column
@@ -120,7 +170,11 @@ pub fn join_lines<'s>(lines: impl IntoIterator<Item = &'s str>) -> String {
         }
         if out.ends_with(SOFT_HYPHEN) {
             out.pop();
-        } else if ends_with_broken_word(&out) && line.starts_with(|c: char| c.is_lowercase()) {
+        } else if ends_with_broken_word(&out)
+            && line
+                .trim_start_matches(|c| inline::style_of(c).is_some())
+                .starts_with(|c: char| c.is_lowercase())
+        {
             // "under-" + "standing": a word hyphenated by line breaking.
             out.pop();
         } else if !out.is_empty() {
@@ -147,17 +201,45 @@ impl TextBlock {
             || (self.lines.len() >= 2 && lines_end_short(&self.lines, self.rect.x0, self.rect.x1))
     }
 
-    /// The text to translate. Lines that are separate entries stay on their own lines; running text is joined.
+    /// The text alone. Lines that are separate entries stay on their own lines; running text is joined.
+    pub fn plain(&self) -> String {
+        self.joined(self.lines.iter().map(|l| l.text.trim().to_owned()))
+    }
+
+    /// The text to translate: [`TextBlock::plain`], with tags around the words set in another style.
     pub fn source(&self) -> String {
+        if self.inline.is_empty() {
+            return self.plain();
+        }
+        let lines = self.lines.iter().map(|l| {
+            let mut out = String::with_capacity(l.text.len() + 4 * (l.spans.len() + 1));
+            out.push(inline::mark(0));
+            let mut from = 0;
+            for span in &l.spans {
+                let at = span.at as usize;
+                if at >= from && at < l.text.len() && l.text.is_char_boundary(at) {
+                    out.push_str(&l.text[from..at]);
+                    out.push(inline::mark(usize::from(span.style)));
+                    from = at;
+                }
+            }
+            out.push_str(&l.text[from..]);
+            out
+        });
+        let marked = inline::tidy(&self.joined(lines));
+        inline::tagged(&marked, &inline::names(&self.style, &self.inline))
+    }
+
+    fn joined(&self, lines: impl Iterator<Item = String>) -> String {
+        let lines: Vec<String> = lines
+            .zip(&self.lines)
+            .filter(|(_, l)| !l.text.trim().is_empty())
+            .map(|(text, _)| text)
+            .collect();
         if self.keeps_lines() {
-            self.lines
-                .iter()
-                .map(|l| l.text.trim())
-                .filter(|t| !t.is_empty())
-                .collect::<Vec<_>>()
-                .join("\n")
+            lines.join("\n")
         } else {
-            join_lines(self.lines.iter().map(|l| l.text.as_str()))
+            join_lines(lines.iter().map(String::as_str))
         }
     }
 }
@@ -186,6 +268,7 @@ mod tests {
             },
             text: text.into(),
             baseline: y + 8.0,
+            spans: Vec::new(),
         }
     }
 
@@ -213,7 +296,50 @@ mod tests {
             align: Align::Left,
             protected: false,
             separate_lines: false,
+            initial: None,
+            inline: Vec::new(),
         }
+    }
+
+    #[test]
+    fn words_set_apart_are_tagged_for_the_translator() {
+        let mut paragraph = block(vec![
+            line(100.0, 400.0, 0.0, "As the book Domain De-"),
+            line(100.0, 398.0, 12.0, "sign says, run make and"),
+            line(100.0, 210.0, 24.0, "wait."),
+        ]);
+        let italic = TextStyle {
+            italic: true,
+            ..paragraph.style.clone()
+        };
+        let code = TextStyle {
+            monospace: true,
+            ..paragraph.style.clone()
+        };
+        paragraph.inline = vec![italic, code];
+        let span = |at, style| Span { at, style };
+        paragraph.lines[0].spans = vec![span(12, 1)];
+        paragraph.lines[1].spans = vec![span(0, 1), span(4, 0), span(15, 2), span(19, 0)];
+        assert_eq!(
+            paragraph.source(),
+            "As the book <i>Domain Design</i> says, run <code>make</code> and wait."
+        );
+        assert_eq!(paragraph.plain(), "As the book Domain Design says, run make and wait.");
+        // Entries on their own lines: no tag runs from one into the next.
+        let mut list = block(vec![
+            line(100.0, 160.0, 0.0, "Part II"),
+            line(100.0, 400.0, 14.0, "The Building Blocks of a Model-Driven Design"),
+        ]);
+        list.inline = vec![TextStyle {
+            bold: true,
+            ..list.style.clone()
+        }];
+        list.lines[0].spans = vec![span(0, 1)];
+        list.lines[1].spans = vec![span(4, 1), span(12, 0)];
+        assert_eq!(
+            list.source(),
+            "<b>Part II</b>\nThe <b>Building</b> Blocks of a Model-Driven Design"
+        );
     }
 
     #[test]

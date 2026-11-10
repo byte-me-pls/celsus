@@ -90,8 +90,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             translated,
             replaced,
             kept,
+            missing,
         } => {
-            println!("page {page}: {translated} translated, {replaced} replaced, {kept} kept")
+            println!(
+                "page {page}: {translated} translated, {replaced} replaced, {kept} kept, {missing} missing"
+            )
         }
         Progress::Waiting { seconds } => println!("  rate limited, waiting {seconds}s"),
         Progress::Note { message } => println!("  {message}"),
@@ -112,6 +115,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write(&cache_path, serde_json::to_vec_pretty(&cache)?)?;
     let (bytes, outcome) = result?;
     std::fs::write(&output, &bytes)?;
+    if let Some(why) = &outcome.failed {
+        println!("stopped early: {why}");
+    }
     println!(
         "{} pages, {} blocks replaced, {} kept; {} requests, {} + {} tokens; {:.0}s; wrote {}",
         outcome.pages,

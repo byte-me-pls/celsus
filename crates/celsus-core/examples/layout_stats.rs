@@ -30,7 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .blocks
                     .iter()
                     .filter(|b| !b.protected)
-                    .map(|b| b.source().chars().count())
+                    .map(|b| b.plain().chars().count())
                     .sum::<usize>();
             }
             Err(e) => {

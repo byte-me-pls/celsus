@@ -4,6 +4,7 @@
 //! then be used directly as CIDs (`/CIDToGIDMap /Identity`), and the file shrinks to the glyphs actually drawn.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 
 use crate::{Error, Result};
@@ -27,6 +28,171 @@ pub struct TrueType {
     pub italic: bool,
     pub cap_height: i16,
     pub bbox: [i16; 4],
+    /// Glyphs to draw the figures 0 to 9 with in place of the ones the character map names.
+    figures: Option<[u16; 10]>,
+}
+
+/// What a font file says about one of its faces: its names, its weight and slant, the class of its design.
+/// Read from the small tables alone, so that a folder of fonts can be looked through without loading them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FaceInfo {
+    /// Which font of a collection (.ttc); 0 for a single font.
+    pub index: u32,
+    /// The family the face belongs to, as menus show it: `Georgia`, `Times New Roman`.
+    pub family: String,
+    /// The name PDF files call the face by: `Georgia-BoldItalic`.
+    pub postscript: String,
+    /// 400 for a regular face, 700 for a bold one.
+    pub weight: u16,
+    pub italic: bool,
+    /// The ten PANOSE numbers: the kind of design, its serifs, its weight, its proportions...
+    pub panose: [u8; 10],
+    /// Whether the licence written in the file lets a part of the font go into a document.
+    pub embeddable: bool,
+    /// The Unicode ranges the font says it covers, bit by bit.
+    pub ranges: [u32; 4],
+    /// Outlines in `glyf`: the kind that can be read and cut down here.
+    pub truetype: bool,
+}
+
+/// The faces of a font file or collection. Nothing comes back for a file that is not a font.
+pub fn faces_in<R: Read + Seek>(file: &mut R) -> Vec<FaceInfo> {
+    let mut head = [0u8; 12];
+    if read_at(file, 0, &mut head).is_none() {
+        return Vec::new();
+    }
+    let starts: Vec<u64> = if &head[..4] == b"ttcf" {
+        let count = u32::from_be_bytes([head[8], head[9], head[10], head[11]]).min(64) as usize;
+        let mut offsets = vec![0u8; count * 4];
+        if read_at(file, 12, &mut offsets).is_none() {
+            return Vec::new();
+        }
+        offsets
+            .chunks_exact(4)
+            .map(|b| u64::from(u32::from_be_bytes([b[0], b[1], b[2], b[3]])))
+            .collect()
+    } else {
+        vec![0]
+    };
+    starts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &at)| face_at(file, at, index as u32))
+        .collect()
+}
+
+fn read_at<R: Read + Seek>(file: &mut R, at: u64, buf: &mut [u8]) -> Option<()> {
+    file.seek(SeekFrom::Start(at)).ok()?;
+    file.read_exact(buf).ok()
+}
+
+fn face_at<R: Read + Seek>(file: &mut R, at: u64, index: u32) -> Option<FaceInfo> {
+    let mut head = [0u8; 12];
+    read_at(file, at, &mut head)?;
+    let version = u32::from_be_bytes([head[0], head[1], head[2], head[3]]);
+    if ![0x0001_0000, 0x7472_7565, 0x4F54_544F].contains(&version) {
+        return None;
+    }
+    let count = usize::from(u16::from_be_bytes([head[4], head[5]]));
+    let mut directory = vec![0u8; count.min(256) * 16];
+    read_at(file, at + 12, &mut directory)?;
+    let table = |tag: &[u8; 4]| {
+        directory.chunks_exact(16).find(|e| &e[..4] == tag).map(|e| {
+            (
+                u64::from(u32::from_be_bytes([e[8], e[9], e[10], e[11]])),
+                u32::from_be_bytes([e[12], e[13], e[14], e[15]]) as usize,
+            )
+        })
+    };
+    let mut info = FaceInfo {
+        index,
+        weight: 400,
+        embeddable: true,
+        truetype: table(b"glyf").is_some(),
+        ..FaceInfo::default()
+    };
+    if let Some((at, len)) = table(b"OS/2").filter(|(_, len)| *len >= 64) {
+        let mut os2 = vec![0u8; len.min(64)];
+        read_at(file, at, &mut os2)?;
+        let short = |o: usize| u16::from_be_bytes([os2[o], os2[o + 1]]);
+        info.weight = short(4);
+        // Bit 1 alone forbids embedding; bits 8 and 9 forbid a subset and allow bitmaps only.
+        let licence = short(8);
+        info.embeddable = licence & 0x000E != 0x0002 && licence & 0x0300 == 0;
+        info.panose.copy_from_slice(&os2[32..42]);
+        for (k, range) in info.ranges.iter_mut().enumerate() {
+            let o = 42 + 4 * k;
+            *range = u32::from_be_bytes([os2[o], os2[o + 1], os2[o + 2], os2[o + 3]]);
+        }
+        // Italic, or oblique.
+        info.italic = short(62) & 0x0201 != 0;
+    }
+    let (at, len) = table(b"name")?;
+    let mut names = vec![0u8; len.min(1 << 16)];
+    read_at(file, at, &mut names)?;
+    let [plain, postscript, typographic] = names_in(&names, [1, 6, 16]);
+    info.family = typographic.or(plain)?;
+    info.postscript = postscript.unwrap_or_default();
+    Some(info)
+}
+
+/// The names of the given kinds in a `name` table, in English where the font has them in several languages.
+fn names_in<const N: usize>(table: &[u8], ids: [u16; N]) -> [Option<String>; N] {
+    let mut found: [Option<(u8, String)>; N] = std::array::from_fn(|_| None);
+    let count = usize::from(u16_at(table, 2).unwrap_or(0));
+    let strings = usize::from(u16_at(table, 4).unwrap_or(0));
+    for i in 0..count {
+        let at = 6 + 12 * i;
+        let (Some(platform), Some(language), Some(id), Some(len), Some(offset)) = (
+            u16_at(table, at),
+            u16_at(table, at + 4),
+            u16_at(table, at + 6),
+            u16_at(table, at + 8),
+            u16_at(table, at + 10),
+        ) else {
+            break;
+        };
+        let Some(slot) = ids.iter().position(|&wanted| wanted == id) else {
+            continue;
+        };
+        let start = strings + usize::from(offset);
+        let Some(bytes) = table.get(start..start + usize::from(len)) else {
+            continue;
+        };
+        // Windows and Unicode names are UTF-16; the old Macintosh ones one byte a letter.
+        let (rank, text) = match (platform, language) {
+            (3, 0x0409) => (4, utf16(bytes)),
+            (3, _) => (2, utf16(bytes)),
+            (0, _) => (3, utf16(bytes)),
+            (1, 0) => (1, bytes.iter().map(|&b| char::from(b)).collect()),
+            _ => continue,
+        };
+        let text = text.trim().to_owned();
+        if !text.is_empty() && found[slot].as_ref().is_none_or(|(best, _)| rank > *best) {
+            found[slot] = Some((rank, text));
+        }
+    }
+    found.map(|f| f.map(|(_, text)| text))
+}
+
+fn utf16(bytes: &[u8]) -> String {
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|b| u16::from_be_bytes([b[0], b[1]]))
+        .collect();
+    String::from_utf16_lossy(&units)
+}
+
+/// What the `head` table of a font program says of its style: bold, italic. Fonts put into a PDF often have
+/// lost their names and the table that tells the weight; this much stays.
+pub fn style_bits(font: &[u8]) -> Option<(bool, bool)> {
+    let count = usize::from(u16_at(font, 4)?);
+    let head = (0..count).find_map(|i| {
+        let entry = font.get(12 + 16 * i..28 + 16 * i)?;
+        (&entry[..4] == b"head").then(|| u32_at(entry, 8).map(|o| o as usize))?
+    })?;
+    let bits = u16_at(font, head.checked_add(44)?)?;
+    Some((bits & 1 != 0, bits & 2 != 0))
 }
 
 fn u16_at(d: &[u8], o: usize) -> Option<u16> {
@@ -152,9 +318,23 @@ impl TrueType {
             italic,
             cap_height,
             bbox,
+            figures: None,
         };
         font.cmap = font.read_cmap()?;
         Ok(font)
+    }
+
+    /// Draw the figures 0 to 9 with these glyphs: the lining figures of a font whose usual ones are of the
+    /// old style, with parts below the line. Left as it is where one of the glyphs is not in the font.
+    pub fn set_figures(&mut self, glyphs: [u16; 10]) {
+        if glyphs.iter().all(|&g| g < self.num_glyphs) {
+            self.figures = Some(glyphs);
+        }
+    }
+
+    /// Whether the figures are drawn with other glyphs than the character map names.
+    pub fn has_other_figures(&self) -> bool {
+        self.figures.is_some()
     }
 
     /// The file the font came from and its index in it, for a shaping engine that reads OpenType layout tables.
@@ -248,6 +428,9 @@ impl TrueType {
     }
 
     pub fn glyph(&self, c: char) -> Option<u16> {
+        if let (Some(figures), true) = (&self.figures, c.is_ascii_digit()) {
+            return Some(figures[c as usize - '0' as usize]);
+        }
         self.cmap
             .get(&(c as u32))
             .copied()
@@ -439,6 +622,90 @@ mod tests {
         ]
         .iter()
         .find_map(|p| std::fs::read(p).ok())
+    }
+
+    /// A font file with nothing in it but the tables that describe it.
+    fn described(os2: &[u8], names: &[(u16, u16, u16, &str)], head: &[u8]) -> Vec<u8> {
+        let mut name = Vec::new();
+        let mut strings = Vec::new();
+        name.extend(0u16.to_be_bytes());
+        name.extend((names.len() as u16).to_be_bytes());
+        name.extend((6 + 12 * names.len() as u16).to_be_bytes());
+        for &(platform, language, id, text) in names {
+            let bytes: Vec<u8> = if platform == 1 {
+                text.bytes().collect()
+            } else {
+                text.encode_utf16().flat_map(u16::to_be_bytes).collect()
+            };
+            for v in [platform, 1, language, id, bytes.len() as u16, strings.len() as u16] {
+                name.extend(v.to_be_bytes());
+            }
+            strings.extend(bytes);
+        }
+        name.extend(strings);
+        let tables: [(&[u8; 4], &[u8]); 4] =
+            [(b"OS/2", os2), (b"glyf", &[]), (b"head", head), (b"name", &name)];
+        let mut out = vec![0, 1, 0, 0, 0, tables.len() as u8, 0, 0, 0, 0, 0, 0];
+        let mut at = 12 + 16 * tables.len();
+        for (tag, data) in tables {
+            out.extend(*tag);
+            out.extend(0u32.to_be_bytes());
+            out.extend((at as u32).to_be_bytes());
+            out.extend((data.len() as u32).to_be_bytes());
+            at += data.len();
+        }
+        for (_, data) in tables {
+            out.extend(data);
+        }
+        out
+    }
+
+    #[test]
+    fn a_font_file_describes_its_faces() {
+        let mut os2 = vec![0u8; 78];
+        os2[4..6].copy_from_slice(&700u16.to_be_bytes());
+        os2[8..10].copy_from_slice(&8u16.to_be_bytes());
+        os2[32..36].copy_from_slice(&[2, 4, 5, 2]);
+        os2[42..46].copy_from_slice(&0x0000_0207u32.to_be_bytes());
+        os2[62..64].copy_from_slice(&0x21u16.to_be_bytes());
+        let mut head = vec![0u8; 54];
+        head[44..46].copy_from_slice(&3u16.to_be_bytes());
+        let font = described(
+            &os2,
+            &[
+                (1, 0, 1, "Old Name"),
+                (3, 0x0407, 1, "Beispiel Fett"),
+                (3, 0x0409, 1, "Sample Bold"),
+                (3, 0x0409, 16, "Sample"),
+                (3, 0x0409, 6, "Sample-BoldItalic"),
+            ],
+            &head,
+        );
+        let faces = faces_in(&mut std::io::Cursor::new(&font));
+        assert_eq!(faces.len(), 1);
+        let face = &faces[0];
+        assert_eq!((face.family.as_str(), face.postscript.as_str()), ("Sample", "Sample-BoldItalic"));
+        assert_eq!((face.weight, face.italic, face.embeddable, face.truetype), (700, true, true, true));
+        assert_eq!((&face.panose[..4], face.ranges[0]), (&[2, 4, 5, 2][..], 0x207));
+        assert_eq!(style_bits(&font), Some((true, true)));
+
+        // A licence that keeps the font out of documents.
+        os2[8..10].copy_from_slice(&2u16.to_be_bytes());
+        let kept = described(&os2, &[(1, 0, 1, "Kept")], &head);
+        let faces = faces_in(&mut std::io::Cursor::new(&kept));
+        assert_eq!((faces[0].family.as_str(), faces[0].embeddable), ("Kept", false));
+
+        assert!(faces_in(&mut std::io::Cursor::new(b"%PDF-1.7 not a font at all")).is_empty());
+        assert!(faces_in(&mut std::io::Cursor::new(&font[..40])).is_empty());
+    }
+
+    #[test]
+    fn a_system_font_describes_itself() {
+        let Some(data) = system_font() else { return };
+        let faces = faces_in(&mut std::io::Cursor::new(&data));
+        assert_eq!(faces.len(), 1);
+        assert!(!faces[0].family.is_empty() && faces[0].truetype && faces[0].embeddable);
+        assert_eq!((faces[0].weight, faces[0].italic, faces[0].panose[0]), (400, false, 2));
     }
 
     #[test]

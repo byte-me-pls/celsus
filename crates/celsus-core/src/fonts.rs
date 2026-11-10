@@ -1,18 +1,21 @@
 //! Fonts used to write translations back into a page.
 //!
 //! Original PDF fonts are usually subsets that only contain the glyphs of the source text, so a translation can
-//! rarely reuse them. Instead each block is written with the closest bundled face (serif/sans/mono, bold, italic),
-//! keeping the original size and colour.
+//! rarely reuse them. Instead each block is written with the closest installed face: of the family that stands
+//! in for the document's own where one was found (see [`FontSet::matched`]), and otherwise of the general
+//! serif, sans or fixed-pitch family, in the weight and slant of the original and at its size and colour.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use celsus_pdf::ttf::TrueType;
+use celsus_pdf::font::Font;
+use celsus_pdf::ttf::{TrueType, faces_in};
 
 use crate::fit::Measure;
 use crate::languages::Script;
 use crate::layout::TextStyle;
+use crate::typeface;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Family {
@@ -24,12 +27,17 @@ pub enum Family {
 #[derive(Debug, Clone)]
 pub struct FontFace {
     pub name: String,
+    /// The name the font file gives the face (`Georgia-Bold`); empty where it gives none.
+    pub postscript: String,
     pub font: TrueType,
     pub family: Family,
     pub bold: bool,
     pub italic: bool,
     /// Set for a font loaded for one writing system (Arabic, Devanagari, Chinese...); `None` for the general faces.
     pub script: Option<Script>,
+    /// Set for a font of signs (circled numbers, keys, arrows): it lends the characters the text faces lack and
+    /// is never the face a text is set in.
+    pub symbols: bool,
     ascent: f32,
     descent: f32,
 }
@@ -51,8 +59,15 @@ impl FontFace {
         italic: bool,
     ) -> Result<Self, FontError> {
         let name = name.into();
+        let postscript = faces_in(&mut std::io::Cursor::new(&data))
+            .into_iter()
+            .next()
+            .map(|face| face.postscript)
+            .unwrap_or_default();
         let font = TrueType::parse(data).map_err(|e| FontError::Parse(format!("{name}: {e}")))?;
-        Ok(Self::from_font(name, font, family, bold, italic))
+        let mut face = Self::from_font(name, font, family, bold, italic);
+        face.postscript = postscript;
+        Ok(face)
     }
 
     fn from_font(name: String, font: TrueType, family: Family, bold: bool, italic: bool) -> Self {
@@ -63,11 +78,13 @@ impl FontFace {
         );
         Self {
             name,
+            postscript: String::new(),
             font,
             family,
             bold,
             italic,
             script: None,
+            symbols: false,
             ascent,
             descent,
         }
@@ -114,11 +131,75 @@ impl Measure for FontFace {
 #[derive(Debug, Clone, Default)]
 pub struct FontSet {
     faces: Vec<FontFace>,
+    /// How many of the faces are the general ones. The faces after them stand in for the families of one
+    /// document and are used for nothing else.
+    own: usize,
+    /// The folder the faces came from and the writing system they were picked for; unknown for a set put
+    /// together by hand.
+    source: Option<(PathBuf, Option<Script>)>,
+    /// The faces that stand in for a family of the document, by the family's name.
+    matched: HashMap<String, Vec<usize>>,
+    /// The faces for the document's other fonts without serifs, with serifs and of fixed pitch: those of the
+    /// first family found of each kind, so that a book is not set half in one face and half in another.
+    fallback: [Option<Vec<usize>>; 3],
 }
 
 impl FontSet {
     pub fn new(faces: Vec<FontFace>) -> Self {
-        Self { faces }
+        Self {
+            own: faces.len(),
+            faces,
+            ..Default::default()
+        }
+    }
+
+    /// The set with, for each family of fonts a document uses, the installed family closest to it: the same
+    /// one where it is installed, and otherwise the one whose letters are nearest in width. Text in the
+    /// style of a document font is then set in the family that stands in for it. Nothing changes for a set
+    /// that was not read from a fonts folder, or where no family comes close.
+    pub fn matched<'a>(&self, fonts: impl IntoIterator<Item = &'a Font>) -> FontSet {
+        let mut set = self.clone();
+        let Some((dir, script)) = &self.source else {
+            return set;
+        };
+        for choice in typeface::choose(dir, *script, fonts) {
+            let mut faces = Vec::new();
+            for pick in &choice.faces {
+                let name = pick.path.display().to_string();
+                let loaded = set
+                    .faces
+                    .iter()
+                    .position(|f| f.name == name && f.font.source().1 == pick.index);
+                let at = match loaded {
+                    Some(at) => at,
+                    None => {
+                        let Some(mut face) = std::fs::read(&pick.path)
+                            .ok()
+                            .and_then(|data| TrueType::parse_shared(Arc::new(data), pick.index).ok())
+                            .map(|mut font| {
+                                // Books are set with lining figures far more often than not.
+                                if let Some(lining) = lining_figures(&font) {
+                                    font.set_figures(lining);
+                                }
+                                FontFace::from_font(name, font, choice.class, pick.bold, pick.italic)
+                            })
+                        else {
+                            continue;
+                        };
+                        face.postscript = pick.postscript.clone();
+                        set.faces.push(face);
+                        set.faces.len() - 1
+                    }
+                };
+                faces.push(at);
+            }
+            if faces.is_empty() {
+                continue;
+            }
+            set.fallback[choice.class as usize].get_or_insert_with(|| faces.clone());
+            set.matched.insert(choice.key, faces);
+        }
+        set
     }
 
     pub fn faces(&self) -> &[FontFace] {
@@ -153,8 +234,9 @@ impl FontSet {
         chain
     }
 
-    /// Index of the face closest to `style`: family first, then weight, then slant. General faces are preferred
-    /// over fonts made for one writing system.
+    /// Index of the face closest to `style`: of the family that stands in for the style's font where there is
+    /// one; otherwise family first, then weight, then slant. General faces are preferred over fonts made for
+    /// one writing system.
     pub fn best_for(&self, style: &TextStyle) -> Option<usize> {
         let want = if style.monospace {
             Family::Mono
@@ -163,11 +245,23 @@ impl FontSet {
         } else {
             Family::Sans
         };
-        let general = self.faces.iter().any(|f| f.script.is_none());
-        self.faces
+        let stand_in = style
+            .font_name
+            .as_deref()
+            .and_then(|name| self.matched.get(&typeface::family_key(name)))
+            .or(self.fallback[want as usize].as_ref());
+        if let Some(faces) = stand_in {
+            // The faces come regular first, and of two that suit equally the earlier one is taken.
+            return faces.iter().copied().rev().max_by_key(|&i| {
+                let f = &self.faces[i];
+                u8::from(f.bold == style.bold) * 2 + u8::from(f.italic == style.italic)
+            });
+        }
+        let general = self.faces[..self.own].iter().any(|f| f.script.is_none());
+        self.faces[..self.own]
             .iter()
             .enumerate()
-            .filter(|(_, f)| !general || f.script.is_none())
+            .filter(|(_, f)| !f.symbols && (!general || f.script.is_none()))
             .max_by_key(|(_, f)| {
                 let family = match (f.family == want, f.family) {
                     (true, _) => 4,
@@ -270,13 +364,56 @@ impl FontSet {
                 loaded += 1;
             }
         }
-        Self { faces }
+        // The numbers in circles that point from a listing to its notes, the signs of keys, arrows: few text
+        // faces have them, and a paragraph is not left untranslated for the lack of one.
+        const SYMBOLS: &[&str] = &[
+            "NotoSansSymbols-Regular.ttf",
+            "NotoSansSymbols2-Regular.ttf",
+            "seguisym.ttf",
+            "Apple Symbols.ttf",
+        ];
+        for file in SYMBOLS {
+            let Some(p) = path(file) else { continue };
+            if let Ok(mut face) = FontFace::from_file(&p, Family::Sans, false, false) {
+                face.symbols = true;
+                faces.push(face);
+            }
+        }
+        Self {
+            own: faces.len(),
+            faces,
+            source: Some((dir.to_path_buf(), script)),
+            ..Default::default()
+        }
     }
+}
+
+/// The feature that asks a font for its lining figures.
+pub(crate) fn lining() -> rustybuzz::Feature {
+    rustybuzz::Feature::new(rustybuzz::ttf_parser::Tag::from_bytes(b"lnum"), 1, ..)
+}
+
+/// The glyphs of a font's lining figures, where the figures it draws when not asked are others: those of the
+/// old style, as in Georgia or Corbel.
+fn lining_figures(font: &TrueType) -> Option<[u16; 10]> {
+    const FIGURES: &str = "0123456789";
+    let (data, index) = font.source();
+    let face = rustybuzz::Face::from_slice(data, index)?;
+    let mut buffer = rustybuzz::UnicodeBuffer::new();
+    buffer.push_str(FIGURES);
+    let shaped = rustybuzz::shape(&face, &[lining()], buffer);
+    let glyphs: Vec<u16> = shaped.glyph_infos().iter().map(|g| g.glyph_id as u16).collect();
+    let glyphs: [u16; 10] = glyphs.try_into().ok()?;
+    // A font without figures of its own has no other ones either: what comes back for it is the glyph for a
+    // character it lacks.
+    let usual: Vec<u16> = FIGURES.chars().filter_map(|c| font.glyph(c)).collect();
+    let drawn = usual.len() == glyphs.len() && usual.iter().chain(&glyphs).all(|&g| g != 0);
+    (drawn && usual != glyphs).then_some(glyphs)
 }
 
 /// Font files under `dir` by lower-case file name, looking a few folders deep (Linux keeps fonts in
 /// `truetype/noto/`, `truetype/wqy/`...). The first file of a name wins.
-fn font_index(dir: &Path) -> HashMap<String, PathBuf> {
+pub(crate) fn font_index(dir: &Path) -> HashMap<String, PathBuf> {
     let mut out = HashMap::new();
     let mut stack = vec![(dir.to_path_buf(), 0)];
     while let Some((d, depth)) = stack.pop() {
@@ -473,5 +610,51 @@ fn script_fonts(script: Script) -> &'static [(&'static str, Family)] {
             ("AppleGothic.ttf", Sans),
             ("Arial Unicode.ttf", Sans),
         ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The fonts of this machine, where it has any in one of the usual places.
+    fn installed() -> Vec<PathBuf> {
+        let dir = std::env::var_os("CELSUS_TEST_FONTS_DIR")
+            .map(PathBuf::from)
+            .into_iter()
+            .chain([
+                PathBuf::from(r"C:\Windows\Fonts"),
+                PathBuf::from("/System/Library/Fonts"),
+                PathBuf::from("/usr/share/fonts"),
+            ])
+            .find(|p| p.is_dir());
+        let mut files: Vec<PathBuf> = dir.map(|d| font_index(&d).into_values().collect()).unwrap_or_default();
+        files.sort();
+        files
+    }
+
+    #[test]
+    fn other_figures_are_drawn_and_measured_alike() {
+        for path in installed().into_iter().take(120) {
+            let Some(mut font) = std::fs::read(&path).ok().and_then(|d| TrueType::parse(d).ok()) else {
+                continue;
+            };
+            let usual = font.text_width("0123456789", 10.0);
+            let Some(lining) = lining_figures(&font) else {
+                assert!(!font.has_other_figures());
+                continue;
+            };
+            font.set_figures(lining);
+            assert!(font.has_other_figures(), "{}", path.display());
+            for (c, g) in "0123456789".chars().zip(lining) {
+                assert_eq!(font.glyph(c), Some(g), "{}", path.display());
+            }
+            let wide: u32 = lining.iter().map(|&g| u32::from(font.advance(g))).sum();
+            let wide = wide as f32 / f32::from(font.units_per_em) * 10.0;
+            assert!((font.text_width("0123456789", 10.0) - wide).abs() < 1e-3);
+            // Letters are left alone, and the figures are of a like width.
+            assert_eq!(font.glyph('a'), TrueType::parse(std::fs::read(&path).unwrap()).unwrap().glyph('a'));
+            assert!((wide - usual).abs() < usual * 0.5, "{}", path.display());
+        }
     }
 }

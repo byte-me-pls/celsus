@@ -9,6 +9,8 @@
 //! Text in Latin, Greek and Cyrillic that the main font covers takes a direct path (character to glyph, advance
 //! from the font), which is exactly what such text needs and much faster.
 
+use std::cell::OnceCell;
+
 use crate::fit::Measure;
 use crate::fonts::FontSet;
 
@@ -45,7 +47,8 @@ pub struct ShapedLine {
 pub struct Shaper<'f> {
     fonts: &'f FontSet,
     chain: Vec<usize>,
-    faces: Vec<Option<rustybuzz::Face<'f>>>,
+    /// The fonts as the shaping engine wants them, each read when a text first needs it.
+    faces: Vec<OnceCell<Option<rustybuzz::Face<'f>>>>,
     /// The paragraph direction: right to left for Arabic, Hebrew and the like.
     pub rtl: bool,
 }
@@ -58,19 +61,7 @@ fn invisible(c: char) -> bool {
 
 impl<'f> Shaper<'f> {
     pub fn new(fonts: &'f FontSet, chain: Vec<usize>, rtl: bool) -> Self {
-        let faces = fonts
-            .faces()
-            .iter()
-            .enumerate()
-            .map(|(i, f)| {
-                if chain.contains(&i) {
-                    let (data, index) = f.font.source();
-                    rustybuzz::Face::from_slice(data, index)
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let faces = fonts.faces().iter().map(|_| OnceCell::new()).collect();
         Shaper {
             fonts,
             chain,
@@ -167,7 +158,14 @@ impl<'f> Shaper<'f> {
     }
 
     fn shape_run(&self, face: usize, text: &str, size: f32, rtl: bool) -> Option<Run> {
-        let rb = self.faces.get(face)?.as_ref()?;
+        let rb = self
+            .faces
+            .get(face)?
+            .get_or_init(|| {
+                let (data, index) = self.fonts.faces().get(face)?.font.source();
+                rustybuzz::Face::from_slice(data, index)
+            })
+            .as_ref()?;
         let mut buffer = rustybuzz::UnicodeBuffer::new();
         buffer.push_str(text);
         buffer.set_direction(if rtl {
@@ -176,7 +174,10 @@ impl<'f> Shaper<'f> {
             rustybuzz::Direction::LeftToRight
         });
         buffer.guess_segment_properties();
-        let shaped = rustybuzz::shape(rb, &[], buffer);
+        // A font whose figures were changed for its lining ones draws those here too.
+        let lining = [crate::fonts::lining()];
+        let other_figures = self.fonts.faces()[face].font.has_other_figures();
+        let shaped = rustybuzz::shape(rb, if other_figures { &lining } else { &[] }, buffer);
         let scale = size / rb.units_per_em() as f32;
         let mut starts: Vec<usize> = shaped
             .glyph_infos()

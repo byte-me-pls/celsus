@@ -4,6 +4,8 @@
 //! fit, the size is reduced step by step down to a floor. Below the floor the block is reported instead of being
 //! squeezed into something unreadable.
 
+use crate::inline;
+
 /// Measures text in a given font. Widths are in points.
 pub trait Measure {
     fn width(&self, text: &str, size: f32) -> f32;
@@ -69,8 +71,18 @@ pub fn wrap_indented(
     size: f32,
     m: &dyn Measure,
 ) -> Vec<String> {
+    wrap_widths(text, &|n| full_width - indent.of_line(n), size, m)
+}
+
+/// Wrap `text` into lines where line `n` may be `width_at(n)` wide: text that runs around a picture or a large
+/// initial has lines of different widths.
+pub fn wrap_widths(
+    text: &str,
+    width_at: &dyn Fn(usize) -> f32,
+    size: f32,
+    m: &dyn Measure,
+) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
-    let width_at = |n: usize| full_width - indent.of_line(n);
     for paragraph in text.split('\n') {
         // Runs of spaces count as one; then the Unicode line breaking rules (UAX #14) say where a line may end:
         // after spaces, and between the characters of Chinese and Japanese, never before closing punctuation.
@@ -85,23 +97,21 @@ pub fn wrap_indented(
                 line = candidate;
                 continue;
             }
-            if !line.trim().is_empty() {
-                lines.push(line.trim_end().to_owned());
-            }
-            line = String::new();
+            end_line(&mut lines, &mut line);
             let word = piece.trim_end();
-            if m.width(word, size) <= width_at(lines.len()) {
-                line = piece.to_owned();
+            if m.width(&format!("{line}{word}"), size) <= width_at(lines.len()) {
+                line.push_str(piece);
             } else {
                 // Longer than a line: break between characters, but never just before a combining mark.
                 for ch in word.chars() {
                     let mut next = line.clone();
                     next.push(ch);
-                    if !line.is_empty()
+                    if !blank(&line)
                         && !is_mark(ch)
+                        && inline::style_of(ch).is_none()
                         && m.width(&next, size) > width_at(lines.len())
                     {
-                        lines.push(std::mem::take(&mut line));
+                        end_line(&mut lines, &mut line);
                         line.push(ch);
                     } else {
                         line = next;
@@ -112,11 +122,25 @@ pub fn wrap_indented(
                 }
             }
         }
-        if !line.trim().is_empty() {
-            lines.push(line.trim_end().to_owned());
-        }
+        end_line(&mut lines, &mut line);
     }
     lines
+}
+
+/// Nothing to print: spaces, and the marks that say which style the words after them are in.
+fn blank(line: &str) -> bool {
+    line.chars().all(|c| c.is_whitespace() || inline::style_of(c).is_some())
+}
+
+/// Close `line` and open the next one in the style this one ends in.
+fn end_line(lines: &mut Vec<String>, line: &mut String) {
+    let done = std::mem::take(line);
+    if let Some(style) = inline::last_mark(&done).filter(|c| inline::style_of(*c) != Some(0)) {
+        line.push(style);
+    }
+    if !blank(&done) {
+        lines.push(done.trim_end().to_owned());
+    }
 }
 
 /// Characters that belong to the one before them (accents, vowel signs) and must not start a line.

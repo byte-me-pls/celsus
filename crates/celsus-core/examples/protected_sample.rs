@@ -10,7 +10,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (i, page) in doc.pages()?.iter().enumerate() {
         let e = celsus_core::extract::extract_page(&doc, page, i as u32 + 1)?;
         for b in e.layout.blocks.iter().filter(|b| b.protected) {
-            let s = b.source();
+            let s = b.plain();
             let letters = s.chars().filter(|c| c.is_alphabetic()).count();
             let why = if letters < 2 {
                 "few letters"
