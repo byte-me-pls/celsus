@@ -134,8 +134,6 @@ pub struct Parsed {
     pub title: String,
     pub author: String,
     pub pages: i32,
-    /// The largest picture on the first page, as an image file.
-    pub cover: Option<Vec<u8>>,
 }
 
 fn decode_text(bytes: &[u8]) -> String {
@@ -197,11 +195,6 @@ pub fn parse(bytes: Vec<u8>, original_name: &str) -> Result<Parsed, String> {
             t.len() > 2 && !t.to_lowercase().ends_with(".pdf") && !t.contains("Microsoft Word")
         })
         .unwrap_or_else(|| clean(&stem, 300));
-    let cover = celsus_pdf::image::page_images(&doc, &pages[0])
-        .into_iter()
-        .find(|i| i.width >= 200 && i.height >= 200)
-        .and_then(|i| celsus_pdf::image::export(&doc, i.id))
-        .map(|(b, _)| b);
     Ok(Parsed {
         title: if title.is_empty() {
             "Untitled".into()
@@ -210,7 +203,6 @@ pub fn parse(bytes: Vec<u8>, original_name: &str) -> Result<Parsed, String> {
         },
         author: info("Author"),
         pages: pages.len().min(i32::MAX as usize) as i32,
-        cover,
     })
 }
 

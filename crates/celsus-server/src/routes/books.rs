@@ -124,8 +124,8 @@ pub async fn upload(
     Ok(Json(json!({ "book": book })))
 }
 
-/// Store a new book for `auth`'s user: read the PDF, keep it and its cover, record it. Returns the book as the
-/// API shows it.
+/// Store a new book for `auth`'s user: read the PDF, keep it, record it. Returns the book as the API shows it.
+/// Its cover comes later, from the web interface (see `set_cover`).
 pub async fn add_book(
     state: &AppState,
     auth: &Auth,
@@ -153,17 +153,12 @@ pub async fn add_book(
     tokio::fs::write(library::source_file(&state.config, &id), &body)
         .await
         .map_err(ApiError::internal)?;
-    if let Some(cover) = &parsed.cover {
-        tokio::fs::write(library::cover_file(&state.config, &id), cover)
-            .await
-            .map_err(ApiError::internal)?;
-    }
     let db = state.pool.get().await?;
     let inserted = db
         .execute(
             "INSERT INTO books (id, owner_id, visibility, title, author, original_name, pages, bytes, has_cover, added_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
-            &[&id, &auth.user.id, &visibility, &parsed.title, &parsed.author, &name, &parsed.pages, &size, &parsed.cover.is_some(), &now()],
+            &[&id, &auth.user.id, &visibility, &parsed.title, &parsed.author, &name, &parsed.pages, &size, &false, &now()],
         )
         .await;
     if let Err(e) = inserted {
@@ -190,7 +185,7 @@ pub async fn visible_books(state: &AppState, auth: &Auth) -> ApiResult<Vec<Value
     let db = state.pool.get().await?;
     let rows = db
         .query(
-            &format!("SELECT {BOOK_FIELDS} FROM books b JOIN users u ON u.id = b.owner_id WHERE b.owner_id = $1 OR b.visibility = 'shared' ORDER BY b.added_at DESC"),
+            &format!("SELECT {BOOK_FIELDS} FROM books b JOIN users u ON u.id = b.owner_id WHERE b.owner_id = $1 OR b.visibility = 'shared' ORDER BY b.added_at DESC, b.id"),
             &[&auth.user.id],
         )
         .await?;
@@ -401,6 +396,39 @@ pub async fn cover(
     Ok(file_response(bytes, kind, None))
 }
 
+/// The largest cover kept, in bytes and in pixels a side. A drawn first page is far smaller.
+pub const COVER_LIMIT: usize = 1 << 20;
+const COVER_SIDE: u32 = 4000;
+
+/// Keep a cover for a book: its first page, as the web interface drew it. For those who may edit the book.
+pub async fn set_cover(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> ApiResult<Json<Value>> {
+    auth.require("translate")?;
+    let db = state.pool.get().await?;
+    let book = visible(&**db, &auth, &id).await?;
+    if !book.editable_by(&auth) {
+        return Err(ApiError::forbidden());
+    }
+    let fits = celsus_pdf::image::jpeg_info(&body)
+        .is_some_and(|(w, h, _)| (1..=COVER_SIDE).contains(&w) && (1..=COVER_SIDE).contains(&h));
+    if !fits {
+        return Err(ApiError::bad("The cover must be a JPEG picture."));
+    }
+    tokio::fs::write(library::cover_file(&state.config, &book.id), &body)
+        .await
+        .map_err(ApiError::internal)?;
+    db.execute(
+        "UPDATE books SET has_cover = true WHERE id = $1",
+        &[&book.id],
+    )
+    .await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
 pub async fn pages(
     State(state): State<AppState>,
     auth: Auth,
@@ -465,7 +493,10 @@ pub async fn create_job(
     }
     // Better said now than by a job that fails a moment later.
     let model: Option<String> = db
-        .query_opt("SELECT value FROM settings WHERE key = 'model.translate'", &[])
+        .query_opt(
+            "SELECT value FROM settings WHERE key = 'model.translate'",
+            &[],
+        )
         .await?
         .map(|r| r.get(0));
     if !model.is_some_and(|v| v.contains(':')) {

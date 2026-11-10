@@ -266,11 +266,15 @@ struct BookFiles {
     outputs: BTreeMap<String, String>,
 }
 
+/// Where a book's files are. `open` says the reader is opening it, which moves the book to the front of the
+/// library; looking the files up for a cover does not.
 #[tauri::command]
-fn book_files(app: State<App>, id: i64) -> Res<BookFiles> {
+fn book_files(app: State<App>, id: i64, open: Option<bool>) -> Res<BookFiles> {
     let conn = app.db.lock().unwrap();
     let book = db::book(&conn, id)?;
-    db::touch_book(&conn, id)?;
+    if open == Some(true) {
+        db::touch_book(&conn, id)?;
+    }
     let outputs = book
         .translated
         .keys()
@@ -285,6 +289,12 @@ fn book_files(app: State<App>, id: i64) -> Res<BookFiles> {
             .then(|| library::cover_file(&app.library, id).display().to_string()),
         outputs,
     })
+}
+
+/// Keep the cover the page drew for a book: its first page as a small JPEG.
+#[tauri::command]
+fn cover_save(app: State<App>, id: i64, jpeg: Vec<u8>) -> Res<()> {
+    library::set_cover(&app.db.lock().unwrap(), &app.library, id, &jpeg)
 }
 
 #[tauri::command]
@@ -907,6 +917,7 @@ fn main() {
             book_update,
             book_delete,
             book_files,
+            cover_save,
             book_pages,
             book_estimate,
             book_recognise,

@@ -1,8 +1,8 @@
-//! Adding books to the library: copying the file, reading its details and finding a cover.
+//! Adding books to the library: copying the file, reading its details and keeping its cover.
 
 use std::path::{Path, PathBuf};
 
-use celsus_pdf::{Document, ObjRef, Object};
+use celsus_pdf::{Document, ObjRef};
 use rusqlite::Connection;
 
 use crate::db::{self, Book, Result};
@@ -148,38 +148,18 @@ fn info(doc: &Document, key: &str) -> String {
         .unwrap_or_default()
 }
 
-/// The largest JPEG image on the first page, if it is big enough to be a cover. Taken as is: no decoding needed.
-fn cover_jpeg(doc: &Document) -> Option<Vec<u8>> {
-    let page = doc.pages().ok()?.into_iter().next()?;
-    let xobjects = doc.get_in(&page.resources, "XObject")?;
-    let mut best: Option<(i64, Vec<u8>)> = None;
-    for entry in xobjects.as_dict()?.values() {
-        let Ok(obj) = doc.resolve(entry) else {
-            continue;
-        };
-        let Some(stream) = obj.as_stream() else {
-            continue;
-        };
-        let d = &stream.dict;
-        let is_image = d.get(&b"Subtype"[..]).and_then(Object::as_name) == Some(b"Image");
-        let filter = d.get(&b"Filter"[..]);
-        let is_jpeg = match filter {
-            Some(Object::Name(n)) => n == b"DCTDecode",
-            Some(Object::Array(a)) => a.len() == 1 && a[0].as_name() == Some(b"DCTDecode"),
-            _ => false,
-        };
-        let w = d.get(&b"Width"[..]).and_then(Object::as_i64).unwrap_or(0);
-        let h = d.get(&b"Height"[..]).and_then(Object::as_i64).unwrap_or(0);
-        if is_image
-            && is_jpeg
-            && w >= 200
-            && h >= 200
-            && best.as_ref().is_none_or(|(a, _)| w * h > *a)
-        {
-            best = Some((w * h, stream.data.clone()));
-        }
+/// The largest cover file kept. A drawn first page is far smaller.
+const COVER_BYTES: usize = 2 << 20;
+
+/// Keep `jpeg` as the book's cover. The app draws the first page for it, so the cover is what a reader sees
+/// there, whatever the page is made of.
+pub fn set_cover(conn: &Connection, library: &Path, id: i64, jpeg: &[u8]) -> Result<()> {
+    db::book(conn, id)?;
+    if jpeg.len() > COVER_BYTES || celsus_pdf::image::jpeg_info(jpeg).is_none() {
+        return Err("The cover must be a JPEG picture.".into());
     }
-    best.map(|(_, data)| data)
+    std::fs::write(cover_file(library, id), jpeg).map_err(|e| e.to_string())?;
+    db::set_cover(conn, id, true)
 }
 
 /// Copy a PDF into the library and record it.
@@ -222,12 +202,6 @@ pub fn add_book(conn: &Connection, library: &Path, path: &Path) -> Result<Book> 
     if let Err(e) = std::fs::copy(path, source_file(library, book.id)) {
         let _ = db::delete_book(conn, book.id);
         return Err(e.to_string());
-    }
-    if let Some(jpeg) = cover_jpeg(&doc)
-        && std::fs::write(cover_file(library, book.id), jpeg).is_ok()
-    {
-        db::set_cover(conn, book.id, true)?;
-        book.has_cover = true;
     }
     db::book(conn, book.id)
 }
@@ -305,6 +279,51 @@ mod tests {
             })
         );
         assert_eq!(parse_image_id("x"), None);
+    }
+
+    #[test]
+    fn a_cover_is_kept_if_it_is_a_jpeg_and_old_ones_are_forgotten_once() {
+        let lib = temp_library("cover");
+        std::fs::create_dir_all(&lib).unwrap();
+        let file = lib.join("celsus.db");
+        let conn = db::open(&file).unwrap();
+        let book = Book {
+            id: 0,
+            title: "A Book".into(),
+            author: String::new(),
+            subject: String::new(),
+            original_name: "a.pdf".into(),
+            pages: 1,
+            bytes: 10,
+            source_lang: String::new(),
+            has_cover: false,
+            added_at: db::now(),
+            opened_at: None,
+            translated: Default::default(),
+            busy: false,
+        };
+        let id = db::insert_book(&conn, &book).unwrap();
+        std::fs::create_dir_all(book_dir(&lib, id)).unwrap();
+        assert!(set_cover(&conn, &lib, id, b"\x89PNG not a jpeg").is_err());
+        assert!(set_cover(&conn, &lib, id + 1, b"").is_err());
+        assert!(!db::book(&conn, id).unwrap().has_cover);
+        // The start marker and a frame header: the least that reads as a JPEG.
+        let jpeg =
+            b"\xFF\xD8\xFF\xC0\x00\x11\x08\x02\x80\x01\xE0\x03\x01\x22\x00\x02\x11\x01\x03\x11\x01";
+        set_cover(&conn, &lib, id, jpeg).unwrap();
+        assert!(db::book(&conn, id).unwrap().has_cover);
+        assert_eq!(std::fs::read(cover_file(&lib, id)).unwrap(), jpeg);
+        drop(conn);
+
+        // Opening the library again keeps it: covers are forgotten only when coming from the old kind.
+        let conn = db::open(&file).unwrap();
+        assert!(db::book(&conn, id).unwrap().has_cover);
+        conn.execute_batch("PRAGMA user_version = 0;").unwrap();
+        drop(conn);
+        let conn = db::open(&file).unwrap();
+        assert!(!db::book(&conn, id).unwrap().has_cover);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&lib);
     }
 
     #[test]

@@ -104,7 +104,12 @@ pub fn router(state: AppState) -> Router {
             get(books::get).patch(books::update).delete(books::remove),
         )
         .route("/api/books/{id}/file/{which}", get(books::file))
-        .route("/api/books/{id}/cover", get(books::cover))
+        .route(
+            "/api/books/{id}/cover",
+            get(books::cover)
+                .put(books::set_cover)
+                .layer(DefaultBodyLimit::max(books::COVER_LIMIT)),
+        )
         .route("/api/books/{id}/pages/{lang}", get(books::pages))
         .route("/api/books/{id}/jobs", post(books::create_job))
         .route("/api/jobs", get(books::jobs))

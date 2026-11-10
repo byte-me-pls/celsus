@@ -14,6 +14,70 @@ async function pdfjs() {
   return pdfjsLib;
 }
 
+async function parsePdf(bytes) {
+  const lib = await pdfjs();
+  return lib.getDocument({
+    data: new Uint8Array(bytes),
+    cMapUrl: "pdfjs/cmaps/",
+    cMapPacked: true,
+    standardFontDataUrl: "pdfjs/standard_fonts/",
+    isEvalSupported: false,
+  }).promise;
+}
+
+/* ---------- covers ---------- */
+
+/** A book's cover: its first page as a small JPEG, drawn the way the reader draws it. */
+async function drawCover(bytes, width = 480) {
+  const doc = await parsePdf(bytes);
+  try {
+    const page = await doc.getPage(1);
+    const size = page.getViewport({ scale: 1 });
+    // A very tall page (a scroll, a receipt) still gives a picture of a sensible size.
+    const vp = page.getViewport({ scale: Math.min(width / size.width, (width * 2) / size.height) });
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.floor(vp.width));
+    canvas.height = Math.max(1, Math.floor(vp.height));
+    await page.render({ canvasContext: canvas.getContext("2d", { alpha: false }), viewport: vp }).promise;
+    const blob = await new Promise((done) => canvas.toBlob(done, "image/jpeg", 0.86));
+    if (!blob) throw new Error("no picture");
+    return blob;
+  } finally {
+    doc.destroy();
+  }
+}
+
+/** Books whose first page cannot be drawn are remembered, so each is tried once and not at every visit. */
+function coverFailures() {
+  try { return JSON.parse(localStorage.getItem("celsus-cover-failed")) || []; } catch { return []; }
+}
+const coverAsked = new Set();
+let coverLine = Promise.resolve();
+
+/** Make a cover for a book that has none. Books wait in line, so one PDF is open at a time. `path` says where
+    the book's file is and `save` keeps the picture; `key` names the book and its file. */
+function makeCover(key, path, save) {
+  if (coverAsked.has(key) || coverFailures().includes(key)) return;
+  coverAsked.add(key);
+  coverLine = coverLine.then(async () => {
+    let bytes;
+    try {
+      bytes = await invoke("read_file", { path: await path() });
+    } catch {
+      coverAsked.delete(key); // the file could not be fetched just now: ask again later
+      return;
+    }
+    let blob;
+    try {
+      blob = await drawCover(bytes);
+    } catch {
+      try { localStorage.setItem("celsus-cover-failed", JSON.stringify([...coverFailures(), key].slice(-500))); } catch {}
+      return;
+    }
+    await save(blob).catch(() => {});
+  });
+}
+
 /** Open documents by file path; a stamp forces a fresh load after the file was rewritten. */
 const openDocs = new Map(); // path -> { stamp, doc }
 let filesStamp = 0;
@@ -21,17 +85,7 @@ async function openPdf(path) {
   const cached = openDocs.get(path);
   if (cached && cached.stamp === filesStamp) return cached.doc;
   if (cached) cached.doc.then((d) => d.destroy()).catch(() => {});
-  const doc = (async () => {
-    const lib = await pdfjs();
-    const bytes = await invoke("read_file", { path });
-    return lib.getDocument({
-      data: new Uint8Array(bytes),
-      cMapUrl: "pdfjs/cmaps/",
-      cMapPacked: true,
-      standardFontDataUrl: "pdfjs/standard_fonts/",
-      isEvalSupported: false,
-    }).promise;
-  })();
+  const doc = (async () => parsePdf(await invoke("read_file", { path })))();
   openDocs.set(path, { stamp: filesStamp, doc });
   doc.catch(() => openDocs.delete(path));
   return doc;
@@ -91,7 +145,7 @@ async function renderReader(r) {
   reader = null;
   const book = await call("book_get", { id: r.id });
   setCrumbs(T.navLibrary, book.title, T.crumbReader);
-  const files = await call("book_files", { id: r.id });
+  const files = await call("book_files", { id: r.id, open: true });
   const langs = Object.keys(files.outputs);
   const lang = r.lang === "orig" || langs.includes(r.lang) ? r.lang : langs[0] || "orig";
   const prefs = viewPrefs();

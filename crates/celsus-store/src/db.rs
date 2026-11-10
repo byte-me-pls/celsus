@@ -75,6 +75,15 @@ pub fn open(path: &Path) -> Result<Connection> {
     conn.busy_timeout(std::time::Duration::from_secs(5))
         .map_err(err)?;
     conn.execute_batch(SCHEMA).map_err(err)?;
+    // Covers used to be a picture taken out of the first page, which was sometimes the wrong one. They are drawn
+    // from the page now: forget the old ones once, and the app draws them again.
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(err)?;
+    if version < 1 {
+        conn.execute_batch("UPDATE books SET has_cover = 0; PRAGMA user_version = 1;")
+            .map_err(err)?;
+    }
     Ok(conn)
 }
 

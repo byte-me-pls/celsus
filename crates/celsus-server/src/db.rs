@@ -209,6 +209,9 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE translation_cache ADD COLUMN book_id TEXT REFERENCES books (id) ON DELETE CASCADE;
     CREATE INDEX translation_cache_book ON translation_cache (book_id);
     "#,
+    // Covers used to be a picture taken out of the first page, which was sometimes the wrong one. They are drawn
+    // from the page now: forget the old ones, and the web interface draws them again.
+    "UPDATE books SET has_cover = false;",
 ];
 
 pub fn pool(url: &str) -> Result<Pool, String> {

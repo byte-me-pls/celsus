@@ -77,8 +77,8 @@ const state = {
 let reader = null;
 
 async function coverUrl(book) {
-  if (!book.has_cover) return null;
   if (state.covers.has(book.id)) return state.covers.get(book.id);
+  if (!book.has_cover) return null;
   const files = await invoke("book_files", { id: book.id });
   if (!files.cover) return null;
   const bytes = await invoke("read_file", { path: files.cover });
@@ -94,7 +94,11 @@ function coverHtml(book) {
 async function fillCovers(root = main) {
   for (const el of $$("[data-cover]", root)) {
     const book = state.books.find((b) => b.id === Number(el.dataset.cover));
-    if (!book?.has_cover) continue;
+    if (!book) continue;
+    if (!book.has_cover && !state.covers.has(book.id)) {
+      wantCover(book);
+      continue;
+    }
     const url = await coverUrl(book).catch(() => null);
     if (url && el.isConnected) {
       const img = document.createElement("img");
@@ -103,6 +107,18 @@ async function fillCovers(root = main) {
       el.replaceWith(img);
     }
   }
+}
+
+/** A book without a cover gets its first page as one. The picture is kept, so this happens once for a book. */
+function wantCover(book) {
+  const source = async () => (await invoke("book_files", { id: book.id })).source;
+  makeCover(`${book.id}:${book.bytes}`, source, async (blob) => {
+    await invoke("cover_save", { id: book.id, jpeg: Array.from(new Uint8Array(await blob.arrayBuffer())) });
+    state.covers.set(book.id, URL.createObjectURL(blob));
+    const listed = state.books.find((b) => b.id === book.id);
+    if (listed) listed.has_cover = true;
+    fillCovers();
+  });
 }
 
 /* ============================== shell ============================== */

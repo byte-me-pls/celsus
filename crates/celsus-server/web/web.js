@@ -328,10 +328,31 @@ async function render() {
 
 /* ============================== library ============================== */
 
+const drawnCovers = new Map(); // book id -> object URL of a cover drawn in this visit
+
 function coverHtml(b) {
+  if (drawnCovers.has(b.id)) return `<img src="${drawnCovers.get(b.id)}" alt="">`;
   return b.has_cover
     ? `<img src="/api/books/${esc(b.id)}/cover" alt="" loading="lazy">`
-    : `<div class="made-cover"><b>${esc(b.title)}</b><small>${esc(b.author || "")}</small></div>`;
+    : `<div class="made-cover" data-cover="${esc(b.id)}"><b>${esc(b.title)}</b><small>${esc(b.author || "")}</small></div>`;
+}
+
+/** A book without a cover gets its first page as one, drawn here and kept on the server. Only for those who
+    may edit the book; everyone else sees it once it is there. */
+function wantCover(book) {
+  if (book.has_cover || !book.editable || drawnCovers.has(book.id)) return;
+  makeCover(`${book.id}`, async () => bookUrl(book.id, "source"), async (blob) => {
+    await api("PUT", `/api/books/${encodeURIComponent(book.id)}/cover`, blob);
+    const url = URL.createObjectURL(blob);
+    drawnCovers.set(book.id, url);
+    for (const el of $$("[data-cover]")) {
+      if (el.dataset.cover !== book.id) continue;
+      const img = document.createElement("img");
+      img.src = url;
+      img.alt = "";
+      el.replaceWith(img);
+    }
+  });
 }
 
 function bookStatus(book) {
@@ -407,6 +428,7 @@ function drawGrid() {
       <button class="card-action" data-translate-book="${esc(b.id)}">${esc(T.translateAction)}</button>
     </div>`).join("");
   applyWidths(grid);
+  list.forEach(wantCover);
   for (const c of $$("[data-book]", grid)) c.onclick = () => openReader(state.books.find((b) => b.id === c.dataset.book));
   for (const c of $$("[data-translate-book]", grid)) c.onclick = () => go("book", { id: c.dataset.translateBook });
 }
@@ -465,6 +487,7 @@ async function renderBook(id) {
   setCrumbs(T.navLibrary, book.title, T.translateAction);
   if (bookForm.bookId !== id) bookForm = { mode: "range", first: 1, last: Math.min(book.pages, 5), bookId: id, lang: state.settings.target_lang };
   const editable = book.editable;
+  wantCover(book);
   main.innerHTML = `
     <button class="back-link" id="back"><svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>${esc(T.navLibrary)}</button>
     <div class="book-head">

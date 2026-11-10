@@ -382,7 +382,9 @@ async fn jobs_are_checked_and_only_their_people_can_stop_them() {
     let id = id_of(&upload(&s, &ali, sample_pdf("x"), "?visibility=shared").await);
     let path = format!("/api/books/{id}/jobs");
     // Without a model nothing can be translated, and the answer says so instead of queueing a job that fails.
-    let r = s.post(&ali, &path, json!({"lang": "tr", "pages": [1]})).await;
+    let r = s
+        .post(&ali, &path, json!({"lang": "tr", "pages": [1]}))
+        .await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
     assert_eq!(r.body["error"], "no_model");
     assert!(
@@ -682,5 +684,61 @@ async fn the_language_list_covers_the_world_and_every_code_is_accepted() {
             "{code} is refused"
         );
     }
+    s.finish().await;
+}
+
+/// The least that reads as a JPEG: the start marker and a frame header with the picture's size.
+fn tiny_jpeg(width: u16, height: u16) -> Vec<u8> {
+    let mut j = vec![0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08];
+    j.extend_from_slice(&height.to_be_bytes());
+    j.extend_from_slice(&width.to_be_bytes());
+    j.extend_from_slice(&[0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01]);
+    j
+}
+
+#[tokio::test]
+async fn a_cover_is_kept_for_those_who_may_edit_the_book() {
+    let s = Server::new().await;
+    let owner = s.owner().await;
+    let ali = s.member(&owner, "ali@lib.test", "member").await;
+    let veli = s.member(&owner, "veli@lib.test", "member").await;
+    let book = upload(&s, &ali, sample_pdf("Cover"), "?visibility=shared").await;
+    assert_eq!(book.body["book"]["has_cover"], false, "a new book has none");
+    let id = id_of(&book);
+    let path = format!("/api/books/{id}/cover");
+    assert_eq!(s.get(&veli, &path).await.status, StatusCode::NOT_FOUND);
+
+    let put = |b, body: Vec<u8>| {
+        let (s, path) = (&s, path.clone());
+        async move { s.send_raw(b, Method::PUT, &path, body, &[]).await.status }
+    };
+    // A reader of a shared book cannot change it, and only a picture of a sensible size is kept.
+    assert_eq!(put(&veli, tiny_jpeg(480, 640)).await, StatusCode::FORBIDDEN);
+    assert_eq!(
+        put(&ali, b"%PDF-1.4 no".to_vec()).await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        put(&ali, tiny_jpeg(9000, 640)).await,
+        StatusCode::BAD_REQUEST
+    );
+    let mut huge = tiny_jpeg(480, 640);
+    huge.resize(2 << 20, 0);
+    assert_eq!(put(&ali, huge).await, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        s.get(&ali, &format!("/api/books/{id}")).await.body["book"]["has_cover"],
+        false
+    );
+
+    let cover = tiny_jpeg(480, 640);
+    assert_eq!(put(&ali, cover.clone()).await, StatusCode::OK);
+    let seen = s.get(&veli, &path).await;
+    assert_eq!(seen.status, StatusCode::OK);
+    assert_eq!(seen.bytes, cover);
+    assert_eq!(seen.headers[header::CONTENT_TYPE], "image/jpeg");
+    assert_eq!(
+        s.get(&veli, &format!("/api/books/{id}")).await.body["book"]["has_cover"],
+        true
+    );
     s.finish().await;
 }
