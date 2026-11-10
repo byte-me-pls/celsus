@@ -2,6 +2,27 @@
 
 Versions are 0.YYMM.N: year and month of the release, then a counter for further releases in that month.
 
+## Unreleased
+
+On `main`, not in the downloads yet.
+
+- **A whole page is placed at once.** Each block knows the column it stands in, what it must stay above, and the
+  pictures and text its lines run around. A translation that is longer first takes the room the page has and only
+  then is set smaller.
+- **Styles inside a paragraph are kept.** Words in italics, bold, a fixed-pitch face or another colour are marked
+  for the translator and come back in the same style. Right-to-left targets keep the style of the block.
+- **Nearest typeface.** For each family of fonts a book uses, the installed family nearest in letter widths stands
+  in for it (the same family where it is installed). For Latin, Cyrillic and Greek targets.
+- **Reading the page.** Table cells, headed rows, lists, the dotted lines of a table of contents, running heads and
+  notes are told apart from running text. A paragraph beside a table is no longer cut in two, and a heading set
+  across two columns is not taken for a column of its own.
+- **Jobs.** A job asked to stop says "Stopping…" at once. The same request sent twice is one job. A page where the
+  model gave no usable answer for some of the text is not marked as done, so "missing pages" picks it up again. A
+  run that stopped early keeps its finished pages. Removing a book stops its translation.
+- **Library.** A book's cover is its first page, as the reader draws it, in the app and on the server.
+- A new library translates into the language of the interface. The server says that no model is chosen before a
+  job is queued.
+
 ## 0.2611.0 (2026-11-09)
 
 First release.

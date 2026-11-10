@@ -4,6 +4,17 @@ The server edition runs on a home server or a Raspberry Pi and is meant to be re
 HTTPS reverse proxy. This document describes what it protects, against whom, and how. Every rule here has a test in
 `crates/celsus-server/tests`.
 
+In short:
+
+- Nobody can claim a new server without the one-time code from its log, and people join only by invitation.
+- Passwords, sessions, API keys and codes are stored as hashes; provider keys and two-step secrets are encrypted
+  with a key that is not in the database.
+- A book is private to whoever added it unless they share it. Admins do not see other people's private books.
+- The server runs without privileges, accepts only PDFs, limits what one file or one client can use, and does not
+  make requests into your home network unless an admin allows a local model on purpose.
+
+For setting the server up, see [server-setup.md](server-setup.md).
+
 ## What is protected
 
 - Accounts: passwords, second-factor secrets, sessions and API keys.

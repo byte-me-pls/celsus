@@ -3,6 +3,14 @@
 The server edition turns a home server or a Raspberry Pi (64-bit, 4 GB RAM or more) into a library several
 people share: each has an account, books are private or shared, and translations run on the server.
 
+In short: run one command, open the address it prints, enter the setup code, create your account, add a model.
+
+- [Install](#install): with a domain name, or on the home network only
+- [After installing](#after-installing): models, inviting people, two-step sign-in
+- [Backups](#backups)
+- [Settings](#settings)
+- [Languages](#languages)
+
 ## Install
 
 You need Docker with the Compose plugin. On a Raspberry Pi OS (64-bit) or Debian/Ubuntu machine:

@@ -5,6 +5,15 @@ Context Protocol start it and get tools to work with your library: Celsus hands 
 assistant in the chat translates it with your subscription, and Celsus checks each answer and writes the finished
 pages into the PDF. No API key is needed for this.
 
+In short: connect your chat app once (one click in the desktop app), then ask it in plain words to translate a
+book. The assistant does the translating; Celsus keeps the layout.
+
+| You use | Where it connects | How |
+| --- | --- | --- |
+| Claude Desktop, Claude Code, Codex, Gemini CLI, Cursor, VS Code and others on your computer | the desktop app's library | [Setting it up](#setting-it-up) |
+| ChatGPT or Claude on the web or a phone | a Celsus server | [On a Celsus server](#on-a-celsus-server), sign-in |
+| A coding app, with a shared library | a Celsus server | [On a Celsus server](#on-a-celsus-server), API key |
+
 ## Setting it up
 
 In the desktop app open **Settings → Connections → Translate from a chat**. It lists the apps it found on this

@@ -1,5 +1,15 @@
 # Using the desktop app
 
+In short: add a model under **Settings → Connections**, drop a PDF into the **Library**, open it, choose a language
+and press **Add to queue**. The rest of this page explains each step and what happens behind it.
+
+- [Connections and models](#connections-and-models)
+- [Translating a book](#translating-a-book)
+- [Covers and pictures](#covers-and-pictures)
+- [Reader](#reader)
+- [Interface language](#interface-language)
+- [Where things are kept](#where-things-are-kept)
+
 ## Connections and models
 
 Celsus talks to language models through any OpenAI-compatible API. Under **Settings → Connections** add one or more:
@@ -33,26 +43,42 @@ Open a book from the library. On its page:
 2. Choose the pages: a **range**, only the **missing** ones, or **all**. The estimate shows characters, tokens and
    time.
 3. **Add to queue.** Jobs run one after another in the background; **Translations** shows their progress, cost in
-   tokens, and lets you stop or retry them.
+   tokens, and lets you stop or retry them. A job you stop says *Stopping…* and ends after the request it is
+   waiting for; the pages it finished are kept.
 
 Translations are cached: translating the same text again costs nothing, and if a job stops halfway, retrying picks
-up where it left off.
+up where it left off. A page where the model gave no usable answer for part of the text is not counted as done, so
+choosing the **missing** pages picks it up again.
 
 The page map on the book page shows which pages are translated, which have blocks that kept the original (orange),
 and which are not done yet. **Read** opens the reader; **Save PDF** writes the translated book wherever you want.
 
-### What happens to each block
+### What happens on each page
 
-Every block is fitted into the space it had: first at the original size, then tighter lines, then smaller type
-down to 70% of the original and never below 6 pt. Lists and tables of contents keep one line per entry. A block that
-still does not fit, or whose translation has characters no installed font can draw, keeps the original text and is
-listed in the job's report. Code, formulas, URLs and numbers-only blocks are never sent for translation.
+**Before translating.** Code, formulas, URLs and numbers-only blocks are never sent for translation. Words inside
+a paragraph that are printed in another style (italics, bold, a fixed-pitch face, another colour) are marked, so
+the translation comes back with the same words in the same style. For right-to-left languages the whole block keeps
+its own style.
+
+**Checking.** Every answer is checked before it is used: numbers missing, text left untranslated, a translation
+much shorter than the source, an added explanation, or a list with the wrong number of lines. A rejected answer is
+asked for again with the reason.
+
+**Placing.** The blocks of a page are placed together, not one by one. Each block knows its column, what it must
+stay above, and the pictures its lines run around. A translation that is longer than the original first takes the
+room the page has, then tighter lines, then smaller type down to 70% of the original and never below 6 pt. Lists
+and tables of contents keep one line per entry.
+
+**What does not fit.** A block that still does not fit, or whose translation has characters no installed font can
+draw, keeps the original text and is listed in the job's report. Nothing is cut off.
 
 ### Fonts
 
 Translations are written with TrueType fonts from **Settings → Fonts** (Windows: `C:\Windows\Fonts`, macOS:
-`/System/Library/Fonts`, Linux: `/usr/share/fonts`). Celsus picks the face closest to the original's style (serif,
-sans, mono, bold, italic) and adds fonts for the target language's script: on Windows these are Segoe UI and Tahoma
+`/System/Library/Fonts`, Linux: `/usr/share/fonts`). For each typeface a book uses, Celsus picks the installed
+family nearest to it in letter widths, in regular, bold, italic and bold italic; when the book's own typeface is
+installed, that one is used. This matching is done for languages written in the Latin, Cyrillic and Greek
+alphabets. For other scripts it adds the system's fonts for that script: on Windows these are Segoe UI and Tahoma
 (Arabic, Hebrew), Nirmala UI (Indian scripts), Leelawadee UI (Thai, Lao, Khmer), Microsoft YaHei and JhengHei
 (Chinese), Yu Gothic and Meiryo (Japanese), Malgun Gothic (Korean) and others. On macOS the text is set in Arial,
 Times New Roman and Courier New, with Arial Unicode, PingFang, Songti and Apple SD Gothic Neo for other scripts. On
@@ -61,6 +87,8 @@ Linux it is set in Noto, Liberation or DejaVu; for other scripts install the Not
 any system. To use other fonts, point the setting at a folder of `.ttf`/`.ttc` files; subfolders are searched too.
 
 ## Covers and pictures
+
+In the library, a book's cover is its first page, drawn the first time the book is shown.
 
 On the book page, **Cover and pictures** shows the pictures on a page (page 1 is usually the cover). **Redraw**
 sends the picture to the picture model with instructions to translate every text in it and keep everything else:
