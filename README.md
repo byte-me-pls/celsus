@@ -108,8 +108,8 @@ Then, in the app:
 
 The whole guide: [docs/desktop.md](docs/desktop.md).
 
-The downloads are the last release. What has changed on `main` since then is listed under *Unreleased* in the
-[changelog](CHANGELOG.md); to try it, [build from source](#build-from-source).
+The downloads are the last release; the [changelog](CHANGELOG.md) says what is in each one. To try what has
+changed on `main` since then, [build from source](#build-from-source).
 
 ### Translate from a chat (MCP)
 

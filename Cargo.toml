@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/celsus-core", "crates/celsus-desktop", "crates/celsus-mcp", "crates/celsus-pdf", "crates/celsus-server", "crates/celsus-store"]
 
 [workspace.package]
-version = "0.2611.0"
+version = "0.2611.1"
 edition = "2024"
 rust-version = "1.94"
 repository = "https://github.com/byte-me-pls/celsus"

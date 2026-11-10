@@ -2,9 +2,7 @@
 
 Versions are 0.YYMM.N: year and month of the release, then a counter for further releases in that month.
 
-## Unreleased
-
-On `main`, not in the downloads yet.
+## 0.2611.1 (2026-11-10)
 
 - **A whole page is placed at once.** Each block knows the column it stands in, what it must stay above, and the
   pictures and text its lines run around. A translation that is longer first takes the room the page has and only
