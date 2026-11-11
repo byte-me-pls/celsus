@@ -168,13 +168,22 @@ fn latin_inside_chinese_falls_back_per_character() {
 
 /// A one-page PDF with one line of Helvetica text.
 fn sample_pdf(text: &str) -> Vec<u8> {
-    let content = format!("BT /F1 14 Tf 72 700 Td ({text}) Tj ET");
+    page_pdf(&format!("BT /F1 14 Tf 72 700 Td ({text}) Tj ET"), "")
+}
+
+/// A one-page PDF that draws `content` with Helvetica as `/F1`. `more` goes into the page's dictionary.
+fn page_pdf(content: &str, more: &str) -> Vec<u8> {
     let objects = [
         "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".to_string(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R {more} >>"
+        ),
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
-        format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
+        format!(
+            "<< /Length {} >>\nstream\n{content}\nendstream",
+            content.len()
+        ),
     ];
     let mut pdf = b"%PDF-1.4\n".to_vec();
     let mut offsets = Vec::new();
@@ -274,4 +283,146 @@ fn every_script_is_written_and_read_back() {
         out_dir.display()
     );
     assert!(written > 0, "no fonts found for any script");
+}
+
+/// Two columns under a headline, with a row of figures and a link in the left one.
+fn two_column_pdf() -> Vec<u8> {
+    let mut content = String::from(
+        "BT /F1 14 Tf 72 720 Td (A headline that runs across both of the columns of this page) Tj ET\n",
+    );
+    let column = |content: &mut String, x: u32, word: &str| {
+        for (i, y) in (0..6).map(|i| (i, 680 - 14 * i)) {
+            content.push_str(&format!(
+                "BT /F1 10 Tf {x} {y} Td (The {word} column has line {i} of running text) Tj ET\n"
+            ));
+        }
+    };
+    column(&mut content, 72, "first");
+    column(&mut content, 326, "second");
+    content.push_str("BT /F1 10 Tf 120 570 Td (1234 5678) Tj ET\n");
+    // A rule under the left column, and a link over its figures.
+    content.push_str("72 560 150 1 re f\n");
+    page_pdf(
+        &content,
+        "/Annots [<< /Type /Annot /Subtype /Link /Rect [118 566 172 580] /Border [0 0 0] >>]",
+    )
+}
+
+/// A page of two columns written in Arabic has its columns change places, each with everything in it, and what
+/// lies across them stays.
+#[test]
+fn columns_change_places_for_a_language_read_from_right_to_left() {
+    let ar: Language = "ar".parse().unwrap();
+    let first = "هذا نص العمود الأول 111 وهو يمتد على عدة أسطر في العمود حتى نهايته";
+    let second = "هذا نص العمود الثاني 222 وهو يمتد على عدة أسطر في العمود حتى نهايته";
+    let headline = "عنوان 333 يمتد فوق العمودين";
+    let Some(fonts) = fonts_for(&ar, first) else {
+        return;
+    };
+    let source = two_column_pdf();
+    let doc = celsus_pdf::Document::load(source).unwrap();
+    let pages = doc.pages().unwrap();
+    let extracted = extract_page(&doc, &pages[0], 1).unwrap();
+    let id_of = |word: &str| {
+        let found: Vec<_> = extracted
+            .layout
+            .blocks
+            .iter()
+            .filter(|b| b.plain().contains(word))
+            .collect();
+        assert_eq!(found.len(), 1, "blocks with {word:?}");
+        found[0].id.clone()
+    };
+    let translations = BTreeMap::from([
+        (id_of("first"), first.to_string()),
+        (id_of("second"), second.to_string()),
+        (id_of("headline"), headline.to_string()),
+    ]);
+    let mut writer = BookWriter::new(&doc, &fonts);
+    let report = writer
+        .translate_page(&pages[0], &extracted, &translations, &ar)
+        .unwrap();
+    assert_eq!(report.replaced.len(), 3, "{:?}", report.kept);
+    let bytes = writer.finish().unwrap();
+    let out_dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("scripts");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    std::fs::write(out_dir.join("columns-ar.pdf"), &bytes).unwrap();
+
+    let back = celsus_pdf::Document::load(bytes).unwrap();
+    let back_pages = back.pages().unwrap();
+    let read = extract_page(&back, &back_pages[0], 1).unwrap();
+    let middle_of = |word: &str| {
+        let found: Vec<_> = read
+            .layout
+            .blocks
+            .iter()
+            .filter(|b| b.plain().contains(word))
+            .collect();
+        assert_eq!(found.len(), 1, "{word:?} is on the page once");
+        (found[0].rect.x0 + found[0].rect.x1) / 2.0
+    };
+    // The first column is now on the right, the second on the left.
+    assert!(
+        middle_of("111") > 316.0,
+        "first column at {}",
+        middle_of("111")
+    );
+    assert!(
+        middle_of("222") < 296.0,
+        "second column at {}",
+        middle_of("222")
+    );
+    // The left column goes as far to the right as it takes for its right edge to be where the right column's was.
+    let edge_of = |word: &str| {
+        let b = extracted
+            .layout
+            .blocks
+            .iter()
+            .find(|b| b.plain().contains(word));
+        b.unwrap().rect.x1
+    };
+    let dx = edge_of("second") - edge_of("first");
+    // The figures were not translated; they went with their column.
+    let was = extracted
+        .layout
+        .blocks
+        .iter()
+        .find(|b| b.plain().contains("1234"))
+        .unwrap()
+        .rect;
+    let figures = read
+        .layout
+        .blocks
+        .iter()
+        .find(|b| b.plain().contains("1234"))
+        .unwrap()
+        .rect;
+    assert!((figures.x0 - was.x0 - dx).abs() < 0.5, "{figures:?}");
+    assert!((figures.y0 - was.y0).abs() < 0.5, "{figures:?}");
+    // So did the rule under it and the link over it.
+    assert!(
+        read.obstacles
+            .iter()
+            .any(|r| (r.x0 - 72.0 - dx).abs() < 0.5),
+        "{:?}",
+        read.obstacles
+    );
+    let link = back_pages[0]
+        .dict
+        .get(b"Annots".as_slice())
+        .and_then(|a| a.as_array())
+        .and_then(|a| a[0].as_dict())
+        .and_then(|d| d.get(b"Rect".as_slice()))
+        .and_then(celsus_pdf::object::numbers)
+        .unwrap();
+    assert!((link[0] - 118.0 - f64::from(dx)).abs() < 0.5, "{link:?}");
+    // The headline lies across the columns and stays over them.
+    let top = read
+        .layout
+        .blocks
+        .iter()
+        .find(|b| b.plain().contains("333"))
+        .unwrap()
+        .rect;
+    assert!((top.x1 - edge_of("headline")).abs() < 1.0, "{top:?}");
 }

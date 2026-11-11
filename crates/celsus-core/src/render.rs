@@ -22,6 +22,7 @@ use crate::fit::Measure;
 use crate::fonts::FontSet;
 use crate::inline;
 use crate::layout::{BlockId, TextBlock};
+use crate::mirror;
 use crate::place;
 use crate::shape::Shaper;
 
@@ -87,7 +88,30 @@ impl<'d> BookWriter<'d> {
     ) -> celsus_pdf::Result<PageReport> {
         let rtl = to.is_rtl();
         let script = crate::languages::info(to).map(|i| i.script);
-        let layout = &extracted.layout;
+        // A page of columns, set for a language read from right to left, has its columns change places. The
+        // translations are placed on the page as it will be; the columns themselves are moved further down.
+        let plan = (rtl && page.rotate % 360 == 0)
+            .then(|| mirror::plan(&extracted.layout, &extracted.obstacles))
+            .flatten();
+        let mirrored = plan.as_ref().map(|plan| {
+            (
+                plan.moved(&extracted.layout),
+                plan.moved_rects(&extracted.obstacles),
+            )
+        });
+        let (layout, obstacles) = match &mirrored {
+            Some((layout, obstacles)) => (layout, obstacles.as_slice()),
+            None => (&extracted.layout, extracted.obstacles.as_slice()),
+        };
+        let in_column: BTreeSet<&BlockId> = plan.as_ref().map_or_else(BTreeSet::new, |plan| {
+            extracted
+                .layout
+                .blocks
+                .iter()
+                .filter(|b| plan.shift(&b.rect).is_some())
+                .map(|b| &b.id)
+                .collect()
+        });
         let fonts = Rc::clone(&self.fonts);
         let fonts: &FontSet = &fonts;
         let mut report = PageReport {
@@ -280,7 +304,7 @@ impl<'d> BookWriter<'d> {
                     }),
             })
             .collect();
-        let placed = place::solve(layout, &extracted.obstacles, &items, rtl);
+        let placed = place::solve(layout, obstacles, &items, rtl);
         drop(items);
 
         // New text. Each block is drawn where its original text was drawn (right after the text object that held
@@ -329,7 +353,14 @@ impl<'d> BookWriter<'d> {
                 .filter(|p| p.filled && p.after > last_run && !touches(&p.bounds, &was))
                 .map(|p| p.bounds)
                 .collect();
-            let at = insertion_point(content, refs).filter(|(_, _, clip)| {
+            // Text of a column that moved is drawn after the page's own content as well: the place its original
+            // was drawn in belongs to the column, and that is drawn somewhere else.
+            let at = if in_column.contains(&b.id) {
+                None
+            } else {
+                insertion_point(content, refs)
+            };
+            let at = at.filter(|(_, _, clip)| {
                 placed.lines.iter().all(|line| {
                     let (x, y) = (cx0 as f32 + line.x, cy1 as f32 - line.baseline);
                     let ink = [x, y - size * 0.25, x + line.width, y + size * 0.75];
@@ -436,7 +467,28 @@ impl<'d> BookWriter<'d> {
                 None => drawn_last.push_str(&draw),
             }
         }
-        let mut edited = edit(content, &removals, &insertions);
+        // On a mirrored page the page's own content is drawn once for what stays and once for each column, and
+        // each time without the text of the others, so that no text is in the file twice.
+        let without = |plan: &mirror::Plan, column: Option<usize>| {
+            let mut out = removals.clone();
+            for (r, run) in content.runs.iter().enumerate() {
+                if run.source != Source::Page {
+                    continue;
+                }
+                for (g, glyph) in run.glyphs.iter().enumerate() {
+                    let [x0, y0, x1, y1] = glyph.bounds;
+                    let (x, y) = ((x0 + x1) / 2.0 - cx0 as f32, cy1 as f32 - (y0 + y1) / 2.0);
+                    if plan.column_at(x, y) != column {
+                        out.entry(r).or_default().insert(g);
+                    }
+                }
+            }
+            out
+        };
+        let mut edited = match &plan {
+            Some(plan) => edit(content, &without(plan, None), &insertions),
+            None => edit(content, &removals, &insertions),
+        };
 
         if drawn == 0 {
             return Ok(report);
@@ -476,23 +528,69 @@ impl<'d> BookWriter<'d> {
                 .unwrap_or_default(),
         };
         // Close any graphics states the original leaves open (and with them its clipping paths), then our own.
-        let open = celsus_pdf::content::parse(&original)
-            .iter()
-            .fold(0usize, |depth, op| match op.operator.as_slice() {
-                b"q" => depth + 1,
-                b"Q" => depth.saturating_sub(1),
-                _ => depth,
-            });
-        let mut content = b"q\n".to_vec();
-        content.extend_from_slice(&original);
-        content.push(b'\n');
-        content.extend_from_slice(&b"Q\n".repeat(open + 1));
-        content.extend_from_slice(drawn_last.as_bytes());
+        let wrapped = |out: &mut Vec<u8>, data: &[u8]| {
+            let open = celsus_pdf::content::parse(data)
+                .iter()
+                .fold(0usize, |depth, op| match op.operator.as_slice() {
+                    b"q" => depth + 1,
+                    b"Q" => depth.saturating_sub(1),
+                    _ => depth,
+                });
+            out.extend_from_slice(b"q\n");
+            out.extend_from_slice(data);
+            out.push(b'\n');
+            out.extend_from_slice(&b"Q\n".repeat(open + 1));
+        };
+        let mut stream = Vec::new();
+        match &plan {
+            None => wrapped(&mut stream, &original),
+            Some(plan) => {
+                // The strip of a column in each stretch of the page where the columns stand, moved by `dx`.
+                let strips = |column: &mirror::Column, dx: f32| -> String {
+                    plan.bands
+                        .iter()
+                        .map(|&(y0, y1)| {
+                            format!(
+                                "{} {} {} {} re\n",
+                                real(cx0 + f64::from(column.x0 + dx)),
+                                real(cy1 - f64::from(y1)),
+                                real(f64::from(column.x1 - column.x0)),
+                                real(f64::from(y1 - y0))
+                            )
+                        })
+                        .collect()
+                };
+                // What stays: everything but the columns.
+                let mut rest = String::from("q\n-32768 -32768 65536 65536 re\n");
+                for column in &plan.columns {
+                    rest.push_str(&strips(column, 0.0));
+                }
+                rest.push_str("W* n\n");
+                stream.extend_from_slice(rest.as_bytes());
+                wrapped(&mut stream, &original);
+                stream.extend_from_slice(b"Q\n");
+                // Each column, in its new place.
+                for (i, column) in plan.columns.iter().enumerate() {
+                    let own = edit(content, &without(plan, Some(i)), &[])
+                        .remove(&Source::Page)
+                        .unwrap_or_default();
+                    let lead = format!(
+                        "q\n{}W n\n1 0 0 1 {} 0 cm\n",
+                        strips(column, column.dx),
+                        real(f64::from(column.dx))
+                    );
+                    stream.extend_from_slice(lead.as_bytes());
+                    wrapped(&mut stream, &own);
+                    stream.extend_from_slice(b"Q\n");
+                }
+            }
+        }
+        stream.extend_from_slice(drawn_last.as_bytes());
         let contents = self.saver.add(Object::Stream(Stream {
             dict: [(b"Filter".to_vec(), Object::Name(b"FlateDecode".to_vec()))]
                 .into_iter()
                 .collect(),
-            data: celsus_pdf::filters::deflate(&content),
+            data: celsus_pdf::filters::deflate(&stream),
         }));
 
         let mut resources = page.resources.clone();
@@ -513,8 +611,79 @@ impl<'d> BookWriter<'d> {
         };
         page_dict.insert(b"Resources".to_vec(), Object::Dict(resources));
         page_dict.insert(b"Contents".to_vec(), Object::Ref(contents));
+        if let Some(plan) = &plan {
+            self.move_annotations(&mut page_dict, plan, cx0, cy1)?;
+        }
         self.saver.set(page.id, Object::Dict(page_dict));
         Ok(report)
+    }
+
+    /// Links and notes that stand in a column go with it.
+    fn move_annotations(
+        &mut self,
+        page: &mut Dict,
+        plan: &mirror::Plan,
+        cx0: f64,
+        cy1: f64,
+    ) -> celsus_pdf::Result<()> {
+        let mut list = match page.get(b"Annots".as_slice()) {
+            Some(Object::Array(list)) => list.clone(),
+            Some(Object::Ref(id)) => match self.saver.get(*id)? {
+                Object::Array(list) => list,
+                _ => return Ok(()),
+            },
+            _ => return Ok(()),
+        };
+        let slide = |annotation: &mut Dict| -> bool {
+            let numbers = |key: &str| {
+                celsus_pdf::object::get(annotation, key).and_then(celsus_pdf::object::numbers)
+            };
+            let Some(rect) = numbers("Rect").filter(|r| r.len() == 4) else {
+                return false;
+            };
+            let (x, y) = (
+                (rect[0] + rect[2]) / 2.0 - cx0,
+                cy1 - (rect[1] + rect[3]) / 2.0,
+            );
+            let Some(column) = plan.column_at(x as f32, y as f32) else {
+                return false;
+            };
+            let dx = f64::from(plan.columns[column].dx);
+            // Every other number is a distance from the left.
+            let slid = |values: Vec<f64>| {
+                Object::Array(
+                    values
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| Object::Real(if i % 2 == 0 { v + dx } else { *v }))
+                        .collect(),
+                )
+            };
+            let quads = numbers("QuadPoints");
+            annotation.insert(b"Rect".to_vec(), slid(rect));
+            if let Some(quads) = quads {
+                annotation.insert(b"QuadPoints".to_vec(), slid(quads));
+            }
+            true
+        };
+        let mut direct = false;
+        for entry in &mut list {
+            match entry {
+                Object::Ref(id) => {
+                    if let Object::Dict(mut annotation) = self.saver.get(*id)?
+                        && slide(&mut annotation)
+                    {
+                        self.saver.set(*id, Object::Dict(annotation));
+                    }
+                }
+                Object::Dict(annotation) => direct |= slide(annotation),
+                _ => {}
+            }
+        }
+        if direct {
+            page.insert(b"Annots".to_vec(), Object::Array(list));
+        }
+        Ok(())
     }
 
     /// Put a redrawn picture (a JPEG or PNG) in place of the image XObject `id`. The page keeps drawing it in the same

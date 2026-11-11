@@ -12,6 +12,7 @@ pub mod language;
 pub mod languages;
 pub mod layout;
 pub mod metadata;
+pub mod mirror;
 pub mod pipeline;
 pub mod place;
 pub mod provider;

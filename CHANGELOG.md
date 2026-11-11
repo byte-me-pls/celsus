@@ -2,6 +2,13 @@
 
 Versions are 0.YYMM.N: year and month of the release, then a counter for further releases in that month.
 
+## Unreleased
+
+- **Columns for languages read from right to left.** On a page of two or more columns translated into Arabic,
+  Hebrew, Persian or Urdu, the columns change places, each with its pictures, formulas, rules and links, so the
+  first column is the one on the right. What lies across the columns stays where it is. Tables keep the order of
+  their columns.
+
 ## 0.2611.1 (2026-11-10)
 
 - **A whole page is placed at once.** Each block knows the column it stands in, what it must stay above, and the

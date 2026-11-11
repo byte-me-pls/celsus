@@ -53,7 +53,8 @@ All three share the same engine and give the same pages.
 - **The look of the type.** For each typeface a book uses, Celsus picks the installed one nearest to it in letter
   widths (the same one when you have it).
 - **About 130 languages.** Arabic letters join, Persian, Urdu and Hebrew run right to left, Indian scripts form
-  their conjuncts, Thai marks sit in place, and Chinese, Japanese and Korean break between characters.
+  their conjuncts, Thai marks sit in place, and Chinese, Japanese and Korean break between characters. On a page
+  of columns written right to left, the columns change places, so the first one is on the right.
 - **Covers and pictures.** A picture with text in it, such as a cover, can be redrawn in the target language with
   its artwork, colours and lettering kept.
 - **Your work.** Translations are cached. A job that stops halfway picks up where it left off, and translating the
