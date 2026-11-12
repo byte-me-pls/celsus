@@ -8,6 +8,28 @@ Versions are 0.YYMM.N: year and month of the release, then a counter for further
   Hebrew, Persian or Urdu, the columns change places, each with its pictures, formulas, rules and links, so the
   first column is the one on the right. What lies across the columns stays where it is. Tables keep the order of
   their columns.
+- **Stop works while a model is silent.** A job waiting for a model that is slow or does not answer stops at
+  once instead of holding on until the request times out.
+- **A silent model ends the job.** A model that has not answered in 180 seconds (set under *Settings →
+  Translation*) is given up: the job stops, keeps its finished pages and says to choose another model. A model
+  that had been answering gets one more try first.
+- **Choosing a model.** The list shows the models of the chosen connection under the names of their makers, can
+  be searched by typing, leaves out models that do not answer in text, and remembers how each model did when it
+  was last tried.
+- **New versions.** The desktop app asks GitHub at start whether a newer release is out. The Windows and macOS
+  apps and the AppImage then update themselves at the press of a button: the new version is downloaded, its
+  signature is checked against the project's key, and the app starts again. The `.deb` and `.rpm` packages are
+  shown the download page. *Settings → General* turns the check off.
+- **Pages translated before are not paid for twice.** A new job writes the earlier pages of a book from the
+  translations that were kept and asks the model nothing for them. A page whose translation is no longer kept
+  goes back to the original and is shown as not translated, instead of being sent to the model again unasked.
+- **Clearing the cache keeps what books are written from.** Only translations that no translated page uses are
+  cleared, so a book's pages no longer go back to the original the next time it is written.
+- **One spelling for a language.** Redrawing a picture in a translation such as zh-hans or pt-br no longer writes
+  a second, nearly empty translation over the first.
+- **Sturdier against bad input.** A font table with an impossible range of codes no longer keeps the reader busy
+  for ever. On the server, a list of pages has a total limit however it is written, and passwords are hashed only
+  for a valid invitation, a few at a time.
 
 ## 0.2611.1 (2026-11-10)
 

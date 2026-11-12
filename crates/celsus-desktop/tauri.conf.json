@@ -25,6 +25,14 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIzOUI1MEU3RDgzNzBCQUIKUldTckN6Zlk1MUNiSTJZS0lmSzZrZXFrOU9TZGpTaUlFaVVLcHhFZ0pmNm9TS2N4ang3ajhIeXAK",
+      "endpoints": [
+        "https://github.com/byte-me-pls/celsus/releases/latest/download/latest.json"
+      ]
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",

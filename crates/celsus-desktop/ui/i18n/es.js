@@ -36,6 +36,12 @@ addLocale("es", {
     test: "Probar conexión", testing: "Probando…", testOk: (ms) => `Funciona · ${(ms / 1000).toFixed(1).replace(".", ",")} s`, save: "Guardar", cancelEdit: "Cancelar",
     modelsFetched: (n) => (n === 1 ? `${n} modelo encontrado` : `${n} modelos encontrados`), confirmRemoveModel: (n) => `¿Quitar «${n}»?`, noModels: "Aún no hay modelos.",
     batchChars: "Texto por solicitud", batchCharsHint: "En caracteres. Más grande implica menos solicitudes; más pequeño, respuestas más rápidas.",
+    answerWait: "Espera de una respuesta", answerWaitHint: "Segundos. Un modelo que no haya respondido en ese tiempo se abandona y el trabajo se detiene con un aviso. Da más tiempo a un modelo lento en tu propio ordenador.",
+    modelsAll: (n) => `Mostrar los ${n} modelos`, modelsNote: "Los nombres empiezan por quien hizo el modelo. Los modelos que no responden con texto (voz, búsqueda, seguridad) no se muestran.",
+    modelsTry: "Buscar los modelos que responden", modelsTrying: (a, b) => `Probando los modelos… ${a} de ${b}`, modelsTried: (a, b) => `${a} de ${b} modelos respondieron. La lista muestra ahora esos.`,
+    updateOut: (v) => `Ya está Celsus ${v}`, updateGet: "Descargar", updateCheck: "Buscar versiones nuevas", updateCheckHint: "Al abrirse, la aplicación pregunta a GitHub si hay una versión más reciente. No se envía nada sobre ti ni sobre tus libros.", upToDate: "Esta es la última versión",
+    updateInstall: "Actualizar y reiniciar", updateInstalling: "Actualizando…", updateFailed: "No se pudo instalar la actualización. En su lugar se abrió la página de descarga.",
+    errors: { no_answer: "El modelo no respondió a tiempo y la traducción se detuvo. Elige otro modelo en Ajustes → Modelos, o da más tiempo en Ajustes → Traducción." },
     readable: "Límite de legibilidad", readableHint: "Las traducciones largas se reducen como máximo al 70 % del tamaño original y nunca por debajo de 6 pt. Los bloques que aun así no caben conservan el original y se marcan.",
     fontsDir: "Carpeta de fuentes", fontsHint: "Carpeta de fuentes TrueType con las que se escriben las traducciones.",
     libraryPath: "Carpeta de la biblioteca", libraryBytes: "Tamaño de la biblioteca", database: "Base de datos", cache: "Caché de traducciones",
@@ -145,6 +151,7 @@ addLocale("es", {
     oauthAllow: "Permitir", oauthDeny: "Denegar", oauthInvalid: "Esta solicitud no se puede aprobar", signedInAs: (name, email) => `Sesión iniciada como ${name} (${email}).`,
     // Messages for the server's error codes.
     errors: {
+      no_answer: "El modelo no respondió a tiempo y la traducción se detuvo. Un administrador puede elegir otro modelo en Conexiones y modelos.",
       no_model: "Aún no hay ningún modelo elegido para esto. Un administrador puede elegirlo en «Conexiones y modelos».",
       wrong_credentials: "El correo electrónico o la contraseña no son correctos.",
       wrong_password: "La contraseña actual no es correcta.",

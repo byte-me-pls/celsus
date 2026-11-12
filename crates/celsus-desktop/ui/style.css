@@ -263,9 +263,24 @@ textarea { resize: vertical; }
 .task-row:nth-of-type(1) { border-top: 0; }
 .task-head h3 { margin: 0; font-size: 13px; font-weight: 500; }
 .task-head p { margin: 3px 0 10px; font-size: 11px; color: var(--soft); }
-.task-fields { display: grid; grid-template-columns: 170px minmax(0, 1fr) auto auto; gap: 8px; align-items: center; }
+.task-fields { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 8px; align-items: center; }
+.task-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .task-fields select, .task-fields input { padding: 8px 10px; }
 .task-row [data-result]:not(:empty) { margin-top: 10px; }
+.model-pick { position: relative; min-width: 0; }
+.model-pick input { width: 100%; }
+.model-list { position: absolute; z-index: 15; top: calc(100% + 4px); inset-inline: 0; max-height: 300px; overflow-y: auto; background: var(--panel); border: 1px solid var(--line-2); border-radius: 8px; padding: 4px; box-shadow: 0 12px 28px color-mix(in srgb, var(--shadow) 40%, transparent); }
+.model-list h4 { margin: 0; padding: 8px 8px 3px; font-size: 11px; font-weight: 500; color: var(--soft); }
+.model-list button { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; width: 100%; border: 0; border-radius: 5px; background: none; color: var(--ink); padding: 6px 8px; font-size: 12px; text-align: start; }
+.model-list button span { overflow-wrap: anywhere; }
+.model-list button:hover, .model-list button.on { background: color-mix(in srgb, var(--ember) 14%, transparent); }
+.model-list small { flex: none; font-size: 11px; color: var(--soft); }
+.model-list small.ok { color: var(--good-ink); }
+.model-list small.bad { color: var(--bad); }
+.model-list[hidden] { display: none; }
+.model-list button.more { justify-content: center; color: var(--ink-3); margin-top: 4px; border-top: 1px solid var(--line); border-radius: 0 0 5px 5px; }
+.update-bar { position: fixed; z-index: 19; bottom: 22px; inset-inline-end: 22px; display: flex; align-items: center; gap: 10px; padding: 10px 12px 10px 16px; background: var(--panel); border: 1px solid var(--line-2); border-radius: 8px; font-size: 12px; box-shadow: 0 8px 24px color-mix(in srgb, var(--shadow) 40%, transparent); }
+.update-bar .quiet-button { padding: 4px 8px; }
 .preset-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
 .preset { border: 1px dashed var(--line-3); background: none; color: var(--ink-3); border-radius: 7px; padding: 7px 12px; font-size: 12px; }
 .preset:hover { border-style: solid; border-color: var(--ember); color: var(--ember); }

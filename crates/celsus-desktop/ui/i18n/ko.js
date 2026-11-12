@@ -36,6 +36,12 @@ addLocale("ko", {
     test: "연결 테스트", testing: "테스트 중…", testOk: (ms) => `정상 작동 · ${(ms / 1000).toFixed(1)}초`, save: "저장", cancelEdit: "취소",
     modelsFetched: (n) => `모델 ${n}개를 찾았습니다`, confirmRemoveModel: (n) => `“${n}”을(를) 제거하시겠습니까?`, noModels: "아직 모델이 없습니다.",
     batchChars: "요청당 텍스트 양", batchCharsHint: "글자 수입니다. 크게 하면 요청이 줄고, 작게 하면 응답이 빨라집니다.",
+    answerWait: "응답 대기 시간", answerWaitHint: "초 단위입니다. 이 시간 안에 응답하지 않는 모델은 더 기다리지 않고, 작업은 알림과 함께 멈춥니다. 내 컴퓨터에서 실행하는 느린 모델에는 시간을 더 주세요.",
+    modelsAll: (n) => `모델 ${n}개 모두 보기`, modelsNote: "이름은 모델을 만든 곳으로 시작합니다. 텍스트로 응답하지 않는 모델(음성, 검색, 안전)은 표시하지 않습니다.",
+    modelsTry: "작동하는 모델 찾기", modelsTrying: (a, b) => `모델을 확인하는 중… ${a}/${b}`, modelsTried: (a, b) => `${a}/${b}개 모델이 응답했습니다. 이제 목록에 그 모델들이 표시됩니다.`,
+    updateOut: (v) => `Celsus ${v} 버전이 나왔습니다`, updateGet: "다운로드", updateCheck: "새 버전 확인", updateCheckHint: "앱을 시작할 때 GitHub에 새 릴리스가 있는지 묻습니다. 사용자나 책에 관한 정보는 전송되지 않습니다.", upToDate: "최신 버전입니다",
+    updateInstall: "업데이트 후 다시 시작", updateInstalling: "업데이트 중…", updateFailed: "업데이트를 설치하지 못했습니다. 대신 다운로드 페이지를 열었습니다.",
+    errors: { no_answer: "모델이 제때 응답하지 않아 번역을 중단했습니다. 설정 → 모델에서 다른 모델을 선택하거나 설정 → 번역에서 대기 시간을 늘리세요." },
     readable: "가독성 하한", readableHint: "긴 번역문은 원래 크기의 최대 70%까지 축소되며 6pt보다 작아지지 않습니다. 그래도 들어가지 않는 블록은 원문을 유지하고 표시됩니다.",
     fontsDir: "글꼴 폴더", fontsHint: "번역문을 쓰는 데 사용할 TrueType 글꼴 폴더입니다.",
     libraryPath: "서재 폴더", libraryBytes: "서재 크기", database: "데이터베이스", cache: "번역 캐시",
@@ -145,6 +151,7 @@ addLocale("ko", {
     oauthAllow: "허용", oauthDeny: "거부", oauthInvalid: "이 요청은 승인할 수 없습니다", signedInAs: (name, email) => `${name}(${email}) 계정으로 로그인했습니다.`,
     // Messages for the server's error codes.
     errors: {
+      no_answer: "모델이 제때 응답하지 않아 번역을 중단했습니다. 관리자가 연결 및 모델에서 다른 모델을 선택할 수 있습니다.",
       no_model: "아직 이 작업에 모델이 선택되지 않았습니다. 관리자가 ‘연결 및 모델’에서 선택할 수 있습니다.",
       wrong_credentials: "이메일 또는 비밀번호가 올바르지 않습니다.",
       wrong_password: "현재 비밀번호가 올바르지 않습니다.",

@@ -36,6 +36,12 @@ addLocale("ja", {
     test: "接続をテスト", testing: "テスト中…", testOk: (ms) => `正常に動作しています · ${(ms / 1000).toFixed(1)} 秒`, save: "保存", cancelEdit: "キャンセル",
     modelsFetched: (n) => `${n} 個のモデルが見つかりました`, confirmRemoveModel: (n) => `「${n}」を削除しますか？`, noModels: "モデルはまだありません。",
     batchChars: "1 リクエストあたりのテキスト量", batchCharsHint: "文字数。大きくするとリクエスト数が減り、小さくすると応答が速くなります。",
+    answerWait: "応答を待つ時間", answerWaitHint: "秒数です。この時間内に応答しないモデルは待たずに打ち切り、ジョブは通知を出して止まります。自分のコンピューターで動かす遅いモデルには長めに設定してください。",
+    modelsAll: (n) => `${n} 個すべてのモデルを表示`, modelsNote: "名前はモデルの作成元で始まります。テキストで応答しないモデル（音声、検索、安全性）は表示されません。",
+    modelsTry: "使えるモデルを探す", modelsTrying: (a, b) => `モデルを試しています… ${a}/${b}`, modelsTried: (a, b) => `${a}/${b} 個のモデルが応答しました。一覧にはそれらが表示されます。`,
+    updateOut: (v) => `Celsus ${v} が公開されました`, updateGet: "ダウンロード", updateCheck: "新しいバージョンを確認する", updateCheckHint: "起動時に、新しいリリースがあるかどうかを GitHub に問い合わせます。あなたや本に関する情報は送信されません。", upToDate: "最新バージョンです",
+    updateInstall: "更新して再起動", updateInstalling: "更新しています…", updateFailed: "更新をインストールできませんでした。代わりにダウンロードページを開きました。",
+    errors: { no_answer: "モデルが時間内に応答しなかったため、翻訳を停止しました。設定 → モデル で別のモデルを選ぶか、設定 → 翻訳 で待ち時間を延ばしてください。" },
     readable: "読みやすさの下限", readableHint: "長い翻訳は元のサイズの 70% まで縮小されますが、6 pt 未満にはなりません。それでも収まらないブロックは原文のまま残し、マークが付きます。",
     fontsDir: "フォントフォルダー", fontsHint: "翻訳の書き込みに使用する TrueType フォントのフォルダーです。",
     libraryPath: "ライブラリフォルダー", libraryBytes: "ライブラリのサイズ", database: "データベース", cache: "翻訳キャッシュ",
@@ -145,6 +151,7 @@ addLocale("ja", {
     oauthAllow: "許可", oauthDeny: "拒否", oauthInvalid: "このリクエストは承認できません", signedInAs: (name, email) => `${name}（${email}）としてサインインしています。`,
     // Messages for the server's error codes.
     errors: {
+      no_answer: "モデルが時間内に応答しなかったため、翻訳を停止しました。管理者が「接続とモデル」で別のモデルを選べます。",
       no_model: "これにはまだモデルが選択されていません。管理者が「接続とモデル」で選択できます。",
       wrong_credentials: "メールアドレスまたはパスワードが正しくありません。",
       wrong_password: "現在のパスワードが正しくありません。",

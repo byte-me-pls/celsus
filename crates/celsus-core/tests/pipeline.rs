@@ -125,11 +125,17 @@ struct Run {
 
 /// Translate the three-page book with page 3 already in the cache, as if an earlier run had done it.
 fn run(provider: &Fake, cancel: &AtomicBool) -> Option<Run> {
+    run_with(provider, cancel, &[])
+}
+
+/// The same, with `settled` as the pages that were translated before and are only written again.
+fn run_with(provider: &Fake, cancel: &AtomicBool, settled: &[usize]) -> Option<Run> {
     let to: Language = "tr".parse().unwrap();
     let fonts = fonts(&to)?;
     let doc = celsus_pdf::Document::load(book(&PAGES)).unwrap();
     let mut options = Options::new(to.clone());
     options.retry_secs = 0;
+    options.settled = settled.to_vec();
     let mut cache: BTreeMap<String, String> = BTreeMap::new();
     cache.insert(cache_key(&to, PAGES[2]), format!("Eski: {}", PAGES[2]));
     let mut done = Vec::new();
@@ -214,6 +220,73 @@ fn a_refused_key_stops_at_once_and_keeps_earlier_pages() {
     assert_eq!(run.done, [(3, 0)]);
     assert_eq!(run.text[0], PAGES[0]);
     assert!(run.text[2].starts_with("Eski:"), "{:?}", run.text);
+}
+
+#[test]
+fn a_model_that_never_answers_is_not_waited_for_twice() {
+    let provider = Fake {
+        good: 0,
+        asked: Cell::new(0),
+        then: || TranslateError::NoAnswer { seconds: 180 },
+        stop: None,
+    };
+    let Some(run) = run(&provider, &AtomicBool::new(false)) else {
+        return;
+    };
+    let why = run
+        .outcome
+        .failed
+        .expect("the run says the model was silent");
+    assert!(why.contains("did not answer within 180 seconds"), "{why}");
+    assert_eq!(provider.asked.get(), 1);
+    assert_eq!(run.done, [(3, 0)]);
+    assert_eq!(run.text[0], PAGES[0]);
+}
+
+#[test]
+fn a_model_that_falls_silent_gets_one_more_try_and_then_the_run_stops() {
+    let provider = Fake {
+        good: 1,
+        asked: Cell::new(0),
+        then: || TranslateError::NoAnswer { seconds: 180 },
+        stop: None,
+    };
+    let Some(run) = run(&provider, &AtomicBool::new(false)) else {
+        return;
+    };
+    let why = run
+        .outcome
+        .failed
+        .expect("the run says the model was silent");
+    assert!(
+        why.contains("page 2") && why.contains("did not answer"),
+        "{why}"
+    );
+    // Page 1, then page 2 asked twice.
+    assert_eq!(provider.asked.get(), 3);
+    assert_eq!(run.done, [(1, 0), (3, 0)]);
+}
+
+#[test]
+fn pages_translated_before_are_written_again_without_asking() {
+    let provider = Fake {
+        good: usize::MAX,
+        asked: Cell::new(0),
+        then: || TranslateError::Provider("never".into()),
+        stop: None,
+    };
+    // Pages 2 and 3 were translated before. Page 3's translation is still kept, page 2's is gone.
+    let Some(run) = run_with(&provider, &AtomicBool::new(false), &[2, 3]) else {
+        return;
+    };
+    assert_eq!(run.outcome.failed, None);
+    // Only page 1 was asked for: nothing is paid twice for the others.
+    assert_eq!(provider.asked.get(), 1);
+    assert!(run.text[0].starts_with("Sayfa:"), "{:?}", run.text);
+    assert!(run.text[2].starts_with("Eski:"), "{:?}", run.text);
+    // Page 2 stays as it was in the original and is reported as missing its text.
+    assert_eq!(run.text[1], PAGES[1]);
+    assert_eq!(run.done, [(1, 0), (2, 1), (3, 0)]);
 }
 
 #[test]

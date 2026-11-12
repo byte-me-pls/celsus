@@ -641,7 +641,7 @@ async function renderSettings(tab) {
   const box = $("#tab");
   if (tab === "general") settingsGeneral(box);
   if (tab === "models") await settingsModels(box);
-  if (tab === "translation") settingsSimple(box, [["batch_chars", T.batchChars, T.batchCharsHint, "number"]], `<div class="setting-row"><div><h3>${T.readable}</h3><p>${T.readableHint}</p></div><span class="caption">70% · 6 pt</span></div>`);
+  if (tab === "translation") settingsSimple(box, [["batch_chars", T.batchChars, T.batchCharsHint, "number"], ["answer_wait", T.answerWait, T.answerWaitHint, "number"]], `<div class="setting-row"><div><h3>${T.readable}</h3><p>${T.readableHint}</p></div><span class="caption">70% · 6 pt</span></div>`);
   if (tab === "fonts") settingsSimple(box, [["fonts_dir", T.fontsDir, T.fontsHint, "text"]]);
   if (tab === "storage") await settingsStorage(box);
   if (tab === "connections") await settingsConnections(box);
@@ -664,7 +664,10 @@ function settingsGeneral(box) {
       <select id="g-theme"><option value="dark">${T.dark}</option><option value="light">${T.light}</option></select></div>
     <div class="setting-row"><div><h3>${T.defaultTarget}</h3><p>${T.defaultTargetHint}</p></div>
       <input id="g-target" list="languages" value="${esc(state.settings.target_lang)}"></div>
+    <div class="setting-row"><div><h3>${T.updateCheck}</h3><p>${T.updateCheckHint}</p></div>
+      <input id="g-update" type="checkbox" style="justify-self:end;width:auto" ${state.settings.update_check === "0" ? "" : "checked"}></div>
   </section>`;
+  $("#g-update").onchange = (e) => saveSettings({ update_check: e.target.checked ? "1" : "0" });
   $("#g-ui").value = ui;
   $("#g-theme").value = theme;
   $("#g-ui").onchange = (e) => { try { if (e.target.value === "system") localStorage.removeItem("celsus-ui-lang"); else localStorage.setItem("celsus-ui-lang", e.target.value); } catch {} location.reload(); };
@@ -685,6 +688,7 @@ const TASKS = () => [
   ["image", T.taskImage, T.taskImageHint],
 ];
 const modelLists = new Map(); // connection id -> model names
+
 
 async function modelsOf(provider) {
   if (!modelLists.has(provider.id)) {
@@ -708,7 +712,7 @@ async function settingsModels(box) {
     return;
   }
   box.innerHTML = `<section class="card"><div class="section-heading"><h2>${T.tModels}</h2></div>
-    <p class="hint" style="margin-bottom:6px">${T.tasksHint}</p>
+    <p class="hint" style="margin-bottom:6px">${T.tasksHint} ${T.modelsNote}</p>
     ${TASKS().map(([k, label, hint]) => {
       const t = tasks.find((x) => x.task === k) || {};
       const shown = t.chosen || k === "translate";
@@ -717,8 +721,11 @@ async function settingsModels(box) {
         <div class="task-head"><h3>${label}</h3><p>${hint}</p></div>
         <div class="task-fields">
           <select data-conn>${empty}${providers.map((p) => `<option value="${p.id}" ${shown && t.provider_id === p.id ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select>
-          <input data-model list="dl-${k}" placeholder="${T.modelPlaceholder}" value="${esc(shown ? t.model : "")}" autocomplete="off">
-          <datalist id="dl-${k}"></datalist>
+          <div class="model-pick"><input data-model placeholder="${T.modelPlaceholder}" value="${esc(shown ? t.model : "")}" autocomplete="off" spellcheck="false">
+            <div class="model-list" data-list hidden></div></div>
+        </div>
+        <div class="task-actions">
+          <button class="quiet-button" data-try hidden>${T.modelsTry}</button>
           <button class="quiet-button" data-test>${T.testShort}</button>
           <button class="primary-button" data-save>${T.save}</button>
         </div>
@@ -730,22 +737,41 @@ async function settingsModels(box) {
     const task = row.dataset.task;
     const conn = $("[data-conn]", row), input = $("[data-model]", row), out = $("[data-result]", row);
     const provider = () => providers.find((p) => p.id === Number(conn.value));
+    // The models of the chosen connection: those fit for the job, and all of them.
+    let offered = [[], []];
     const fill = async () => {
       const p = provider();
       input.disabled = !p;
+      offered = [[], []];
       if (!p) { input.value = ""; return; }
-      let models = await modelsOf(p);
-      if (task === "image") models = models.filter((m) => /image|dall-e/.test(m));
-      $("datalist", row).innerHTML = models.map((m) => `<option value="${esc(m)}">`).join("");
-      if (!input.value && task === "image") input.value = suggestImageModel(models);
+      const models = await modelsOf(p);
+      if (p !== provider()) return;
+      offered = task === "image"
+        ? [models.filter((m) => /image|dall-e/.test(m)), models]
+        : [models.filter((m) => !NOT_CHAT.test(m)), models];
+      if (!input.value && task === "image") input.value = suggestImageModel(offered[0]);
+      refresh();
     };
+    const refresh = modelField({
+      input, list: $("[data-list]", row), button: $("[data-try]", row), out,
+      connection: () => conn.value,
+      models: () => offered,
+      ask: (model, id) => {
+        const p = providers.find((x) => x.id === Number(id));
+        return invoke("model_test", { providerId: p.id, url: p.url, model, picture: false, quick: true })
+          .catch((e) => ({ ok: false, millis: 0, error: String(e) }));
+      },
+      canTry: () => { const p = provider(); return !!p && task !== "image" && !LOCAL_URL.test(p.url); },
+    });
     conn.onchange = () => { input.value = ""; out.innerHTML = ""; fill(); };
     fill();
     $("[data-test]", row).onclick = async () => {
       const p = provider();
       if (!p || !input.value.trim()) return;
       out.innerHTML = `<div class="test-result">${T.testing}</div>`;
-      const r = await invoke("model_test", { providerId: p.id, url: p.url, model: input.value.trim(), picture: task === "image" });
+      const model = input.value.trim();
+      const r = await invoke("model_test", { providerId: p.id, url: p.url, model, picture: task === "image" });
+      if (task !== "image") rememberTest(p.id, model, r.ok, r.millis);
       out.innerHTML = r.ok
         ? `<div class="test-result ok"><b>${task === "image" ? T.pictureModelOk : T.testOk(r.millis)}</b><br>${esc(r.sample)}</div>`
         : `<div class="test-result bad">${esc(r.error)}</div>`;
@@ -945,7 +971,8 @@ async function settingsAbout(box) {
   const version = await invoke("app_version");
   box.innerHTML = `<section class="card stack">
       <div class="about"><span class="about-logo"></span><div><h2>Celsus</h2><span class="caption">${T.version} ${esc(version)}</span></div></div>
-      <p class="hint" style="font-size:13px">${T.aboutText}</p></section>
+      <p class="hint" style="font-size:13px">${T.aboutText}</p>
+      <div class="row" id="about-update" style="align-items:center;gap:12px" hidden></div></section>
     <section class="card"><div class="section-heading"><h2>${T.licenses}</h2></div><dl class="kv">
       <dt>Celsus</dt><dd>MIT</dd>
       <dt>pdf.js</dt><dd>Apache-2.0</dd>
@@ -954,6 +981,54 @@ async function settingsAbout(box) {
       <dt>Instrument Serif</dt><dd>SIL Open Font License 1.1</dd>
       <dt>Tauri</dt><dd>MIT / Apache-2.0</dd>
       <dt>SQLite</dt><dd>Public domain</dd></dl></section>`;
+  if (state.settings.update_check === "0") return;
+  const update = await invoke("update_check").catch(() => undefined);
+  const line = $("#about-update");
+  if (update === undefined || !line) return;
+  line.hidden = false;
+  line.innerHTML = update
+    ? `<span class="caption">${esc(T.updateOut(update.version))}</span><button class="primary-button">${update.installs_itself ? T.updateInstall : T.updateGet}</button>`
+    : `<span class="caption">${T.upToDate}</span>`;
+  if (update) $("button", line).onclick = (e) => getUpdate(update, e.currentTarget);
+}
+
+/**
+ * Put a newer release in place: the app downloads it, checks its signature and starts again. Where the app
+ * cannot replace itself, or that fails, the release's page is opened instead.
+ */
+async function getUpdate(update, button) {
+  if (!update.installs_itself) { call("open_url", { url: update.url }); return; }
+  button.disabled = true;
+  button.textContent = T.updateInstalling;
+  try {
+    await invoke("update_install");
+  } catch {
+    toast(T.updateFailed, true);
+    call("open_url", { url: update.url });
+    button.disabled = false;
+    button.textContent = T.updateGet;
+    update.installs_itself = false;
+  }
+}
+
+/** Say that a newer release is out, once for each release, until it is closed. */
+async function announceUpdate() {
+  if (state.settings.update_check === "0") return;
+  const update = await invoke("update_check").catch(() => null);
+  if (!update) return;
+  try { if (localStorage.getItem("celsus-update-seen") === update.version) return; } catch {}
+  const bar = document.createElement("div");
+  bar.className = "update-bar";
+  bar.innerHTML = `<span>${esc(T.updateOut(update.version))}</span><button class="primary-button" data-get>${update.installs_itself ? T.updateInstall : T.updateGet}</button><button class="quiet-button" data-close aria-label="${T.winClose}">✕</button>`;
+  document.body.append(bar);
+  const close = () => { try { localStorage.setItem("celsus-update-seen", update.version); } catch {} bar.remove(); };
+  $("[data-get]", bar).onclick = async (e) => {
+    const itself = update.installs_itself;
+    await getUpdate(update, e.currentTarget);
+    // Sent to the download page: the notice has done its work.
+    if (!itself) close();
+  };
+  $("[data-close]", bar).onclick = close;
 }
 
 /* ============================== profile ============================== */
@@ -999,6 +1074,8 @@ listen("library-changed", async () => {
 
 listen("job-updated", async ({ payload: job }) => {
   if (job.status !== "running") state.stopping.delete(job.id);
+  // A job that stopped on its own says why, wherever the user is in the app.
+  if (job.status === "failed" && job.error) toast(T.errors?.[job.error] || job.error, true);
   await refreshCounts();
   const v = state.route.view;
   if (v === "jobs") renderJobs();
@@ -1048,4 +1125,5 @@ setTheme(document.documentElement.dataset.theme || "dark");
   state.settings = await loadSettings().catch(() => ({ target_lang: DEFAULT_TARGET }));
   await refreshProfile().catch(() => {});
   go("library");
+  announceUpdate();
 })();

@@ -16,6 +16,7 @@ pub mod mirror;
 pub mod pipeline;
 pub mod place;
 pub mod provider;
+pub mod release;
 pub mod render;
 pub mod shape;
 pub mod translate;

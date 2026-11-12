@@ -270,12 +270,18 @@ pub async fn estimate(
                 .parse::<usize>()
                 .map_err(|_| ApiError::bad("bad page"))
         };
+        // No more than 5000 pages are ever held, however many ranges name them.
+        let room = 5000usize.saturating_sub(pages.len());
+        if room == 0 {
+            break;
+        }
         match part.split_once('-') {
-            Some((a, b)) => pages.extend(num(a)?..=num(b)?.min(book.pages as usize)),
+            Some((a, b)) => {
+                pages.extend((num(a)?..=num(b)?.min(book.pages as usize)).take(room));
+            }
             None => pages.push(num(part)?),
         }
     }
-    pages.truncate(5000);
     let source = library::source_file(&state.config, &book.id);
     let chars = tokio::task::spawn_blocking(move || {
         celsus_pdf::Document::open(&source)
@@ -369,7 +375,15 @@ pub async fn clear_cache(State(state): State<AppState>, auth: Auth) -> ApiResult
     auth.require("admin")?;
     auth.require_session()?;
     let db = state.pool.get().await?;
-    let n = db.execute("DELETE FROM translation_cache", &[]).await?;
+    // The translations that translated pages are written from stay: a book that has any keeps its own. Without
+    // them, the next time such a book is written its pages would go back to the original.
+    let n = db
+        .execute(
+            "DELETE FROM translation_cache WHERE book_id IS NULL \
+             OR book_id NOT IN (SELECT DISTINCT book_id FROM translated_pages)",
+            &[],
+        )
+        .await?;
     audit::record(
         &**db,
         Some(auth.user.id),
@@ -385,9 +399,16 @@ pub async fn clear_cache(State(state): State<AppState>, auth: Auth) -> ApiResult
 #[derive(Deserialize)]
 pub struct TestBody {
     task: String,
+    /// A connection and a model to try in place of the ones chosen for the task.
+    provider_id: Option<i64>,
+    model: Option<String>,
+    /// For trying many models in a row: one that is not there to answer at once is not waited for.
+    #[serde(default)]
+    quick: bool,
 }
 
-/// Try the model chosen for a task: a short translation, or for pictures whether the connection offers it.
+/// Try a model, the one chosen for a task or the one named: a short translation, or for pictures whether the
+/// connection offers it.
 pub async fn test_model(
     State(state): State<AppState>,
     auth: Auth,
@@ -397,20 +418,32 @@ pub async fn test_model(
     if !matches!(b.task.as_str(), "translate" | "metadata" | "image") {
         return Err(ApiError::bad("Unknown task."));
     }
-    let client = worker::model_for(&state, &b.task)
-        .await
-        .map_err(ApiError::model)?;
+    let named = b.model.as_deref().map(str::trim).unwrap_or("");
+    let client = match b.provider_id {
+        Some(id) if !named.is_empty() && named.len() <= 200 => {
+            worker::client_for(&state, id, named.to_owned()).await
+        }
+        _ => worker::model_for(&state, &b.task).await,
+    }
+    .map_err(ApiError::model)?
+    .answers_within(if b.quick {
+        30
+    } else {
+        celsus_core::provider::ANSWER_WAIT
+    });
     let picture = b.task == "image";
     let start = std::time::Instant::now();
-    let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+    // What went wrong, and how long the connection asks to wait when that is why.
+    type Failure = (String, Option<u64>);
+    let result = tokio::task::spawn_blocking(move || -> Result<String, Failure> {
         if picture {
-            let list = client.list_models().map_err(|e| e.to_string())?;
+            let list = client.list_models().map_err(|e| (e.to_string(), None))?;
             return if list.iter().any(|m| m == &client.model) {
                 Ok(client.model.clone())
             } else {
-                Err(format!(
-                    "{} is not offered by this connection",
-                    client.model
+                Err((
+                    format!("{} is not offered by this connection", client.model),
+                    None,
                 ))
             };
         }
@@ -429,14 +462,24 @@ pub async fn test_model(
         client
             .translate(&request)
             .map(|(t, _)| t.join(" "))
-            .map_err(|e| e.to_string())
+            .map_err(|e| {
+                let wait = match &e {
+                    celsus_core::translate::TranslateError::RateLimited { retry_after_secs } => {
+                        Some(*retry_after_secs)
+                    }
+                    _ => None,
+                };
+                (e.to_string(), wait)
+            })
     })
     .await
     .map_err(ApiError::internal)?;
     let millis = start.elapsed().as_millis() as i64;
     Ok(Json(match result {
         Ok(sample) => json!({ "ok": true, "millis": millis, "sample": sample }),
-        Err(error) => json!({ "ok": false, "millis": millis, "error": error }),
+        Err((error, wait)) => {
+            json!({ "ok": false, "millis": millis, "error": error, "wait": wait })
+        }
     }))
 }
 

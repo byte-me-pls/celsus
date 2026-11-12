@@ -36,6 +36,12 @@ addLocale("pl", {
     test: "Testuj połączenie", testing: "Testowanie…", testOk: (ms) => `Działa · ${(ms / 1000).toFixed(1).replace(".", ",")} s`, save: "Zapisz", cancelEdit: "Anuluj",
     modelsFetched: (n) => `Znaleziono ${n} ${n === 1 ? "model" : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? "modele" : "modeli"}`, confirmRemoveModel: (n) => `Usunąć „${n}”?`, noModels: "Brak modeli.",
     batchChars: "Tekst na zapytanie", batchCharsHint: "W znakach. Więcej to mniej zapytań, mniej to szybsze odpowiedzi.",
+    answerWait: "Czekanie na odpowiedź", answerWaitHint: "W sekundach. Model, który do tego czasu nie odpowie, zostaje porzucony, a zadanie zatrzymuje się z komunikatem. Daj więcej czasu wolnemu modelowi na własnym komputerze.",
+    modelsAll: (n) => `Pokaż wszystkie modele: ${n}`, modelsNote: "Nazwy zaczynają się od twórcy modelu. Modele, które nie odpowiadają tekstem (mowa, wyszukiwanie, bezpieczeństwo), są pomijane.",
+    modelsTry: "Znajdź działające modele", modelsTrying: (a, b) => `Sprawdzanie modeli… ${a} z ${b}`, modelsTried: (a, b) => `Odpowiedziało ${a} z ${b} modeli. Lista pokazuje teraz tylko je.`,
+    updateOut: (v) => `Wyszedł Celsus ${v}`, updateGet: "Pobierz", updateCheck: "Sprawdzaj nowe wersje", updateCheckHint: "Przy uruchomieniu aplikacja pyta GitHub, czy jest nowsza wersja. Nic o tobie ani o twoich książkach nie jest wysyłane.", upToDate: "To najnowsza wersja",
+    updateInstall: "Zaktualizuj i uruchom ponownie", updateInstalling: "Aktualizowanie…", updateFailed: "Nie udało się zainstalować aktualizacji. Zamiast tego otwarto stronę pobierania.",
+    errors: { no_answer: "Model nie odpowiedział na czas, tłumaczenie zostało zatrzymane. Wybierz inny model w Ustawienia → Modele albo daj więcej czasu w Ustawienia → Tłumaczenie." },
     readable: "Próg czytelności", readableHint: "Długie tłumaczenia zmniejszają się najwyżej do 70% oryginalnego rozmiaru i nigdy poniżej 6 pt. Bloki, które nadal się nie mieszczą, zachowują oryginał i zostają oznaczone.",
     fontsDir: "Folder czcionek", fontsHint: "Folder z czcionkami TrueType, którymi składane są tłumaczenia.",
     libraryPath: "Folder biblioteki", libraryBytes: "Rozmiar biblioteki", database: "Baza danych", cache: "Pamięć podręczna tłumaczeń",
@@ -145,6 +151,7 @@ addLocale("pl", {
     oauthAllow: "Zezwól", oauthDeny: "Odmów", oauthInvalid: "Tej prośby nie można zatwierdzić", signedInAs: (name, email) => `Zalogowano jako ${name} (${email}).`,
     // Messages for the server's error codes.
     errors: {
+      no_answer: "Model nie odpowiedział na czas, tłumaczenie zostało zatrzymane. Administrator może wybrać inny model w sekcji Połączenia i modele.",
       no_model: "Nie wybrano jeszcze modelu do tego zadania. Administrator może go wybrać w sekcji „Połączenia i modele”.",
       wrong_credentials: "Nieprawidłowy e-mail lub hasło.",
       wrong_password: "Obecne hasło jest nieprawidłowe.",

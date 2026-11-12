@@ -611,6 +611,53 @@ async fn choose_fake_model(s: &Server, owner: &Browser) {
     .await;
 }
 
+/// A model can be tried on a connection before it is chosen for anything.
+#[tokio::test]
+async fn a_named_model_is_tried_without_being_chosen() {
+    let s = Server::new().await;
+    let owner = s.owner().await;
+    let url = fake_model().await;
+    let pid = s
+        .post(
+            &owner,
+            "/api/admin/providers",
+            json!({"name": "Fake", "url": url, "allow_local": true}),
+        )
+        .await
+        .body["id"]
+        .as_i64()
+        .unwrap();
+    let r = s
+        .post(
+            &owner,
+            "/api/admin/models/test",
+            json!({"task": "translate", "provider_id": pid, "model": "anything", "quick": true}),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(r.body["ok"], true, "{:?}", r.body);
+    assert!(r.body["sample"].as_str().unwrap().starts_with("TR "));
+    // Trying a model does not choose it.
+    let r = s
+        .post(
+            &owner,
+            "/api/admin/models/test",
+            json!({"task": "translate"}),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    // A connection that is not there cannot be tried.
+    let r = s
+        .post(
+            &owner,
+            "/api/admin/models/test",
+            json!({"task": "translate", "provider_id": 999_999, "model": "anything"}),
+        )
+        .await;
+    assert_ne!(r.status, StatusCode::OK);
+    s.finish().await;
+}
+
 #[tokio::test]
 async fn a_job_translates_end_to_end() {
     let s = Server::new().await;

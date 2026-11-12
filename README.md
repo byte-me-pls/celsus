@@ -147,7 +147,9 @@ Requirements, HTTPS, backups and settings: [docs/server-setup.md](docs/server-se
 The PDF file itself never does. What goes out goes only to the model you chose: the text of the blocks being
 translated, the opening text of a new book if you let a model fill in its details, and a picture when you ask for
 it to be redrawn. With a model that runs on your computer (Ollama, LM Studio) nothing leaves it at all. Celsus has
-no telemetry and does not phone home.
+no telemetry. The desktop app asks GitHub once, when it starts, whether a newer release is out, and downloads
+it from there when you press *Update*; those requests carry nothing about you or your books, and *Settings →
+General* turns the check off.
 
 **What does it cost?**
 Celsus is free. The model may not be. Three ways to pay nothing extra: the free credits NVIDIA gives at
@@ -198,6 +200,11 @@ it is for: the Windows setup program on Windows, the `.dmg` on macOS, the `.deb`
 ```sh
 bash scripts/bundle.sh
 ```
+
+An installed app updates itself only from files signed with the project's key. With that key in
+`TAURI_SIGNING_PRIVATE_KEY` the script also writes a signature beside each installer; without it the installers
+are built all the same. A fork that wants its own updates puts its own public key and address under
+`plugins.updater` in `crates/celsus-desktop/tauri.conf.json`.
 
 The server image builds with plain `docker build -t celsus .`.
 

@@ -84,6 +84,16 @@ pub fn open(path: &Path) -> Result<Connection> {
         conn.execute_batch("UPDATE books SET has_cover = 0; PRAGMA user_version = 1;")
             .map_err(err)?;
     }
+    // A language used to be written as it was typed in one place and in its canonical case in another
+    // ("zh-hans", "zh-Hans"), which made two translations out of one. It has one spelling now.
+    if version < 2 {
+        conn.execute_batch(
+            "UPDATE OR REPLACE translated_pages SET lang = lower(lang) WHERE lang <> lower(lang);
+             UPDATE jobs SET target_lang = lower(target_lang) WHERE target_lang <> lower(target_lang);
+             PRAGMA user_version = 2;",
+        )
+        .map_err(err)?;
+    }
     Ok(conn)
 }
 
@@ -232,7 +242,13 @@ pub fn delete_book(conn: &Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
+/// The one spelling of a language in the database and in file names: "zh-Hans" and "ZH-HANS" are "zh-hans".
+pub fn lang_key(lang: &str) -> String {
+    lang.trim().to_lowercase()
+}
+
 pub fn translated_pages(conn: &Connection, book: i64, lang: &str) -> Result<Vec<(i64, i64)>> {
+    let lang = lang_key(lang);
     let mut stmt = conn
         .prepare(
             "SELECT page, kept FROM translated_pages WHERE book_id = ? AND lang = ? ORDER BY page",
@@ -245,10 +261,21 @@ pub fn translated_pages(conn: &Connection, book: i64, lang: &str) -> Result<Vec<
 }
 
 pub fn mark_page(conn: &Connection, book: i64, lang: &str, page: i64, kept: i64) -> Result<()> {
+    let lang = lang_key(lang);
     conn.execute(
         "INSERT INTO translated_pages (book_id, lang, page, kept) VALUES (?, ?, ?, ?)
          ON CONFLICT(book_id, lang, page) DO UPDATE SET kept = excluded.kept",
         params![book, lang, page, kept],
+    )
+    .map_err(err)?;
+    Ok(())
+}
+
+/// A page is not translated after all: its translation could not be written again.
+pub fn unmark_page(conn: &Connection, book: i64, lang: &str, page: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM translated_pages WHERE book_id = ? AND lang = ? AND page = ?",
+        params![book, lang_key(lang), page],
     )
     .map_err(err)?;
     Ok(())
@@ -324,6 +351,7 @@ pub fn job(conn: &Connection, id: i64) -> Result<Job> {
 }
 
 pub fn insert_job(conn: &Connection, book: i64, lang: &str, pages: &[i64]) -> Result<i64> {
+    let lang = lang_key(lang);
     conn.execute(
         "INSERT INTO jobs (book_id, target_lang, pages, status, total_pages, created_at) VALUES (?, ?, ?, 'queued', ?, ?)",
         params![book, lang, serde_json::to_string(pages).map_err(err)?, pages.len() as i64, now()],
@@ -597,9 +625,52 @@ pub fn cache_size(conn: &Connection) -> Result<(i64, i64)> {
     .map_err(err)
 }
 
-pub fn clear_cache(conn: &Connection) -> Result<()> {
-    conn.execute("DELETE FROM cache", []).map_err(err)?;
-    Ok(())
+/// Clear the kept translations, all but those under the keys in `keep`. Says how many went.
+pub fn clear_cache_except(
+    conn: &Connection,
+    keep: &std::collections::HashSet<String>,
+) -> Result<usize> {
+    let keys: Vec<String> = conn
+        .prepare("SELECT key FROM cache")
+        .map_err(err)?
+        .query_map([], |r| r.get(0))
+        .map_err(err)?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(err)?;
+    let tx = conn.unchecked_transaction().map_err(err)?;
+    let mut cleared = 0;
+    for key in keys.iter().filter(|k| !keep.contains(*k)) {
+        cleared += tx
+            .execute("DELETE FROM cache WHERE key = ?", [key])
+            .map_err(err)?;
+    }
+    tx.commit().map_err(err)?;
+    Ok(cleared)
+}
+
+/// Every translated page in the library: (book, language, pages).
+pub fn all_translated_pages(conn: &Connection) -> Result<Vec<(i64, String, Vec<usize>)>> {
+    let mut stmt = conn
+        .prepare("SELECT book_id, lang, page FROM translated_pages ORDER BY book_id, lang, page")
+        .map_err(err)?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(err)?;
+    let mut out: Vec<(i64, String, Vec<usize>)> = Vec::new();
+    for row in rows {
+        let (book, lang, page) = row.map_err(err)?;
+        match out.last_mut() {
+            Some((b, l, pages)) if *b == book && *l == lang => pages.push(page as usize),
+            _ => out.push((book, lang, vec![page as usize])),
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -687,5 +758,110 @@ mod tests {
         assert_eq!(default_provider(&c).unwrap().unwrap().id, a);
         delete_provider(&c, a).unwrap();
         assert_eq!(default_provider(&c).unwrap().unwrap().id, b);
+    }
+
+    #[test]
+    fn a_language_has_one_spelling() {
+        let c = conn();
+        c.execute_batch(
+            "INSERT INTO books (id, title, author, subject, original_name, pages, bytes, source_lang, has_cover, added_at)
+             VALUES (1, 'A book', '', '', 'a.pdf', 10, 1, 'en', 0, 0);",
+        )
+        .unwrap();
+        mark_page(&c, 1, "zh-hans", 3, 0).unwrap();
+        mark_page(&c, 1, "zh-Hans", 4, 1).unwrap();
+        // However it is written, it is the same translation.
+        assert_eq!(
+            translated_pages(&c, 1, "zh-Hans").unwrap(),
+            [(3, 0), (4, 1)]
+        );
+        assert_eq!(
+            translated_pages(&c, 1, "ZH-HANS").unwrap(),
+            [(3, 0), (4, 1)]
+        );
+        let job = insert_job(&c, 1, "pt-BR", &[1]).unwrap();
+        let lang: String = c
+            .query_row("SELECT target_lang FROM jobs WHERE id = ?", [job], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(lang, "pt-br");
+    }
+
+    #[test]
+    fn pages_written_under_another_spelling_are_found_after_an_update() {
+        let file = std::env::temp_dir().join(format!("celsus-lang-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        {
+            let c = open(&file).unwrap();
+            // As an earlier version left it: the same language under two spellings.
+            c.execute_batch(
+                "INSERT INTO books (id, title, author, subject, original_name, pages, bytes, source_lang, has_cover, added_at)
+                 VALUES (1, 'A book', '', '', 'a.pdf', 10, 1, 'en', 0, 0);
+                 INSERT INTO translated_pages (book_id, lang, page, kept) VALUES (1, 'zh-Hans', 1, 0);
+                 INSERT INTO translated_pages (book_id, lang, page, kept) VALUES (1, 'zh-hans', 1, 2);
+                 INSERT INTO translated_pages (book_id, lang, page, kept) VALUES (1, 'zh-Hans', 2, 0);
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        }
+        let c = open(&file).unwrap();
+        let pages: Vec<i64> = translated_pages(&c, 1, "zh-hans")
+            .unwrap()
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        assert_eq!(pages, [1, 2]);
+        let spellings: i64 = c
+            .query_row(
+                "SELECT COUNT(DISTINCT lang) FROM translated_pages",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(spellings, 1);
+        drop(c);
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn clearing_the_cache_leaves_what_is_in_use() {
+        let c = conn();
+        for key in ["tr|one", "tr|two", "tr|three"] {
+            c.execute("INSERT INTO cache (key, text) VALUES (?, 'x')", [key])
+                .unwrap();
+        }
+        let keep = std::collections::HashSet::from(["tr|two".to_string()]);
+        assert_eq!(clear_cache_except(&c, &keep).unwrap(), 2);
+        let left: Vec<String> = c
+            .prepare("SELECT key FROM cache")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(left, ["tr|two"]);
+    }
+
+    #[test]
+    fn translated_pages_are_listed_by_book_and_language_and_can_be_unmarked() {
+        let c = conn();
+        c.execute_batch(
+            "INSERT INTO books (id, title, author, subject, original_name, pages, bytes, source_lang, has_cover, added_at)
+             VALUES (1, 'A book', '', '', 'a.pdf', 10, 1, 'en', 0, 0);",
+        )
+        .unwrap();
+        mark_page(&c, 1, "tr", 2, 0).unwrap();
+        mark_page(&c, 1, "tr", 5, 0).unwrap();
+        mark_page(&c, 1, "de", 2, 0).unwrap();
+        assert_eq!(
+            all_translated_pages(&c).unwrap(),
+            [
+                (1, "de".to_string(), vec![2]),
+                (1, "tr".to_string(), vec![2, 5])
+            ]
+        );
+        unmark_page(&c, 1, "TR", 5).unwrap();
+        assert_eq!(translated_pages(&c, 1, "tr").unwrap(), [(2, 0)]);
     }
 }

@@ -21,12 +21,39 @@ pub fn cover_file(library: &Path, id: i64) -> PathBuf {
 }
 
 pub fn output_file(library: &Path, id: i64, lang: &str) -> PathBuf {
-    book_dir(library, id).join(format!("{lang}.pdf"))
+    book_dir(library, id).join(format!("{}.pdf", crate::db::lang_key(lang)))
+}
+
+/// Give the files of every book the one spelling of their language. Where file names tell upper case from
+/// lower, a translation written as "zh-Hans.pdf" would otherwise not be found as "zh-hans.pdf".
+pub fn settle_language_names(library: &Path) {
+    let Ok(books) = std::fs::read_dir(library.join("books")) else {
+        return;
+    };
+    for book in books.flatten() {
+        let Ok(files) = std::fs::read_dir(book.path()) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let name = file.file_name().to_string_lossy().into_owned();
+            let named_by_language =
+                name.starts_with("redrawn-") || (name.ends_with(".pdf") && name != "source.pdf");
+            let lower = name.to_lowercase();
+            if !named_by_language || lower == name {
+                continue;
+            }
+            let settled = book.path().join(lower);
+            // Where the two names are one file, or the settled one is there already, nothing is moved.
+            if !settled.exists() {
+                let _ = std::fs::rename(file.path(), settled);
+            }
+        }
+    }
 }
 
 /// Pictures redrawn in one language, one file per picture, named `p<page>-<object>-<generation>.jpg` (or `.png`).
 pub fn redrawn_dir(library: &Path, id: i64, lang: &str) -> PathBuf {
-    book_dir(library, id).join(format!("redrawn-{lang}"))
+    book_dir(library, id).join(format!("redrawn-{}", crate::db::lang_key(lang)))
 }
 
 /// Where a redrawn picture goes; the extension follows the file's type.

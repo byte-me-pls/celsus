@@ -36,6 +36,12 @@ addLocale("de", {
     test: "Verbindung testen", testing: "Wird getestet …", testOk: (ms) => `Funktioniert · ${(ms / 1000).toFixed(1).replace(".", ",")} s`, save: "Speichern", cancelEdit: "Abbrechen",
     modelsFetched: (n) => `${n} ${n === 1 ? "Modell" : "Modelle"} gefunden`, confirmRemoveModel: (n) => `„${n}“ entfernen?`, noModels: "Noch keine Modelle.",
     batchChars: "Text pro Anfrage", batchCharsHint: "In Zeichen. Mehr bedeutet weniger Anfragen, weniger bedeutet schnellere Antworten.",
+    answerWait: "Wartezeit auf eine Antwort", answerWaitHint: "Sekunden. Ein Modell, das bis dahin nicht geantwortet hat, wird aufgegeben und der Auftrag hält mit einem Hinweis an. Für ein langsames Modell auf dem eigenen Rechner mehr Zeit geben.",
+    modelsAll: (n) => `Alle ${n} Modelle zeigen`, modelsNote: "Die Namen beginnen mit dem Hersteller des Modells. Modelle, die nicht mit Text antworten (Sprache, Suche, Sicherheit), werden weggelassen.",
+    modelsTry: "Funktionierende Modelle finden", modelsTrying: (a, b) => `Modelle werden geprüft… ${a} von ${b}`, modelsTried: (a, b) => `${a} von ${b} Modellen haben geantwortet. Die Liste zeigt jetzt diese.`,
+    updateOut: (v) => `Celsus ${v} ist da`, updateGet: "Herunterladen", updateCheck: "Nach neuen Versionen sehen", updateCheckHint: "Beim Start fragt die App bei GitHub nach, ob es eine neuere Version gibt. Über dich oder deine Bücher wird nichts gesendet.", upToDate: "Das ist die neueste Version",
+    updateInstall: "Aktualisieren und neu starten", updateInstalling: "Wird aktualisiert…", updateFailed: "Das Update konnte nicht installiert werden. Stattdessen ist die Download-Seite geöffnet.",
+    errors: { no_answer: "Das Modell hat nicht rechtzeitig geantwortet, die Übersetzung wurde angehalten. Wähle unter Einstellungen → Modelle ein anderes Modell oder gib unter Einstellungen → Übersetzung mehr Zeit." },
     readable: "Lesbarkeitsgrenze", readableHint: "Lange Übersetzungen werden auf höchstens 70 % der Originalgröße verkleinert, aber nie unter 6 pt. Blöcke, die dann noch nicht passen, behalten das Original und werden markiert.",
     fontsDir: "Schriftenordner", fontsHint: "Ordner mit TrueType-Schriften, mit denen die Übersetzungen gesetzt werden.",
     libraryPath: "Bibliotheksordner", libraryBytes: "Größe der Bibliothek", database: "Datenbank", cache: "Übersetzungscache",
@@ -145,6 +151,7 @@ addLocale("de", {
     oauthAllow: "Erlauben", oauthDeny: "Ablehnen", oauthInvalid: "Diese Anfrage kann nicht genehmigt werden", signedInAs: (name, email) => `Angemeldet als ${name} (${email}).`,
     // Messages for the server's error codes.
     errors: {
+      no_answer: "Das Modell hat nicht rechtzeitig geantwortet, die Übersetzung wurde angehalten. Ein Admin kann unter Verbindungen und Modelle ein anderes Modell wählen.",
       no_model: "Dafür ist noch kein Modell ausgewählt. Ein Admin kann eines unter „Verbindungen und Modelle“ auswählen.",
       wrong_credentials: "E-Mail oder Passwort ist falsch.",
       wrong_password: "Das aktuelle Passwort ist falsch.",

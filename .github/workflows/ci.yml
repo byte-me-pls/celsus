@@ -63,7 +63,7 @@ jobs:
           persist-credentials: false
       - name: Scripts parse
         run: |
-          for f in crates/celsus-server/web/web.js crates/celsus-desktop/ui/app.js crates/celsus-desktop/ui/reader.js crates/celsus-desktop/ui/i18n/*.js; do node --check "$f"; done
+          for f in crates/celsus-server/web/web.js crates/celsus-desktop/ui/app.js crates/celsus-desktop/ui/reader.js crates/celsus-desktop/ui/models.js crates/celsus-desktop/ui/i18n/*.js; do node --check "$f"; done
           bash -n install.sh
       - name: Every interface language matches English
         run: node scripts/check-i18n.js crates/celsus-desktop/ui/i18n

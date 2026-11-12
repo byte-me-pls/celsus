@@ -587,6 +587,8 @@ struct TestResult {
     millis: u128,
     sample: String,
     error: Option<String>,
+    /// The connection asked to wait this many seconds before the next request.
+    wait: Option<u64>,
 }
 
 /// Ask the provider to translate one short sentence.
@@ -623,11 +625,18 @@ fn translate_test(client: OpenAiCompatible) -> TestResult {
             millis: start.elapsed().as_millis(),
             sample: t.join(" "),
             error: None,
+            wait: None,
         },
         Err(e) => TestResult {
             ok: false,
             millis: start.elapsed().as_millis(),
             sample: String::new(),
+            wait: match &e {
+                celsus_core::translate::TranslateError::RateLimited { retry_after_secs } => {
+                    Some(*retry_after_secs)
+                }
+                _ => None,
+            },
             error: Some(e.to_string()),
         },
     }
@@ -690,11 +699,23 @@ fn task_model_set(
 }
 
 /// Check a model: a one sentence translation for text models, a model list lookup for picture models (drawing a
-/// test picture would cost money).
+/// test picture would cost money). `quick` is for trying many models in a row: one that is not there to answer
+/// at once is not worth waiting for.
 #[tauri::command]
-async fn model_test(provider_id: i64, url: String, model: String, picture: bool) -> TestResult {
+async fn model_test(
+    provider_id: i64,
+    url: String,
+    model: String,
+    picture: bool,
+    quick: Option<bool>,
+) -> TestResult {
     let start = std::time::Instant::now();
-    let client = OpenAiCompatible::new(url, secrets::get_key(provider_id), model.clone());
+    let client = OpenAiCompatible::new(url, secrets::get_key(provider_id), model.clone())
+        .answers_within(if quick == Some(true) {
+            30
+        } else {
+            celsus_core::provider::ANSWER_WAIT
+        });
     if !picture {
         return translate_test(client);
     }
@@ -711,6 +732,7 @@ async fn model_test(provider_id: i64, url: String, model: String, picture: bool)
         millis: start.elapsed().as_millis(),
         sample: if ok { model } else { String::new() },
         error,
+        wait: None,
     }
 }
 
@@ -723,6 +745,9 @@ fn settings_get(app: State<App>) -> Res<BTreeMap<String, String>> {
         .or_insert_with(default_fonts_dir);
     s.entry("batch_chars".into())
         .or_insert_with(|| "5000".into());
+    s.entry("answer_wait".into())
+        .or_insert_with(|| celsus_core::provider::ANSWER_WAIT.to_string());
+    s.entry("update_check".into()).or_insert_with(|| "1".into());
     Ok(s)
 }
 
@@ -776,9 +801,16 @@ async fn storage_info(handle: AppHandle) -> Res<StorageInfo> {
     })
 }
 
+/// Clear the kept translations that no translated page uses. What the books in the library are written from
+/// stays: without it, the next time a book is written its pages would go back to the original.
 #[tauri::command]
-fn cache_clear(app: State<App>) -> Res<()> {
-    db::clear_cache(&app.db.lock().unwrap())
+async fn cache_clear(handle: AppHandle) -> Res<()> {
+    let app = handle.state::<App>();
+    let translated = db::all_translated_pages(&app.db.lock().unwrap())?;
+    // Reading the books takes a while; the database is free in the meantime.
+    let keep = celsus_store::assistant::keys_in_use(&app.library, &translated);
+    db::clear_cache_except(&app.db.lock().unwrap(), &keep)?;
+    Ok(())
 }
 
 // ---------- MCP connection ----------
@@ -889,9 +921,53 @@ fn app_version() -> String {
     env!("CARGO_PKG_VERSION").into()
 }
 
+/// A newer release, and whether this copy of the app can put it in place by itself.
+#[derive(Serialize)]
+struct Update {
+    #[serde(flatten)]
+    release: celsus_core::release::Release,
+    installs_itself: bool,
+}
+
+/// The Windows and macOS apps and the AppImage can replace themselves. A package installed through the system's
+/// package manager (.deb, .rpm) is the system's to update.
+fn installs_itself() -> bool {
+    cfg!(any(windows, target_os = "macos")) || std::env::var_os("APPIMAGE").is_some()
+}
+
+/// The newest release of Celsus on GitHub, if it is newer than this one.
+#[tauri::command]
+async fn update_check() -> Res<Option<Update>> {
+    let release = celsus_core::release::latest("byte-me-pls/celsus", env!("CARGO_PKG_VERSION"))?;
+    Ok(release.map(|release| Update {
+        release,
+        installs_itself: installs_itself(),
+    }))
+}
+
+/// Download the newest release, check that it is signed with the project's key, put it in place and start the
+/// app again. A job that is running is taken up again after the restart.
+#[tauri::command]
+async fn update_install(handle: AppHandle) -> Res<()> {
+    use tauri_plugin_updater::UpdaterExt;
+    let update = handle
+        .updater()
+        .map_err(|e| e.to_string())?
+        .check()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("There is no newer version to install.")?;
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(|e| e.to_string())?;
+    handle.restart()
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // The same folder the MCP server uses, so both see one library.
             let library = celsus_store::library_dir();
@@ -949,6 +1025,8 @@ fn main() {
             mcp_client_add,
             mcp_client_remove,
             app_version,
+            update_check,
+            update_install,
             languages,
             open_url
         ])

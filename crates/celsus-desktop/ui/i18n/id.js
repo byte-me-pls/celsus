@@ -36,6 +36,12 @@ addLocale("id", {
     test: "Uji koneksi", testing: "Menguji…", testOk: (ms) => `Berfungsi · ${(ms / 1000).toFixed(1)} dtk`, save: "Simpan", cancelEdit: "Batal",
     modelsFetched: (n) => `${n} model ditemukan`, confirmRemoveModel: (n) => `Hapus "${n}"?`, noModels: "Belum ada model.",
     batchChars: "Teks per permintaan", batchCharsHint: "Dalam karakter. Lebih besar berarti lebih sedikit permintaan, lebih kecil berarti jawaban lebih cepat.",
+    answerWait: "Menunggu jawaban", answerWaitHint: "Detik. Model yang belum menjawab dalam waktu itu ditinggalkan dan pekerjaan berhenti dengan pemberitahuan. Beri waktu lebih untuk model lambat di komputer sendiri.",
+    modelsAll: (n) => `Tampilkan semua ${n} model`, modelsNote: "Nama diawali dengan pembuat model. Model yang tidak menjawab dengan teks (suara, pencarian, keamanan) tidak ditampilkan.",
+    modelsTry: "Cari model yang berfungsi", modelsTrying: (a, b) => `Mencoba model… ${a} dari ${b}`, modelsTried: (a, b) => `${a} dari ${b} model menjawab. Daftar kini menampilkan yang itu.`,
+    updateOut: (v) => `Celsus ${v} sudah terbit`, updateGet: "Unduh", updateCheck: "Periksa versi baru", updateCheckHint: "Saat dibuka, aplikasi bertanya ke GitHub apakah ada versi yang lebih baru. Tidak ada apa pun tentang Anda atau buku Anda yang dikirim.", upToDate: "Ini versi terbaru",
+    updateInstall: "Perbarui dan mulai ulang", updateInstalling: "Memperbarui…", updateFailed: "Pembaruan tidak dapat dipasang. Sebagai gantinya, halaman unduhan dibuka.",
+    errors: { no_answer: "Model tidak menjawab tepat waktu, jadi penerjemahan dihentikan. Pilih model lain di Pengaturan → Model, atau beri waktu lebih di Pengaturan → Terjemahan." },
     readable: "Batas keterbacaan", readableHint: "Terjemahan yang panjang diperkecil hingga paling kecil 70% dari ukuran asli dan tidak pernah di bawah 6 pt. Blok yang tetap tidak muat mempertahankan teks asli dan ditandai.",
     fontsDir: "Folder font", fontsHint: "Folder berisi font TrueType yang dipakai untuk menulis terjemahan.",
     libraryPath: "Folder pustaka", libraryBytes: "Ukuran pustaka", database: "Basis data", cache: "Cache terjemahan",
@@ -145,6 +151,7 @@ addLocale("id", {
     oauthAllow: "Izinkan", oauthDeny: "Tolak", oauthInvalid: "Permintaan ini tidak dapat disetujui", signedInAs: (name, email) => `Masuk sebagai ${name} (${email}).`,
     // Messages for the server's error codes.
     errors: {
+      no_answer: "Model tidak menjawab tepat waktu, jadi penerjemahan dihentikan. Admin dapat memilih model lain di Koneksi dan model.",
       no_model: "Belum ada model yang dipilih untuk ini. Admin dapat memilihnya di Koneksi dan model.",
       wrong_credentials: "Email atau kata sandi salah.",
       wrong_password: "Kata sandi saat ini salah.",

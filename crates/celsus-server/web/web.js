@@ -1027,8 +1027,8 @@ async function adminConnections(box) {
         const m = models.find((x) => x.task === k) || {};
         return `<div class="task-row" data-task="${k}"><div class="task-head"><h3>${esc(label)}</h3></div>
           <div class="task-fields"><select data-conn><option value="">${esc(T.none)}</option>${providers.map((p) => `<option value="${p.id}" ${m.provider_id === p.id ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select>
-          <input data-model list="dl-${k}" placeholder="${esc(T.model)}" value="${esc(m.model || "")}"><datalist id="dl-${k}"></datalist>
-          <button class="quiet-button" data-fetch>${esc(T.fetchModels)}</button><button class="quiet-button" data-test>${esc(T.testShort)}</button><button class="primary-button" data-save>${esc(T.save)}</button></div>
+          <div class="model-pick"><input data-model placeholder="${esc(T.model)}" value="${esc(m.model || "")}" autocomplete="off" spellcheck="false"><div class="model-list" data-list hidden></div></div></div>
+          <div class="task-actions"><button class="quiet-button" data-try hidden>${esc(T.modelsTry)}</button><button class="quiet-button" data-test>${esc(T.testShort)}</button><button class="primary-button" data-save>${esc(T.save)}</button></div>
           <div class="task-result" data-result></div></div>`;
       }).join("")}
     </section>`;
@@ -1040,23 +1040,52 @@ async function adminConnections(box) {
     await apiCall("DELETE", `/api/admin/providers/${p.id}`);
     adminConnections(box);
   };
+  // What each connection offers, asked for once.
+  const offers = new Map();
+  const modelsOf = (id) => {
+    if (!offers.has(id)) offers.set(id, api("GET", `/api/admin/providers/${id}/models`).then((r) => r.models).catch(() => []));
+    return offers.get(id);
+  };
   for (const row of $$(".task-row", box)) {
-    const conn = $("[data-conn]", row), input = $("[data-model]", row);
-    $("[data-fetch]", row).onclick = async () => {
-      if (!conn.value) return;
-      const { models: list } = await apiCall("GET", `/api/admin/providers/${conn.value}/models`);
-      $("datalist", row).innerHTML = list.map((m) => `<option value="${esc(m)}">`).join("");
-      toast(T.modelsFound(list.length));
+    const task = row.dataset.task;
+    const conn = $("[data-conn]", row), input = $("[data-model]", row), out = $("[data-result]", row);
+    const provider = () => providers.find((p) => p.id === Number(conn.value));
+    // The models of the chosen connection: those fit for the job, and all of them.
+    let offered = [[], []];
+    const fill = async () => {
+      const id = conn.value;
+      offered = [[], []];
+      refresh();
+      if (!id) return;
+      const models = await modelsOf(id);
+      if (id !== conn.value) return;
+      offered = task === "image"
+        ? [models.filter((m) => /image|dall-e/.test(m)), models]
+        : [models.filter((m) => !NOT_CHAT.test(m)), models];
+      refresh();
     };
+    const refresh = modelField({
+      input, list: $("[data-list]", row), button: $("[data-try]", row), out,
+      connection: () => conn.value,
+      models: () => offered,
+      ask: (model, id) => api("POST", "/api/admin/models/test", { task, provider_id: Number(id), model, quick: true })
+        .catch((e) => ({ ok: false, millis: 0, error: e.message })),
+      canTry: () => { const p = provider(); return !!p && task !== "image" && !p.allow_local && !LOCAL_URL.test(p.url); },
+    });
+    conn.onchange = () => { input.value = ""; out.innerHTML = ""; fill(); };
+    fill();
     $("[data-save]", row).onclick = async () => {
       await apiCall("PUT", "/api/admin/models", { task: row.dataset.task, provider_id: conn.value ? Number(conn.value) : null, model: input.value });
       toast(T.saved);
     };
     $("[data-test]", row).onclick = async () => {
-      const out = $("[data-result]", row);
       out.innerHTML = `<div class="test-result">${esc(T.testing)}</div>`;
       try {
-        const r = await api("POST", "/api/admin/models/test", { task: row.dataset.task });
+        // What is in the fields is tried, saved or not.
+        const model = input.value.trim();
+        const typed = conn.value && model ? { provider_id: Number(conn.value), model } : {};
+        const r = await api("POST", "/api/admin/models/test", { task, ...typed });
+        if (typed.model && task !== "image") rememberTest(conn.value, model, r.ok, r.millis);
         out.innerHTML = r.ok
           ? `<div class="test-result ok"><b>${esc(T.testOk(r.millis))}</b>${r.sample ? ` <span>${esc(r.sample)}</span>` : ""}</div>`
           : `<div class="test-result bad">${esc(r.error)}</div>`;

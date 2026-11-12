@@ -36,6 +36,12 @@ addLocale("en", {
     test: "Test connection", testing: "Testing…", testOk: (ms) => `Working · ${(ms / 1000).toFixed(1)} s`, save: "Save", cancelEdit: "Cancel",
     modelsFetched: (n) => `${n} models found`, confirmRemoveModel: (n) => `Remove "${n}"?`, noModels: "No models yet.",
     batchChars: "Text per request", batchCharsHint: "Characters. Larger means fewer requests, smaller means quicker answers.",
+    answerWait: "Waiting for an answer", answerWaitHint: "Seconds. A model that has not answered by then is given up and the job stops with a note. Allow more for a slow model on your own computer.",
+    modelsAll: (n) => `Show all ${n} models`, modelsNote: "Names begin with the maker of the model. Models that do not answer in text (speech, search, safety) are left out.",
+    modelsTry: "Find working models", modelsTrying: (a, b) => `Trying the models… ${a} of ${b}`, modelsTried: (a, b) => `${a} of ${b} models answered. The list now shows those.`,
+    updateOut: (v) => `Celsus ${v} is out`, updateGet: "Download", updateCheck: "Look for new versions", updateCheckHint: "When the app starts it asks GitHub whether a newer release is out. Nothing about you or your books is sent.", upToDate: "This is the latest version",
+    updateInstall: "Update and restart", updateInstalling: "Updating…", updateFailed: "The update could not be installed. Its download page is open instead.",
+    errors: { no_answer: "The model did not answer in time, so the translation was stopped. Choose another model under Settings → Models, or allow more time under Settings → Translation." },
     readable: "Readability floor", readableHint: "Long translations shrink to at most 70% of the original size and never below 6 pt. Blocks that still do not fit keep the original and are flagged.",
     fontsDir: "Fonts folder", fontsHint: "Folder of TrueType fonts used to write translations.",
     libraryPath: "Library folder", libraryBytes: "Library size", database: "Database", cache: "Translation cache",
@@ -145,6 +151,7 @@ addLocale("en", {
     oauthAllow: "Allow", oauthDeny: "Deny", oauthInvalid: "This request cannot be approved", signedInAs: (name, email) => `Signed in as ${name} (${email}).`,
     // Messages for the server's error codes.
     errors: {
+      no_answer: "The model did not answer in time, so the translation was stopped. An admin can choose another model under Connections and models.",
       no_model: "No model is chosen for this yet. An admin can choose one under Connections and models.",
       wrong_credentials: "The email or password is wrong.",
       wrong_password: "The current password is wrong.",

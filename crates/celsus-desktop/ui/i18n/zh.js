@@ -36,6 +36,12 @@ addLocale("zh", {
     test: "测试连接", testing: "正在测试…", testOk: (ms) => `连接正常 · ${(ms / 1000).toFixed(1)} 秒`, save: "保存", cancelEdit: "取消",
     modelsFetched: (n) => `找到 ${n} 个模型`, confirmRemoveModel: (n) => `移除“${n}”？`, noModels: "还没有模型。",
     batchChars: "每次请求的文本量", batchCharsHint: "以字符计。数值越大请求越少，数值越小响应越快。",
+    answerWait: "等待回答的时间", answerWaitHint: "单位为秒。超过这个时间仍未回答的模型将不再等待，任务会停止并给出提示。在自己电脑上运行的较慢模型可以多给一些时间。",
+    modelsAll: (n) => `显示全部 ${n} 个模型`, modelsNote: "名称以模型的制作者开头。不以文字回答的模型（语音、检索、安全）不会列出。",
+    modelsTry: "查找可用的模型", modelsTrying: (a, b) => `正在测试模型… ${a}/${b}`, modelsTried: (a, b) => `${a}/${b} 个模型有回答。列表现在只显示这些模型。`,
+    updateOut: (v) => `Celsus ${v} 已发布`, updateGet: "下载", updateCheck: "检查新版本", updateCheckHint: "应用启动时会向 GitHub 询问是否有更新的版本。不会发送任何关于你或你的书的信息。", upToDate: "已是最新版本",
+    updateInstall: "更新并重新启动", updateInstalling: "正在更新…", updateFailed: "无法安装更新，已改为打开下载页面。",
+    errors: { no_answer: "模型没有及时回答，翻译已停止。请在 设置 → 模型 中选择其他模型，或在 设置 → 翻译 中延长等待时间。" },
     readable: "可读性下限", readableHint: "较长的译文最多缩小到原文大小的 70%，且不小于 6 磅。仍然放不下的文本块将保留原文并标记出来。",
     fontsDir: "字体文件夹", fontsHint: "用于写入译文的 TrueType 字体所在文件夹。",
     libraryPath: "书库文件夹", libraryBytes: "书库大小", database: "数据库", cache: "翻译缓存",
@@ -145,6 +151,7 @@ addLocale("zh", {
     oauthAllow: "允许", oauthDeny: "拒绝", oauthInvalid: "无法批准此请求", signedInAs: (name, email) => `已登录为 ${name}（${email}）。`,
     // Messages for the server's error codes.
     errors: {
+      no_answer: "模型没有及时回答，翻译已停止。管理员可以在“连接和模型”中选择其他模型。",
       no_model: "尚未为此选择模型。管理员可以在“连接和模型”中选择。",
       wrong_credentials: "电子邮件或密码错误。",
       wrong_password: "当前密码错误。",

@@ -70,6 +70,11 @@ pub enum TranslateError {
     BadAnswer(String),
     #[error("provider error: {0}")]
     Provider(String),
+    /// The request was sent and nothing came back in the time allowed: the model is overloaded, queued or gone.
+    #[error(
+        "the model did not answer within {seconds} seconds. Choose another model, or allow more time in the settings"
+    )]
+    NoAnswer { seconds: u64 },
     /// The request can never succeed as it is (bad key, unknown or retired model): stop instead of retrying.
     #[error("provider refused: {0}")]
     Fatal(String),

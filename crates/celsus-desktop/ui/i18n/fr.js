@@ -36,6 +36,12 @@ addLocale("fr", {
     test: "Tester la connexion", testing: "Test en cours…", testOk: (ms) => `Fonctionne · ${(ms / 1000).toFixed(1).replace(".", ",")} s`, save: "Enregistrer", cancelEdit: "Annuler",
     modelsFetched: (n) => (n > 1 ? `${n} modèles trouvés` : `${n} modèle trouvé`), confirmRemoveModel: (n) => `Retirer « ${n} » ?`, noModels: "Aucun modèle pour l’instant.",
     batchChars: "Texte par requête", batchCharsHint: "En caractères. Plus grand, moins de requêtes ; plus petit, des réponses plus rapides.",
+    answerWait: "Attente d'une réponse", answerWaitHint: "En secondes. Un modèle qui n'a pas répondu dans ce délai est abandonné et la tâche s'arrête avec un message. Accordez plus de temps à un modèle lent sur votre ordinateur.",
+    modelsAll: (n) => `Afficher les ${n} modèles`, modelsNote: "Les noms commencent par le créateur du modèle. Les modèles qui ne répondent pas par du texte (voix, recherche, sécurité) ne sont pas affichés.",
+    modelsTry: "Trouver les modèles qui répondent", modelsTrying: (a, b) => `Essai des modèles… ${a} sur ${b}`, modelsTried: (a, b) => `${a} modèles sur ${b} ont répondu. La liste montre maintenant ceux-là.`,
+    updateOut: (v) => `Celsus ${v} est sorti`, updateGet: "Télécharger", updateCheck: "Chercher les nouvelles versions", updateCheckHint: "Au démarrage, l'application demande à GitHub si une version plus récente existe. Rien sur vous ni sur vos livres n'est envoyé.", upToDate: "C'est la dernière version",
+    updateInstall: "Mettre à jour et redémarrer", updateInstalling: "Mise à jour…", updateFailed: "La mise à jour n'a pas pu être installée. La page de téléchargement est ouverte à la place.",
+    errors: { no_answer: "Le modèle n'a pas répondu à temps, la traduction a été arrêtée. Choisissez un autre modèle dans Réglages → Modèles, ou accordez plus de temps dans Réglages → Traduction." },
     readable: "Seuil de lisibilité", readableHint: "Les traductions longues peuvent être réduites jusqu’à 70 % de la taille d’origine, jamais en dessous de 6 pt. Les blocs qui ne tiennent toujours pas gardent l’original et sont signalés.",
     fontsDir: "Dossier des polices", fontsHint: "Dossier de polices TrueType utilisées pour écrire les traductions.",
     libraryPath: "Dossier de la bibliothèque", libraryBytes: "Taille de la bibliothèque", database: "Base de données", cache: "Cache de traduction",
@@ -145,6 +151,7 @@ addLocale("fr", {
     oauthAllow: "Autoriser", oauthDeny: "Refuser", oauthInvalid: "Cette demande ne peut pas être approuvée", signedInAs: (name, email) => `Session ouverte : ${name} (${email}).`,
     // Messages for the server's error codes.
     errors: {
+      no_answer: "Le modèle n'a pas répondu à temps, la traduction a été arrêtée. Un administrateur peut choisir un autre modèle dans Connexions et modèles.",
       no_model: "Aucun modèle n’est encore choisi pour cela. Un administrateur peut en choisir un dans « Connexions et modèles ».",
       wrong_credentials: "L’e-mail ou le mot de passe est incorrect.",
       wrong_password: "Le mot de passe actuel est incorrect.",

@@ -37,7 +37,7 @@ RUN apt-get update \
 COPY --from=build /out/celsus-server /usr/local/bin/celsus-server
 COPY crates/celsus-server/web /app/web
 # Shared with the desktop app: styles, fonts, the reader and pdf.js.
-COPY crates/celsus-desktop/ui/style.css crates/celsus-desktop/ui/reader.js crates/celsus-desktop/ui/logo.png crates/celsus-desktop/ui/mark.png /app/ui/
+COPY crates/celsus-desktop/ui/style.css crates/celsus-desktop/ui/reader.js crates/celsus-desktop/ui/models.js crates/celsus-desktop/ui/logo.png crates/celsus-desktop/ui/mark.png /app/ui/
 COPY crates/celsus-desktop/ui/fonts /app/ui/fonts
 COPY crates/celsus-desktop/ui/i18n /app/ui/i18n
 COPY crates/celsus-desktop/ui/pdfjs /app/ui/pdfjs

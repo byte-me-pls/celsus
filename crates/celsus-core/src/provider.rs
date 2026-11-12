@@ -2,6 +2,8 @@
 //! LM Studio and others. Chat completions translate and describe books; the images endpoint redraws pictures
 //! (covers with lettering, for example) with their text in another language.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -10,6 +12,40 @@ use crate::translate::{
     TranslateError, TranslationRequest, Translator, Usage, parse_answer, prompt,
 };
 
+/// Drawing a large picture can take several minutes; no request waits longer than this.
+const LONGEST_WAIT: Duration = Duration::from_secs(600);
+/// How long a translation job waits for a model's answer unless the settings say otherwise, in seconds.
+pub const ANSWER_WAIT: u64 = 180;
+
+/// Send one JSON request and read the whole answer: status, body, and how long the server asks to wait.
+fn send(
+    agent: &ureq::Agent,
+    url: &str,
+    key: Option<&str>,
+    body: &Value,
+) -> Result<(u16, String, Option<u64>), TranslateError> {
+    let mut req = agent.post(url).header("Content-Type", "application/json");
+    if let Some(key) = key {
+        req = req.header("Authorization", format!("Bearer {key}"));
+    }
+    let mut response = req
+        .send_json(body)
+        .map_err(|e| TranslateError::Provider(e.to_string()))?;
+    let status = response.status().as_u16();
+    let retry_after = response
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    let text = response
+        .body_mut()
+        .with_config()
+        .limit(64 * 1024 * 1024)
+        .read_to_string()
+        .map_err(|e| TranslateError::Provider(e.to_string()))?;
+    Ok((status, text, retry_after))
+}
+
 pub struct OpenAiCompatible {
     agent: ureq::Agent,
     /// Base URL ending in `/v1`, e.g. `https://integrate.api.nvidia.com/v1` or `http://localhost:11434/v1`.
@@ -17,6 +53,10 @@ pub struct OpenAiCompatible {
     api_key: Option<String>,
     pub model: String,
     pub max_tokens: u32,
+    /// Set from outside when the work is stopped: a request that is still waiting for its answer is given up.
+    stop: Option<Arc<AtomicBool>>,
+    /// How long a chat request may wait for its answer.
+    answer_wait: Duration,
 }
 
 impl OpenAiCompatible {
@@ -29,8 +69,7 @@ impl OpenAiCompatible {
             .http_status_as_error(false)
             // An API does not redirect; following one could lead a server to addresses it must not reach.
             .max_redirects(0)
-            // Drawing a large picture can take several minutes.
-            .timeout_global(Some(Duration::from_secs(600)))
+            .timeout_global(Some(LONGEST_WAIT))
             .build();
         OpenAiCompatible {
             agent: ureq::Agent::new_with_config(config),
@@ -38,7 +77,23 @@ impl OpenAiCompatible {
             api_key: api_key.filter(|k| !k.is_empty()),
             model: model.into(),
             max_tokens: 8192,
+            stop: None,
+            answer_wait: LONGEST_WAIT,
         }
+    }
+
+    /// Give up a chat request that has had no answer after `seconds`. A model that is overloaded or gone would
+    /// otherwise hold a job for as long as a picture may take to draw.
+    pub fn answers_within(mut self, seconds: u64) -> Self {
+        self.answer_wait = Duration::from_secs(seconds.max(1)).min(LONGEST_WAIT);
+        self
+    }
+
+    /// Give up a request that is waiting for its answer as soon as `stop` is set. A model that is slow or does
+    /// not answer at all would otherwise hold the job until the request times out.
+    pub fn stopped_by(mut self, stop: Arc<AtomicBool>) -> Self {
+        self.stop = Some(stop);
+        self
     }
 
     /// OpenAI's own endpoint rejects parameters it does not know, so it gets a body of its own.
@@ -53,30 +108,43 @@ impl OpenAiCompatible {
             || (m.starts_with('o') && m[1..].starts_with(|c: char| c.is_ascii_digit()))
     }
 
-    fn post(&self, path: &str, body: &Value) -> Result<(u16, String, Option<u64>), TranslateError> {
-        let mut req = self
-            .agent
-            .post(format!("{}/{path}", self.base_url))
-            .header("Content-Type", "application/json");
-        if let Some(key) = &self.api_key {
-            req = req.header("Authorization", format!("Bearer {key}"));
+    fn post(
+        &self,
+        path: &str,
+        body: &Value,
+        wait: Duration,
+    ) -> Result<(u16, String, Option<u64>), TranslateError> {
+        let url = format!("{}/{path}", self.base_url);
+        // The request waits on a thread of its own, so that this one can look at the clock and at `stop` in the
+        // meantime. A request that is given up runs out on its own and its answer is dropped.
+        let started = std::time::Instant::now();
+        let (answer, waiting) = std::sync::mpsc::channel();
+        let (agent, key, body) = (self.agent.clone(), self.api_key.clone(), body.clone());
+        std::thread::spawn(move || {
+            let _ = answer.send(send(&agent, &url, key.as_deref(), &body));
+        });
+        loop {
+            match waiting.recv_timeout(Duration::from_millis(100)) {
+                Ok(result) => return result,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if self
+                        .stop
+                        .as_ref()
+                        .is_some_and(|stop| stop.load(Ordering::Relaxed))
+                    {
+                        return Err(TranslateError::Provider("cancelled".into()));
+                    }
+                    if started.elapsed() >= wait {
+                        return Err(TranslateError::NoAnswer {
+                            seconds: wait.as_secs(),
+                        });
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(TranslateError::Provider("the request was lost".into()));
+                }
+            }
         }
-        let mut response = req
-            .send_json(body)
-            .map_err(|e| TranslateError::Provider(e.to_string()))?;
-        let status = response.status().as_u16();
-        let retry_after = response
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.trim().parse::<u64>().ok());
-        let text = response
-            .body_mut()
-            .with_config()
-            .limit(64 * 1024 * 1024)
-            .read_to_string()
-            .map_err(|e| TranslateError::Provider(e.to_string()))?;
-        Ok((status, text, retry_after))
     }
 
     fn failure(status: u16, text: &str, retry_after: Option<u64>) -> TranslateError {
@@ -102,7 +170,8 @@ impl OpenAiCompatible {
         let messages =
             json!([{"role": "system", "content": system}, {"role": "user", "content": user}]);
         let body = self.chat_body(&messages);
-        let (mut status, mut text, mut retry_after) = self.post("chat/completions", &body)?;
+        let (mut status, mut text, mut retry_after) =
+            self.post("chat/completions", &body, self.answer_wait)?;
         // A server that refuses one of the optional switches gets the request again without them.
         if status == 400 {
             let lower = text.to_lowercase();
@@ -117,7 +186,8 @@ impl OpenAiCompatible {
             .any(|w| lower.contains(w))
             {
                 let plain = json!({"model": self.model, "messages": messages});
-                (status, text, retry_after) = self.post("chat/completions", &plain)?;
+                (status, text, retry_after) =
+                    self.post("chat/completions", &plain, self.answer_wait)?;
             }
         }
         if !(200..300).contains(&status) {
@@ -240,7 +310,7 @@ impl OpenAiCompatible {
             ]}],
             "modalities": ["image", "text"],
         });
-        let (status, text, retry_after) = self.post("chat/completions", &body)?;
+        let (status, text, retry_after) = self.post("chat/completions", &body, LONGEST_WAIT)?;
         if !(200..300).contains(&status) {
             return Err(Self::failure(status, &text, retry_after));
         }
@@ -292,7 +362,7 @@ impl OpenAiCompatible {
         if self.model.contains("gpt-image-1") && !self.model.contains("mini") {
             body["input_fidelity"] = json!("high");
         }
-        let (status, text, retry_after) = self.post("images/edits", &body)?;
+        let (status, text, retry_after) = self.post("images/edits", &body, LONGEST_WAIT)?;
         if !(200..300).contains(&status) {
             return Err(Self::failure(status, &text, retry_after));
         }
@@ -550,6 +620,61 @@ mod tests {
         assert!(reqs[0].json().get("reasoning_effort").is_some());
         assert!(reqs[1].json().get("reasoning_effort").is_none());
         assert!(reqs[1].json().get("temperature").is_none());
+    }
+
+    #[test]
+    fn a_request_that_gets_no_answer_gives_way_when_the_work_is_stopped() {
+        // A server that takes the request and never answers.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let held: Vec<_> = listener.incoming().take(1).collect();
+            std::thread::sleep(Duration::from_secs(30));
+            drop(held);
+        });
+        let stop = Arc::new(AtomicBool::new(false));
+        let client = OpenAiCompatible::new(&url, None, "m").stopped_by(stop.clone());
+        let pressed = stop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            pressed.store(true, Ordering::Relaxed);
+        });
+        let started = std::time::Instant::now();
+        let e = client.chat("s", "u").unwrap_err();
+        assert!(
+            matches!(&e, TranslateError::Provider(why) if why == "cancelled"),
+            "{e:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_model_that_stays_silent_is_given_up_after_the_time_allowed() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let held: Vec<_> = listener.incoming().take(1).collect();
+            std::thread::sleep(Duration::from_secs(30));
+            drop(held);
+        });
+        let started = std::time::Instant::now();
+        let e = OpenAiCompatible::new(&url, None, "m")
+            .answers_within(1)
+            .chat("s", "u")
+            .unwrap_err();
+        assert!(
+            matches!(e, TranslateError::NoAnswer { seconds: 1 }),
+            "{e:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

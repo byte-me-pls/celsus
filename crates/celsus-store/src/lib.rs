@@ -58,5 +58,7 @@ pub fn default_fonts_dir() -> String {
 /// Open the database, creating the folders on first use.
 pub fn open() -> db::Result<rusqlite::Connection> {
     std::fs::create_dir_all(library_dir()).map_err(|e| e.to_string())?;
-    db::open(&database_path())
+    let conn = db::open(&database_path())?;
+    library::settle_language_names(&library_dir());
+    Ok(conn)
 }

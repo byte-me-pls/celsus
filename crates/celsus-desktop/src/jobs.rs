@@ -117,7 +117,7 @@ fn run(
     conn: &rusqlite::Connection,
     library: &Path,
     id: i64,
-    cancel: &AtomicBool,
+    cancel: &Arc<AtomicBool>,
 ) -> Result<bool, String> {
     let job = db::job(conn, id)?;
     let book = db::book(conn, job.book_id)?;
@@ -129,6 +129,12 @@ fn run(
         provider.url.clone(),
         secrets::get_key(provider.id),
         model.clone(),
+    )
+    .stopped_by(cancel.clone())
+    .answers_within(
+        db::setting(conn, "answer_wait")?
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(celsus_core::provider::ANSWER_WAIT),
     );
 
     let fonts_dir = db::setting(conn, "fonts_dir")?
@@ -158,9 +164,13 @@ fn run(
             .map(|(p, _)| p),
     );
     options.pages = all.iter().map(|&p| p as usize).collect();
+    // The earlier pages are only written again: nothing is asked, and so nothing is paid, for them.
+    options.settled = all.difference(&wanted).map(|&p| p as usize).collect();
 
     let total = wanted.len();
     let mut done = 0usize;
+    // Earlier pages whose translation could not be written again.
+    let mut lost = 0usize;
     // Pages of this job where the model gave no usable answer for some of the text.
     let mut unfinished = 0usize;
     let (mut replaced, mut kept) = (0i64, 0i64);
@@ -179,6 +189,10 @@ fn run(
                 // A page with text left untranslated is not marked, so "missing pages" picks it up again.
                 if missing == 0 {
                     let _ = db::mark_page(conn, book.id, &job.target_lang, n as i64, k as i64);
+                } else if !wanted.contains(&(n as i64)) {
+                    // It stays as the original in the new file, and is not called translated any more.
+                    let _ = db::unmark_page(conn, book.id, &job.target_lang, n as i64);
+                    lost += 1;
                 }
                 if wanted.contains(&(n as i64)) {
                     if missing == 0 {
@@ -255,12 +269,21 @@ fn run(
             let _ = std::fs::remove_file(&part);
         }
     }
+    // The interface has words of its own for a model that stayed silent.
+    if outcome.no_answer {
+        return Err("no_answer".into());
+    }
     if let Some(why) = outcome.failed {
         return Err(why);
     }
     if unfinished > 0 && !outcome.cancelled {
         return Err(format!(
             "The model gave no usable answer for some text on {unfinished} page(s). Translate the missing pages again."
+        ));
+    }
+    if lost > 0 && !outcome.cancelled {
+        return Err(format!(
+            "The translation of {lost} earlier page(s) was no longer kept, so they are back to the original. Translate the missing pages again."
         ));
     }
     Ok(outcome.cancelled)

@@ -140,6 +140,17 @@ pub async fn model_for(state: &AppState, task: &str) -> Result<OpenAiCompatible,
             "metadata" => "No model is chosen for book details. An admin can choose one under Connections and models.",
             _ => "No model is chosen for translation. An admin can choose one under Connections and models.",
         })?;
+    drop(db);
+    client_for(state, id, model).await
+}
+
+/// A connection with `model`, its key decrypted and its address checked.
+pub async fn client_for(
+    state: &AppState,
+    id: i64,
+    model: String,
+) -> Result<OpenAiCompatible, String> {
+    let db = state.pool.get().await.map_err(|e| e.to_string())?;
     let row = db
         .query_opt(
             "SELECT url, key_sealed, allow_local FROM providers WHERE id = $1",
@@ -205,7 +216,15 @@ async fn run_job(state: &AppState, id: &str, cancel: Arc<AtomicBool>) -> Result<
         .map(|r| r.get(0))
         .collect();
     drop(db);
-    let client = model_for(state, "translate").await?;
+    let client = model_for(state, "translate")
+        .await?
+        .stopped_by(cancel.clone())
+        .answers_within(
+            db_setting(state, "answer_wait")
+                .await
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(celsus_core::provider::ANSWER_WAIT),
+        );
     let model = client.model.clone();
 
     let mut options = Options::new(
@@ -228,6 +247,13 @@ async fn run_job(state: &AppState, id: &str, cancel: Arc<AtomicBool>) -> Result<
         .collect();
     options.pages = all.into_iter().collect();
     let wanted: BTreeSet<usize> = wanted.iter().map(|&p| p as usize).collect();
+    // The earlier pages are only written again: nothing is asked, and so nothing is paid, for them.
+    options.settled = options
+        .pages
+        .iter()
+        .copied()
+        .filter(|p| !wanted.contains(p))
+        .collect();
 
     let source = library::source_file(&state.config, &book_id);
     let output = library::output_file(&state.config, &book_id, &lang);
@@ -252,6 +278,8 @@ async fn run_job(state: &AppState, id: &str, cancel: Arc<AtomicBool>) -> Result<
         let mut done = 0i32;
         // Pages of this job where the model gave no usable answer for some of the text.
         let mut unfinished = 0usize;
+        // Earlier pages whose translation could not be written again.
+        let mut lost = 0usize;
         let mut progress = |p: Progress| {
             if let Progress::PageDone { page, kept, missing, .. } = p {
                 if wanted.contains(&page) {
@@ -260,7 +288,10 @@ async fn run_job(state: &AppState, id: &str, cancel: Arc<AtomicBool>) -> Result<
                     } else {
                         unfinished += 1;
                     }
+                } else if missing > 0 {
+                    lost += 1;
                 }
+                let gone = missing > 0 && !wanted.contains(&page);
                 handle.block_on(async {
                     if let Ok(db) = st.pool.get().await {
                         // A page with text left untranslated is not marked, so it counts as missing.
@@ -273,6 +304,15 @@ async fn run_job(state: &AppState, id: &str, cancel: Arc<AtomicBool>) -> Result<
                                 )
                                 .await;
                         }
+                        // It stays as the original in the new file, and is not called translated any more.
+                        if gone {
+                            let _ = db
+                                .execute(
+                                    "DELETE FROM translated_pages WHERE book_id = $1 AND lang = $2 AND page = $3",
+                                    &[&book_id, &lang, &(page as i32)],
+                                )
+                                .await;
+                        }
                         let _ = db.execute("UPDATE jobs SET done_pages = $2 WHERE id = $1", &[&job_id, &done]).await;
                     }
                 });
@@ -281,7 +321,7 @@ async fn run_job(state: &AppState, id: &str, cancel: Arc<AtomicBool>) -> Result<
         let (bytes, outcome) =
             translate_document(&doc, &fonts, &client, &options, &mut cache, &mut progress, &cancel)
                 .map_err(|e| e.to_string())?;
-        Ok::<_, String>((bytes, outcome, unfinished))
+        Ok::<_, String>((bytes, outcome, unfinished + lost))
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -309,6 +349,10 @@ async fn run_job(state: &AppState, id: &str, cancel: Arc<AtomicBool>) -> Result<
     )
     .await
     .map_err(|e| e.to_string())?;
+    // The interface has words of its own for a model that stayed silent.
+    if outcome.no_answer {
+        return Err("no_answer".into());
+    }
     if let Some(why) = outcome.failed {
         return Err(why);
     }

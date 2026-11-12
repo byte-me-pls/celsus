@@ -46,10 +46,12 @@ jobs:
           - name: windows
             os: windows-2025
             files: target/release/bundle/nsis/*-setup.exe
+            update: target/release/bundle/nsis/*-setup.exe.sig
           # One app for Apple silicon and Intel.
           - name: macos
             os: macos-15
             files: target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            update: target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
           # The oldest Ubuntu still supported, so the app also runs on systems older than the newest.
           - name: linux
             os: ubuntu-22.04
@@ -57,6 +59,7 @@ jobs:
               target/release/bundle/deb/*.deb
               target/release/bundle/rpm/*.rpm
               target/release/bundle/appimage/*.AppImage
+            update: target/release/bundle/appimage/*.AppImage.sig
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     permissions:
@@ -84,8 +87,13 @@ jobs:
         if: runner.os == 'macOS'
         continue-on-error: true
         run: cargo test --locked -p celsus-core --test scripts -- --nocapture
+      # The key that signs the files an installed app updates itself from. Only this step sees it; without it
+      # the installers are built unsigned for updating and the app only says that a new version is out.
       - name: App
         shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         run: bash scripts/bundle.sh
       - name: Attach to the draft release
         if: startsWith(github.ref, 'refs/tags/')
@@ -94,9 +102,45 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           FILES: ${{ matrix.files }}
         run: gh release upload "$GITHUB_REF_NAME" $FILES
+      - name: Attach the update files
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPDATE: ${{ matrix.update }}
+        run: |
+          shopt -s nullglob
+          files=($UPDATE)
+          if [ ${#files[@]} -gt 0 ]; then gh release upload "$GITHUB_REF_NAME" "${files[@]}"; fi
       - name: Keep the files (manual runs)
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: celsus-${{ matrix.name }}
           path: ${{ matrix.files }}
+
+  # The file an installed app reads to update itself: the version, and for each system its installer and signature.
+  update-file:
+    needs: desktop
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: latest.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir signatures
+          gh release download "$GITHUB_REF_NAME" --pattern '*.sig' --dir signatures || true
+          if ls signatures/*.sig > /dev/null 2>&1; then
+            python3 scripts/update-file.py "$GITHUB_REF_NAME" signatures > latest.json
+            gh release upload "$GITHUB_REF_NAME" latest.json
+          else
+            echo "No signed installers in this release: it is not offered as an update."
+          fi
+

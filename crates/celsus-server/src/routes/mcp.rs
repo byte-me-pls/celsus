@@ -150,9 +150,14 @@ fn arg_page(args: &Value) -> ApiResult<usize> {
 }
 
 /// Parse "10-12,15" (or a list of numbers) into page numbers.
+/// The most pages one call may name, however they are written.
+const MOST_PAGES: usize = 5000;
+
 fn parse_pages(v: Option<&Value>) -> ApiResult<Vec<usize>> {
+    let too_many = || ApiError::bad(format!("At most {MOST_PAGES} pages at a time."));
     match v {
         None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(a)) if a.len() > MOST_PAGES => Err(too_many()),
         Some(Value::Array(a)) => a
             .iter()
             .map(|x| {
@@ -173,12 +178,16 @@ fn parse_pages(v: Option<&Value>) -> ApiResult<Vec<usize>> {
                 match part.split_once('-') {
                     Some((a, b)) => {
                         let (a, b) = (num(a)?, num(b)?);
-                        if b < a || b - a > 5000 {
+                        if b < a || b - a >= MOST_PAGES {
                             return Err(ApiError::bad(format!("bad range {part}")));
                         }
                         out.extend(a..=b);
                     }
                     None => out.push(num(part)?),
+                }
+                // Checked after every part: many small ranges add up like one large one.
+                if out.len() > MOST_PAGES {
+                    return Err(too_many());
                 }
             }
             Ok(out)
@@ -554,5 +563,21 @@ mod tests {
         let large = json!({ "image_base64": "A".repeat((limit + 4096) / 3 * 4) });
         assert!(picture_arg(&large).is_err());
         assert!(picture_arg(&json!({})).is_err());
+    }
+
+    #[test]
+    fn a_list_of_pages_has_a_limit_however_it_is_written() {
+        assert_eq!(
+            parse_pages(Some(&json!("1-3, 7"))).ok(),
+            Some(vec![1, 2, 3, 7])
+        );
+        assert_eq!(
+            parse_pages(Some(&json!("1-5000"))).ok().map(|p| p.len()),
+            Some(MOST_PAGES)
+        );
+        // One range too long, many ranges that add up, and a long list of numbers.
+        assert!(parse_pages(Some(&json!("1-5001"))).is_err());
+        assert!(parse_pages(Some(&json!(["1-5000"; 3].join(",")))).is_err());
+        assert!(parse_pages(Some(&json!((0..6000).collect::<Vec<u32>>()))).is_err());
     }
 }

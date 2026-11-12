@@ -33,6 +33,12 @@ pub struct Options {
     /// Pictures redrawn in the target language (image XObject, JPEG), put in place of the originals.
     #[serde(skip)]
     pub images: Vec<(celsus_pdf::ObjRef, Vec<u8>)>,
+    /// Pages among `pages` that were translated before and are only written again. They are written from the
+    /// translations that were kept and nothing is asked for them: their text was paid for once. A page whose
+    /// translations are no longer all there stays as it was in the original and is reported with what is
+    /// missing, so that whoever keeps count can stop calling it translated.
+    #[serde(default)]
+    pub settled: Vec<usize>,
 }
 
 fn default_retry_secs() -> u64 {
@@ -49,6 +55,7 @@ impl Options {
             batch_chars: 5000,
             retry_secs: default_retry_secs(),
             images: Vec::new(),
+            settled: Vec::new(),
         }
     }
 }
@@ -91,6 +98,8 @@ pub struct Outcome {
     pub cancelled: bool,
     /// Why the run stopped early, if it did. The file still holds every page that was finished before that.
     pub failed: Option<String>,
+    /// It stopped because the model stayed silent.
+    pub no_answer: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -114,6 +123,8 @@ struct Session<'a> {
     /// Set once the run is stopped or has failed: from then on nothing is asked, and only pages whose text is
     /// all in the cache are written.
     offline: bool,
+    /// The model has answered at least once in this run.
+    answered: bool,
 }
 
 impl Session<'_> {
@@ -154,7 +165,15 @@ impl Session<'_> {
                 Ok((texts, usage)) => {
                     self.usage.prompt_tokens += usage.prompt_tokens;
                     self.usage.completion_tokens += usage.completion_tokens;
+                    self.answered = true;
                     return Ok(texts);
+                }
+                // A model that has answered before in this run and now stays silent gets one more try. One that
+                // never answered is not waited for a second time.
+                Err(TranslateError::NoAnswer { seconds }) if self.answered && attempt == 0 => {
+                    (self.progress)(Progress::Note {
+                        message: format!("no answer in {seconds} seconds, asking again"),
+                    });
                 }
                 Err(TranslateError::RateLimited { retry_after_secs }) => {
                     (self.progress)(Progress::Waiting {
@@ -225,7 +244,9 @@ impl Session<'_> {
                         }
                     }
                 }
-                Err(e @ TranslateError::Fatal(_)) => return Err(e),
+                Err(e @ (TranslateError::Fatal(_) | TranslateError::NoAnswer { .. })) => {
+                    return Err(e);
+                }
                 Err(_) if self.cancel.load(Ordering::Relaxed) => return Ok(out),
                 Err(_) => retry_alone.extend(batch.into_iter().map(|(id, s)| (id, s, None))),
             }
@@ -237,7 +258,11 @@ impl Session<'_> {
                 let second =
                     match self.ask(vec![(id.clone(), source.clone())], before, after, feedback) {
                         Err(_) if self.cancel.load(Ordering::Relaxed) => return Ok(out),
-                        Err(e @ (TranslateError::Fatal(_) | TranslateError::Provider(_))) => {
+                        Err(
+                            e @ (TranslateError::Fatal(_)
+                            | TranslateError::Provider(_)
+                            | TranslateError::NoAnswer { .. }),
+                        ) => {
                             return Err(e);
                         }
                         other => other,
@@ -272,6 +297,31 @@ impl Session<'_> {
 /// the [`Cache`].
 pub fn cache_key(to: &Language, source: &str) -> String {
     format!("{to}|{source}")
+}
+
+/// The cache keys under which the translations of `pages` are kept, in every form they were ever stored in.
+/// For whoever tidies a cache and has to leave alone what translated pages are written from.
+pub fn keys_of(doc: &celsus_pdf::Document, to: &Language, pages: &[usize]) -> Vec<String> {
+    let all = doc.pages().unwrap_or_default();
+    let mut keys = Vec::new();
+    for &n in pages {
+        let Some(page) = all.get(n.wrapping_sub(1)) else {
+            continue;
+        };
+        let Ok(extracted) = extract_page(doc, page, n as u32) else {
+            continue;
+        };
+        for b in extracted.layout.blocks.iter().filter(|b| !b.protected) {
+            keys.push(cache_key(to, &b.source()));
+            // The forms `adopt_earlier` looks for.
+            keys.push(cache_key(to, &b.plain()));
+            keys.push(cache_key(
+                to,
+                &crate::layout::join_lines(b.lines.iter().map(|l| l.text.as_str())),
+            ));
+        }
+    }
+    keys
 }
 
 /// Translations made before a block's lines were kept apart (tables of contents, lists) are stored under the
@@ -371,6 +421,7 @@ pub fn translate_document(
         cache,
         usage: Usage::default(),
         requests: 0,
+        answered: false,
         progress,
         cancel,
         offline: false,
@@ -399,6 +450,36 @@ pub fn translate_document(
             .filter(|b| !b.protected)
             .map(|b| (b.id.clone(), b.source()))
             .collect();
+        if options.settled.contains(&n) {
+            let was = std::mem::replace(&mut session.offline, true);
+            let translations = session.translate(&blocks, "", "").unwrap_or_default();
+            session.offline = was;
+            let missing = blocks
+                .iter()
+                .filter(|(id, _)| !translations.contains_key(id))
+                .count();
+            let written = if missing == 0 {
+                writer
+                    .translate_page(page, &extracted, &translations, &options.to)
+                    .ok()
+            } else {
+                None
+            };
+            if let Some(report) = &written {
+                outcome.pages += 1;
+                outcome.replaced += report.replaced.len();
+                outcome.kept += report.kept.len();
+            }
+            (session.progress)(Progress::PageDone {
+                page: n,
+                translated: translations.len(),
+                replaced: written.as_ref().map_or(0, |r| r.replaced.len()),
+                kept: written.as_ref().map_or(0, |r| r.kept.len()),
+                // A page that could not be written again counts as missing something, whatever the reason.
+                missing: if written.is_some() { 0 } else { missing.max(1) },
+            });
+            continue;
+        }
         let (mut before, mut after) = (String::new(), String::new());
         if !session.offline {
             (session.progress)(Progress::PageStarted {
@@ -413,6 +494,7 @@ pub fn translate_document(
         let translations = match session.translate(&blocks, &before, &after) {
             Ok(t) => t,
             Err(e) => {
+                outcome.no_answer = matches!(e, TranslateError::NoAnswer { .. });
                 outcome.failed = Some(format!("page {n}: {e}"));
                 session.offline = true;
                 // What the page already got is in the cache; the rest of it is missing.

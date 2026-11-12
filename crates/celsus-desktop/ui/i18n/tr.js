@@ -41,6 +41,12 @@ addLocale("tr", {
     test: "Bağlantıyı test et", testing: "Deneniyor…", testOk: (ms) => `Çalışıyor · ${(ms / 1000).toFixed(1)} sn`, save: "Kaydet", cancelEdit: "Vazgeç",
     modelsFetched: (n) => `${n} model bulundu`, confirmRemoveModel: (n) => `"${n}" silinsin mi?`, noModels: "Henüz model eklenmedi.",
     batchChars: "Bir istekteki metin", batchCharsHint: "Karakter. Büyük değer daha az istek, küçük değer daha hızlı cevap demek.",
+    answerWait: "Cevap bekleme süresi", answerWaitHint: "Saniye. Bu sürede cevap vermeyen model beklenmez, iş bir uyarıyla durur. Kendi bilgisayarında çalışan yavaş bir model için süreyi artır.",
+    modelsAll: (n) => `${n} modelin hepsini göster`, modelsNote: "Adlar modeli yapanın adıyla başlar. Metinle cevap vermeyen modeller (ses, arama, güvenlik) listede gösterilmez.",
+    modelsTry: "Çalışan modelleri bul", modelsTrying: (a, b) => `Modeller deneniyor… ${a} / ${b}`, modelsTried: (a, b) => `${a} / ${b} model cevap verdi. Liste artık bunları gösteriyor.`,
+    updateOut: (v) => `Celsus ${v} çıktı`, updateGet: "İndir", updateCheck: "Yeni sürümlere bak", updateCheckHint: "Uygulama açılırken GitHub'a yeni bir sürüm çıkıp çıkmadığını sorar. Sen ya da kitapların hakkında hiçbir şey gönderilmez.", upToDate: "En yeni sürümü kullanıyorsun",
+    updateInstall: "Güncelle ve yeniden başlat", updateInstalling: "Güncelleniyor…", updateFailed: "Güncelleme kurulamadı. Yerine indirme sayfası açıldı.",
+    errors: { no_answer: "Model zamanında cevap vermedi, çeviri durduruldu. Ayarlar → Modeller'den başka bir model seç ya da Ayarlar → Çeviri'den bekleme süresini artır." },
     readable: "Okunabilirlik sınırı", readableHint: "Uzun çeviriler en fazla orijinal boyutun %70'ine, en az 6 pt'ye küçültülür. Sığmayan blok orijinal kalır ve işaretlenir.",
     fontsDir: "Font klasörü", fontsHint: "Çeviriyi yazmak için kullanılan TrueType fontların klasörü.",
     libraryPath: "Kütüphane klasörü", libraryBytes: "Kütüphane boyutu", database: "Veritabanı", cache: "Çeviri önbelleği",
@@ -159,6 +165,7 @@ addLocale("tr", {
     oauthAllow: "İzin ver", oauthDeny: "Reddet", oauthInvalid: "Bu istek onaylanamaz", signedInAs: (name, email) => `${name} (${email}) olarak giriş yaptın.`,
     // Messages for the server's error codes.
     errors: {
+      no_answer: "Model zamanında cevap vermedi, çeviri durduruldu. Bir yönetici Bağlantılar ve modeller bölümünden başka bir model seçebilir.",
       no_model: "Bunun için henüz bir model seçilmedi. Bir yönetici Bağlantılar ve modeller bölümünden seçebilir.",
       wrong_credentials: "E-posta ya da parola yanlış.",
       wrong_password: "Şu anki parola yanlış.",

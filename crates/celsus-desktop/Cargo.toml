@@ -19,3 +19,4 @@ tauri-plugin-dialog = "2.8.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
+tauri-plugin-updater = "2.14.1"

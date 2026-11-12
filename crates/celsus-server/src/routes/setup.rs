@@ -90,6 +90,18 @@ pub async fn create(
     let email = check_email(&body.email)?;
     let name = check_name(&body.name)?;
     check_password(&body.password, &email)?;
+    // A server that has its owner hashes nothing for this request. It is checked again under the lock below.
+    let users: i64 = db
+        .query_one("SELECT COUNT(*) FROM users", &[])
+        .await?
+        .get(0);
+    if users > 0 {
+        return Err(ApiError::new(
+            axum::http::StatusCode::CONFLICT,
+            "already_set_up",
+            "This server already has an owner.",
+        ));
+    }
     let hash = hash_blocking(body.password.clone()).await?;
 
     let tx = db.transaction().await?;

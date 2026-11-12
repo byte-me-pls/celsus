@@ -101,3 +101,19 @@ pub fn render(
     .map_err(|e| e.to_string())?;
     Ok(new_pages.iter().filter_map(|n| out.kept.get(n)).sum())
 }
+
+/// The cache keys that the translated pages of the library are written from. Books that cannot be opened or
+/// languages that cannot be read give none: nothing can be written from them either.
+pub fn keys_in_use(
+    library_dir: &Path,
+    translated: &[(i64, String, Vec<usize>)],
+) -> std::collections::HashSet<String> {
+    let mut keys = std::collections::HashSet::new();
+    for (book, lang, pages) in translated {
+        let (Ok(doc), Ok(to)) = (open(library_dir, *book), lang.parse::<Language>()) else {
+            continue;
+        };
+        keys.extend(celsus_core::pipeline::keys_of(&doc, &to, pages));
+    }
+    keys
+}

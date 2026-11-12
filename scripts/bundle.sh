@@ -3,6 +3,7 @@
 #   Windows  target/release/bundle/nsis/*-setup.exe
 #   macOS    target/universal-apple-darwin/release/bundle/dmg/*.dmg   (Apple silicon and Intel in one app)
 #   Linux    target/release/bundle/{deb,rpm,appimage}/
+# With TAURI_SIGNING_PRIVATE_KEY set, also the signed files an installed app updates itself from.
 # Needs the Tauri CLI (cargo install tauri-cli --version "^2" --locked); on Linux also the packages in README.md.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -41,6 +42,12 @@ case "$host" in
     exit 1
     ;;
 esac
+
+# With the signing key at hand, each installer the app can update itself from gets a signature beside it
+# (<file>.sig). Without the key the installers are built all the same; they just cannot be used for updating.
+if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+  args+=(--config '{"bundle":{"createUpdaterArtifacts":true}}')
+fi
 
 cd crates/celsus-desktop
 cargo tauri build --config release.conf.json "${args[@]}"

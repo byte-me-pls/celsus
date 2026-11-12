@@ -124,8 +124,13 @@ pub fn check_password(password: &str, email: &str) -> ApiResult<()> {
     Ok(())
 }
 
+/// Each password hash takes 19 MiB and tens of milliseconds of CPU. Only this many run at once, so that a
+/// flood of requests waits its turn and cannot take the memory of a small server.
+static HASHING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
 /// Argon2 takes tens of milliseconds of CPU; it runs off the async threads.
 pub async fn hash_blocking(password: String) -> ApiResult<String> {
+    let _turn = HASHING.acquire().await.map_err(ApiError::internal)?;
     tokio::task::spawn_blocking(move || hash_password(&password))
         .await
         .map_err(ApiError::internal)
@@ -747,10 +752,25 @@ pub async fn accept_invite(
     let email = check_email(&body.email)?;
     let name = check_name(&body.name)?;
     check_password(&body.password, &email)?;
-    let hash = hash_blocking(body.password).await?;
     let mut db = state.pool.get().await?;
-    let tx = db.transaction().await?;
     let t = now();
+    // The invitation is looked at before any password is hashed: hashing is costly, and without this anyone
+    // could make the server do it by sending tokens that were never issued.
+    let invited = db
+        .query_opt(
+            "SELECT 1 FROM invites WHERE token_hash = $1 AND used_at IS NULL AND expires_at > $2",
+            &[&sha256(body.token.as_bytes()), &t],
+        )
+        .await?;
+    if invited.is_none() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "bad_invite",
+            "This invitation is not valid. Ask for a new one.",
+        ));
+    }
+    let hash = hash_blocking(body.password).await?;
+    let tx = db.transaction().await?;
     // Using the invitation and creating the account happen together or not at all.
     let Some(invite) = tx
         .query_opt(

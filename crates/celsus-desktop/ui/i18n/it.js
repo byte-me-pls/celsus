@@ -36,6 +36,12 @@ addLocale("it", {
     test: "Verifica connessione", testing: "Verifica in corso…", testOk: (ms) => `Funziona · ${(ms / 1000).toFixed(1).replace(".", ",")} s`, save: "Salva", cancelEdit: "Annulla",
     modelsFetched: (n) => (n === 1 ? `${n} modello trovato` : `${n} modelli trovati`), confirmRemoveModel: (n) => `Rimuovere «${n}»?`, noModels: "Ancora nessun modello.",
     batchChars: "Testo per richiesta", batchCharsHint: "In caratteri. Più grande significa meno richieste, più piccolo risposte più rapide.",
+    answerWait: "Attesa di una risposta", answerWaitHint: "Secondi. Un modello che non ha risposto entro questo tempo viene abbandonato e il lavoro si ferma con un avviso. Concedi più tempo a un modello lento sul tuo computer.",
+    modelsAll: (n) => `Mostra tutti i ${n} modelli`, modelsNote: "I nomi iniziano con chi ha fatto il modello. I modelli che non rispondono con testo (voce, ricerca, sicurezza) non sono mostrati.",
+    modelsTry: "Trova i modelli che rispondono", modelsTrying: (a, b) => `Prova dei modelli… ${a} di ${b}`, modelsTried: (a, b) => `${a} modelli su ${b} hanno risposto. L'elenco ora mostra quelli.`,
+    updateOut: (v) => `È uscito Celsus ${v}`, updateGet: "Scarica", updateCheck: "Cerca nuove versioni", updateCheckHint: "All'avvio l'app chiede a GitHub se esiste una versione più recente. Non viene inviato nulla su di te né sui tuoi libri.", upToDate: "Questa è l'ultima versione",
+    updateInstall: "Aggiorna e riavvia", updateInstalling: "Aggiornamento…", updateFailed: "Non è stato possibile installare l'aggiornamento. Al suo posto è stata aperta la pagina di download.",
+    errors: { no_answer: "Il modello non ha risposto in tempo e la traduzione è stata fermata. Scegli un altro modello in Impostazioni → Modelli, oppure concedi più tempo in Impostazioni → Traduzione." },
     readable: "Soglia di leggibilità", readableHint: "Le traduzioni lunghe si riducono fino al 70% della dimensione originale, mai sotto i 6 pt. I blocchi che ancora non entrano mantengono l’originale e vengono segnalati.",
     fontsDir: "Cartella dei font", fontsHint: "Cartella di font TrueType usati per scrivere le traduzioni.",
     libraryPath: "Cartella della libreria", libraryBytes: "Dimensione della libreria", database: "Database", cache: "Cache delle traduzioni",
@@ -145,6 +151,7 @@ addLocale("it", {
     oauthAllow: "Consenti", oauthDeny: "Nega", oauthInvalid: "Questa richiesta non può essere approvata", signedInAs: (name, email) => `Accesso effettuato come ${name} (${email}).`,
     // Messages for the server's error codes.
     errors: {
+      no_answer: "Il modello non ha risposto in tempo e la traduzione è stata fermata. Un amministratore può scegliere un altro modello in Connessioni e modelli.",
       no_model: "Non è ancora stato scelto un modello per questo. Un amministratore può sceglierlo in «Connessioni e modelli».",
       wrong_credentials: "Email o password errati.",
       wrong_password: "La password attuale è errata.",

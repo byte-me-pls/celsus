@@ -364,10 +364,14 @@ impl Font {
                 };
                 match items.get(i + 1).map(|o| doc.resolve(o)) {
                     Some(Ok(next)) if next.as_array().is_some() => {
-                        for (n, v) in next.as_array().unwrap().iter().enumerate() {
-                            if let Some(v) = v.as_f64() {
-                                self.cid_widths
-                                    .insert(first as u32 + n as u32, v as f32 / 1000.0);
+                        if let Ok(first) = u32::try_from(first)
+                            && self.cid_widths.len() < MOST_WIDTHS
+                        {
+                            for (n, v) in next.as_array().unwrap().iter().enumerate() {
+                                if let Some(v) = v.as_f64() {
+                                    self.cid_widths
+                                        .insert(first.saturating_add(n as u32), v as f32 / 1000.0);
+                                }
                             }
                         }
                         i += 2;
@@ -378,12 +382,11 @@ impl Font {
                         else {
                             break;
                         };
-                        if last >= first
-                            && last - first < 0x10000
-                            && self.cid_widths.len() < 1 << 20
+                        if let Some(range) = width_range(first, last)
+                            && self.cid_widths.len() < MOST_WIDTHS
                         {
-                            for cid in first..=last {
-                                self.cid_widths.insert(cid as u32, v as f32 / 1000.0);
+                            for cid in range {
+                                self.cid_widths.insert(cid, v as f32 / 1000.0);
                             }
                         }
                         i += 3;
@@ -592,6 +595,16 @@ fn tex_style(lower: &str) -> Option<TexStyle> {
     })
 }
 
+/// More widths than any font has; a file made to waste memory stops here.
+const MOST_WIDTHS: usize = 1 << 20;
+
+/// The character codes `first..=last` of a width entry, if they are a range worth walking. The ends are whatever
+/// the file says: negative, or so far apart that their difference does not fit a number.
+fn width_range(first: i64, last: i64) -> Option<std::ops::RangeInclusive<u32>> {
+    let (first, last) = (u32::try_from(first).ok()?, u32::try_from(last).ok()?);
+    (last >= first && last - first < 0x10000).then_some(first..=last)
+}
+
 #[cfg(test)]
 mod tex_tests {
     use super::{empty_glyph_width, even_pitch, letter_widths, tex_style};
@@ -677,5 +690,17 @@ mod tex_tests {
         assert!(tex_style("cmsy10").is_none());
         assert!(tex_style("cmr").is_none());
         assert!(tex_style("arial").is_none());
+    }
+
+    #[test]
+    fn a_width_range_from_a_hostile_file_is_not_walked() {
+        assert_eq!(super::width_range(10, 12), Some(10..=12));
+        assert_eq!(super::width_range(7, 7), Some(7..=7));
+        // Ends whose difference overflows, as in `/W [-9223372036854775808 9223372036854775807 500]`.
+        assert_eq!(super::width_range(i64::MIN, i64::MAX), None);
+        assert_eq!(super::width_range(-1, 5), None);
+        assert_eq!(super::width_range(0, i64::MAX), None);
+        assert_eq!(super::width_range(0, 0x10000), None);
+        assert_eq!(super::width_range(5, 4), None);
     }
 }

@@ -36,6 +36,12 @@ addLocale("nl", {
     test: "Verbinding testen", testing: "Bezig met testen…", testOk: (ms) => `Werkt · ${(ms / 1000).toFixed(1).replace(".", ",")} s`, save: "Opslaan", cancelEdit: "Annuleren",
     modelsFetched: (n) => `${n} ${n === 1 ? "model" : "modellen"} gevonden`, confirmRemoveModel: (n) => `‘${n}’ verwijderen?`, noModels: "Nog geen modellen.",
     batchChars: "Tekst per verzoek", batchCharsHint: "In tekens. Groter betekent minder verzoeken, kleiner betekent snellere antwoorden.",
+    answerWait: "Wachten op een antwoord", answerWaitHint: "Seconden. Een model dat dan nog niet heeft geantwoord wordt opgegeven en de taak stopt met een melding. Geef een traag model op je eigen computer meer tijd.",
+    modelsAll: (n) => `Alle ${n} modellen tonen`, modelsNote: "De namen beginnen met de maker van het model. Modellen die niet in tekst antwoorden (spraak, zoeken, veiligheid) worden weggelaten.",
+    modelsTry: "Werkende modellen zoeken", modelsTrying: (a, b) => `Modellen proberen… ${a} van ${b}`, modelsTried: (a, b) => `${a} van de ${b} modellen antwoordden. De lijst toont nu die.`,
+    updateOut: (v) => `Celsus ${v} is uit`, updateGet: "Downloaden", updateCheck: "Naar nieuwe versies kijken", updateCheckHint: "Bij het starten vraagt de app aan GitHub of er een nieuwere versie is. Er wordt niets over jou of je boeken verstuurd.", upToDate: "Dit is de nieuwste versie",
+    updateInstall: "Bijwerken en opnieuw starten", updateInstalling: "Bijwerken…", updateFailed: "De update kon niet worden geïnstalleerd. In plaats daarvan is de downloadpagina geopend.",
+    errors: { no_answer: "Het model antwoordde niet op tijd, de vertaling is gestopt. Kies een ander model bij Instellingen → Modellen, of geef meer tijd bij Instellingen → Vertaling." },
     readable: "Leesbaarheidsgrens", readableHint: "Lange vertalingen krimpen tot hooguit 70% van de oorspronkelijke grootte en nooit onder 6 pt. Blokken die dan nog niet passen, houden het origineel en worden gemarkeerd.",
     fontsDir: "Map met lettertypen", fontsHint: "Map met TrueType-lettertypen waarmee vertalingen worden gezet.",
     libraryPath: "Bibliotheekmap", libraryBytes: "Grootte van bibliotheek", database: "Database", cache: "Vertaalcache",
@@ -145,6 +151,7 @@ addLocale("nl", {
     oauthAllow: "Toestaan", oauthDeny: "Weigeren", oauthInvalid: "Dit verzoek kan niet worden goedgekeurd", signedInAs: (name, email) => `Ingelogd als ${name} (${email}).`,
     // Messages for the server's error codes.
     errors: {
+      no_answer: "Het model antwoordde niet op tijd, de vertaling is gestopt. Een beheerder kan een ander model kiezen bij Verbindingen en modellen.",
       no_model: "Hiervoor is nog geen model gekozen. Een beheerder kan er een kiezen onder ‘Verbindingen en modellen’.",
       wrong_credentials: "Het e-mailadres of wachtwoord is onjuist.",
       wrong_password: "Het huidige wachtwoord is onjuist.",
