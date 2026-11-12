@@ -2,7 +2,7 @@
 
 Versions are 0.YYMM.N: year and month of the release, then a counter for further releases in that month.
 
-## Unreleased
+## 0.2611.4 (2026-11-13)
 
 - **Translated pages show while the job runs.** The translated book used to be written only when a job ended or
   was stopped, so a page marked as translated still showed the original until then. It is written every few
