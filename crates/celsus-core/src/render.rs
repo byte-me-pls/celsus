@@ -215,12 +215,24 @@ impl<'d> BookWriter<'d> {
             if inline::has_marks(&rest) {
                 chains.extend(block.inline.iter().map(|s| fonts.chain_for(s, script)));
             }
-            let refilled = (block.lines.len() == 1)
+            // A contents entry has its row of dots counted again for the room it has: on its own, or as one of the
+            // entries of a list.
+            let refilled = (block.lines.len() == 1 || block.keeps_lines())
                 .then(|| {
                     let measure = Styled::new(fonts, &chains, rtl);
-                    refill_leader(&rest, block.rect.x1 - block.rect.x0, |t| {
-                        measure.width(t, block.style.font_size)
-                    })
+                    let width = block.rect.x1 - block.rect.x0;
+                    let mut any = false;
+                    let lines: Vec<String> = rest
+                        .split('\n')
+                        .map(|line| {
+                            let filled = refill_leader(line, width, |t| {
+                                measure.width(t, block.style.font_size)
+                            });
+                            any |= filled.is_some();
+                            filled.unwrap_or_else(|| line.to_owned())
+                        })
+                        .collect();
+                    any.then(|| lines.join("\n"))
                 })
                 .flatten();
             entries.push(Entry {

@@ -51,6 +51,8 @@ async function call(cmd, args) {
   } catch (e) {
     // Some failures come as a code, shown in the interface language.
     toast(T.errors?.[String(e)] || String(e), true);
+    // Nothing can be translated without a model: go to where one is chosen.
+    if (String(e) === "no_model") setUpModel();
     throw e;
   }
 }
@@ -167,10 +169,24 @@ async function refreshCounts() {
 async function refreshProfile() {
   const tasks = await invoke("task_models");
   const model = tasks.find((t) => t.task === "translate")?.model;
+  state.hasModel = !!model;
   const name = state.settings.profile_name || T.profileDefault;
   $("#profile-name").textContent = name;
   $("#avatar").textContent = initials(name);
   $("#profile-model").textContent = model ? model.split("/").pop() : T.noModel;
+}
+
+/** Open the place where a model is chosen: the connections first, if there are none yet. */
+async function setUpModel() {
+  const providers = await invoke("providers_list").catch(() => []);
+  go("settings", { tab: providers.length ? "models" : "connections" });
+}
+
+/** A line across the top of a page, while no model is chosen for translation. */
+function modelNotice() {
+  return state.hasModel === false
+    ? `<div class="notice"><span>${T.errors.no_model}</span><button class="primary-button" data-set-up>${T.goConnections}</button></div>`
+    : "";
 }
 
 const initials = (name) => name.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("") || "C";
@@ -233,14 +249,15 @@ async function renderLibrary() {
   await refreshCounts();
   if (!state.books.length) {
     main.innerHTML = `
-      <div class="page-heading"><h1>${T.libraryTitle}</h1></div>
+      <div class="page-heading"><h1>${T.libraryTitle}</h1></div>${modelNotice()}
       <div class="empty-results"><span class="hero-logo"></span><h2>${T.emptyTitle}</h2><p>${T.emptyText}</p>
       <button class="primary-button" id="add-books">${T.addBooks}</button></div>`;
     $("#add-books").onclick = addBooks;
+    for (const b of $$("[data-set-up]", main)) b.onclick = setUpModel;
     return;
   }
   const filters = [["all", T.fAll], ["translated", T.fTranslated], ["busy", T.fBusy], ["untranslated", T.fUntranslated]];
-  main.innerHTML = `
+  main.innerHTML = `${modelNotice()}
     <div class="page-heading">
       <h1>${T.libraryTitle}<span class="count">${state.books.length}</span></h1>
       <div class="heading-actions"><button class="primary-button" id="add-books">
@@ -254,6 +271,7 @@ async function renderLibrary() {
     <div class="filters">${filters.map(([k, l]) => `<button data-filter="${k}" class="${state.filter === k ? "selected" : ""}">${l}</button>`).join("")}</div>
     <div class="book-grid" id="grid"></div>`;
   $("#add-books").onclick = addBooks;
+  for (const b of $$("[data-set-up]", main)) b.onclick = setUpModel;
   $("#search").oninput = (e) => { state.query = e.target.value; drawGrid(); };
   for (const b of $$("[data-filter]")) b.onclick = () => { state.filter = b.dataset.filter; for (const x of $$("[data-filter]")) x.classList.toggle("selected", x === b); drawGrid(); };
   drawGrid();
@@ -449,6 +467,11 @@ async function enqueue(book) {
   if (button.disabled) return;
   button.disabled = true;
   try {
+    // Pages that are only pictures (a scanned book) have nothing to translate: say so now, not after a job.
+    if (!(await invoke("book_estimate", { id: book.id, pages: pages.slice(0, 2000) }))) {
+      toast(T.errors.no_text, true);
+      return;
+    }
     if ($("#b-source").value.trim() !== book.source_lang) {
       await call("book_update", { id: book.id, title: book.title, author: book.author, subject: book.subject, sourceLang: $("#b-source").value });
     }
@@ -587,7 +610,7 @@ function jobRow(job, showBook = true) {
   const sub = job.error
     ? `<p class="error">${esc(T.errors?.[job.error] || job.error)}</p>`
     : `<p>${esc(langName(job.target_lang))} · ${T.jobPages(job.pages.length)} · ${fmtDate(job.created_at)}${tokens ? ` · ${T.tokens(tokens)}` : ""}</p>`;
-  const waiting = live?.message?.startsWith("wait:") && job.status === "running" ? ` · ${T.waitingS(live.message.slice(5))}` : "";
+  const waiting = job.status === "running" ? liveNote(live) : "";
   const actions = [];
   if ((job.status === "queued" || job.status === "running") && !stopping) actions.push(`<button class="quiet-button" data-cancel="${job.id}">${T.cancel}</button>`);
   if (job.status === "failed" || job.status === "cancelled") actions.push(`<button class="quiet-button" data-retry="${job.id}">${T.retry}</button>`);
@@ -690,9 +713,16 @@ const TASKS = () => [
 const modelLists = new Map(); // connection id -> model names
 
 
+const modelListErrors = new Map(); // connection id -> why its models could not be listed
+
 async function modelsOf(provider) {
   if (!modelLists.has(provider.id)) {
-    modelLists.set(provider.id, await invoke("provider_models", { url: provider.url, key: null, id: provider.id }).catch(() => []));
+    modelListErrors.delete(provider.id);
+    const models = await invoke("provider_models", { url: provider.url, key: null, id: provider.id })
+      .catch((e) => { modelListErrors.set(provider.id, String(e)); return null; });
+    // A list that could not be read is asked for again next time.
+    if (!models) return [];
+    modelLists.set(provider.id, models);
   }
   return modelLists.get(provider.id);
 }
@@ -746,6 +776,9 @@ async function settingsModels(box) {
       if (!p) { input.value = ""; return; }
       const models = await modelsOf(p);
       if (p !== provider()) return;
+      // An empty list with no reason looks like a connection without models; say what went wrong.
+      const why = modelListErrors.get(p.id);
+      if (why) out.innerHTML = `<div class="test-result bad">${esc(why)}</div>`;
       offered = task === "image"
         ? [models.filter((m) => /image|dall-e/.test(m)), models]
         : [models.filter((m) => !NOT_CHAT.test(m)), models];
@@ -854,15 +887,25 @@ async function apiConnections(box) {
       const out = $("#f-result");
       out.innerHTML = `<div class="test-result">${T.testing}</div>`;
       try {
-        const models = await invoke("provider_models", vals());
-        out.innerHTML = `<div class="test-result ok"><b>${T.connectionOk(models.length)}</b></div>`;
+        const models = await invoke("provider_check", vals());
+        out.innerHTML = `<div class="test-result ok"><b>${T.connectionOk(models)}</b></div>`;
       } catch (e) {
-        out.innerHTML = `<div class="test-result bad">${esc(e)}</div>`;
+        out.innerHTML = `<div class="test-result bad">${esc(T.errors[String(e)] || e)}</div>`;
       }
     };
     $("#f-cancel").onclick = () => (form.hidden = true);
     $("#f-save").onclick = async () => {
       const v = vals();
+      // A connection whose address is no address, or that turns the key away, is not saved: it would only fail
+      // later, in the middle of a job. One that cannot be reached right now is saved all the same.
+      const button = $("#f-save");
+      button.disabled = true;
+      const problem = await invoke("provider_check", v).then(() => null, (e) => String(e));
+      button.disabled = false;
+      if (problem === "bad_key" || problem === "bad_url") {
+        $("#f-result").innerHTML = `<div class="test-result bad">${esc(T.errors[problem])}</div>`;
+        return;
+      }
       const provider = { id: p.id, name: $("#f-name").value.trim() || "API", url: v.url, model: p.model, is_default: p.is_default, has_key: false };
       await call("provider_save", { provider, key: v.key });
       modelLists.delete(p.id);
@@ -1083,11 +1126,33 @@ listen("job-updated", async ({ payload: job }) => {
   if (v === "library" && $("#grid")) drawGrid();
 });
 
+/**
+ * What a running job is doing right now, to go after its count of pages: waiting out a rate limit, or working on
+ * a page for a while. Without it a job that waits for a slow model looks like one that has stopped.
+ */
+function liveNote(live) {
+  if (!live) return "";
+  if (live.message?.startsWith("wait:")) return ` · ${T.waitingS(live.message.slice(5))}`;
+  const seconds = Math.floor((Date.now() - live.at) / 1000);
+  return live.page && seconds >= 8 ? ` · ${T.onPage(live.page, seconds)}` : "";
+}
+
+// The seconds count up between the job's own messages.
+setInterval(() => {
+  for (const [id, live] of state.live) {
+    if (state.jobs.find((j) => j.id === id)?.status !== "running") continue;
+    for (const el of $$(`[data-job-text="${id}"]`)) el.textContent = `${live.done}/${live.total}${liveNote(live)}`;
+  }
+}, 1000);
+
 listen("job-progress", ({ payload: p }) => {
+  // A message without a page is about the page the job was already on.
+  if (!p.page) p.page = state.live.get(p.job_id)?.page || 0;
+  p.at = Date.now();
   state.live.set(p.job_id, p);
   for (const el of $$(`[data-job-meter="${p.job_id}"]`)) el.style.width = `${p.total ? (100 * p.done) / p.total : 0}%`;
   for (const el of $$(`[data-job-text="${p.job_id}"]`)) {
-    el.textContent = `${p.done}/${p.total}${p.message?.startsWith("wait:") ? ` · ${T.waitingS(p.message.slice(5))}` : ""}`;
+    el.textContent = `${p.done}/${p.total}${liveNote(p)}`;
   }
   if (state.route.view === "book" && state.route.id === p.book_id && p.page) {
     for (const c of $$("#page-map i.r")) c.classList.remove("r");

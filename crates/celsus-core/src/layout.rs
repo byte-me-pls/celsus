@@ -141,6 +141,32 @@ pub fn leader_span(text: &str) -> Option<std::ops::Range<usize>> {
     (dots >= 5).then_some(start..end)
 }
 
+/// The text with every row of leader dots cut down to five. A contents entry can end in a hundred dots; they
+/// say nothing, and a model asked to translate them tends to go on writing dots until it runs out of room. The
+/// translation comes back with the short row, and the page is written with as many dots as it has room for.
+pub fn short_leaders(text: &str) -> String {
+    let lines: Vec<String> = text
+        .split('\n')
+        .map(|line| match leader_span(line) {
+            Some(span) => {
+                let spaced = line[span.clone()].contains(char::is_whitespace);
+                let head = line[..span.start].trim_end();
+                let tail = line[span.end..].trim_start();
+                let mut out = String::with_capacity(head.len() + tail.len() + 12);
+                out.push_str(head);
+                out.push_str(if spaced { " . . . . ." } else { " ....." });
+                if !tail.is_empty() {
+                    out.push(' ');
+                    out.push_str(tail);
+                }
+                out
+            }
+            None => line.to_owned(),
+        })
+        .collect();
+    lines.join("\n")
+}
+
 /// Whether most lines before the last stop well short of `right`, the edge running text would reach in a column
 /// that starts at `left`.
 pub fn lines_end_short(lines: &[TextLine], left: f32, right: f32) -> bool {
@@ -420,5 +446,29 @@ mod tests {
         };
         assert!(a.overlaps(&c, 0.3));
         assert_eq!(a.union(&b).width(), 20.0);
+    }
+
+    #[test]
+    fn rows_of_leader_dots_are_cut_short_and_nothing_else_is() {
+        let long = format!("Setting the Position in a File {}", ".  ".repeat(42));
+        assert_eq!(
+            short_leaders(&long),
+            "Setting the Position in a File . . . . ."
+        );
+        assert_eq!(
+            short_leaders("Preface.............xix"),
+            "Preface ..... xix"
+        );
+        // Each entry of a list on its own line, and text without a leader as it is.
+        assert_eq!(
+            short_leaders("One . . . . . . . . 3\nTwo, with no dots\nThree......... 12"),
+            "One . . . . . 3\nTwo, with no dots\nThree ..... 12"
+        );
+        assert_eq!(
+            short_leaders("An ellipsis... and a sentence."),
+            "An ellipsis... and a sentence."
+        );
+        // What comes back is still read as a leader, so the page can fill it out again.
+        assert!(leader_span(&short_leaders(&long)).is_some());
     }
 }

@@ -139,7 +139,8 @@ pub fn pending(
             out.blocks.push(PendingBlock {
                 page: n,
                 id: b.id.0.clone(),
-                text: source,
+                // Rows of leader dots are handed out cut short, as they are to a model.
+                text: crate::layout::short_leaders(&source),
             });
         }
         if size >= max_chars {
@@ -224,7 +225,10 @@ pub fn accept(
             let problems: Vec<String> = if text.is_empty() {
                 vec!["empty translation".into()]
             } else {
-                check(&source, &text).iter().map(describe).collect()
+                check(&crate::layout::short_leaders(&source), &text)
+                    .iter()
+                    .map(describe)
+                    .collect()
             };
             if !problems.is_empty() && !accept_anyway {
                 result.rejected.push(Rejected {

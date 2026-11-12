@@ -247,13 +247,22 @@ async fn run_job(state: &AppState, id: &str, cancel: Arc<AtomicBool>) -> Result<
         .collect();
     options.pages = all.into_iter().collect();
     let wanted: BTreeSet<usize> = wanted.iter().map(|&p| p as usize).collect();
-    // The earlier pages are only written again: nothing is asked, and so nothing is paid, for them.
+    // What is left to do. A job that was stopped goes on from where it was: its pages that are translated
+    // already count as done from the start.
+    let todo: BTreeSet<usize> = wanted
+        .iter()
+        .copied()
+        .filter(|p| !done.contains(&(*p as i32)))
+        .collect();
+    // Pages translated before are only written again: nothing is asked, and so nothing is paid, for them.
     options.settled = options
         .pages
         .iter()
         .copied()
-        .filter(|p| !wanted.contains(p))
+        .filter(|p| !todo.contains(p))
         .collect();
+    let already = (wanted.len() - todo.len()) as i32;
+    let unmark: Vec<i32> = todo.iter().map(|&p| p as i32).collect();
 
     let source = library::source_file(&state.config, &book_id);
     let output = library::output_file(&state.config, &book_id, &lang);
@@ -267,7 +276,7 @@ async fn run_job(state: &AppState, id: &str, cancel: Arc<AtomicBool>) -> Result<
     let st = state.clone();
     let handle = Handle::current();
     let job_id = id.to_owned();
-    let (bytes, outcome, unfinished) = tokio::task::spawn_blocking(move || {
+    let (bytes, outcome, unfinished, no_text) = tokio::task::spawn_blocking(move || {
         let fonts = FontSet::for_language(&fonts_dir, &target);
         let doc = celsus_pdf::Document::open(&source).map_err(|e| e.to_string())?;
         let mut cache = PgCache {
@@ -275,23 +284,32 @@ async fn run_job(state: &AppState, id: &str, cancel: Arc<AtomicBool>) -> Result<
             handle: handle.clone(),
             book_id: cache_book,
         };
-        let mut done = 0i32;
+        let mut done = already;
+        // Pages translated by this run.
+        let mut fresh = 0usize;
         // Pages of this job where the model gave no usable answer for some of the text.
         let mut unfinished = 0usize;
         // Earlier pages whose translation could not be written again.
         let mut lost = 0usize;
+        // Blocks of text the pages of this job had to translate.
+        let mut texts = 0usize;
         let mut progress = |p: Progress| {
-            if let Progress::PageDone { page, kept, missing, .. } = p {
-                if wanted.contains(&page) {
+            if let Progress::PageDone { page, translated, kept, missing, .. } = p {
+                if todo.contains(&page) {
+                    texts += translated + missing;
                     if missing == 0 {
                         done += 1;
+                        fresh += 1;
                     } else {
                         unfinished += 1;
                     }
                 } else if missing > 0 {
                     lost += 1;
+                    if wanted.contains(&page) {
+                        done -= 1;
+                    }
                 }
-                let gone = missing > 0 && !wanted.contains(&page);
+                let gone = missing > 0 && !todo.contains(&page);
                 handle.block_on(async {
                     if let Ok(db) = st.pool.get().await {
                         // A page with text left untranslated is not marked, so it counts as missing.
@@ -321,7 +339,7 @@ async fn run_job(state: &AppState, id: &str, cancel: Arc<AtomicBool>) -> Result<
         let (bytes, outcome) =
             translate_document(&doc, &fonts, &client, &options, &mut cache, &mut progress, &cancel)
                 .map_err(|e| e.to_string())?;
-        Ok::<_, String>((bytes, outcome, unfinished + lost))
+        Ok::<_, String>((bytes, outcome, unfinished + lost, texts == 0 && fresh > 0))
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -352,6 +370,17 @@ async fn run_job(state: &AppState, id: &str, cancel: Arc<AtomicBool>) -> Result<
     // The interface has words of its own for a model that stayed silent.
     if outcome.no_answer {
         return Err("no_answer".into());
+    }
+    // Pages that are only pictures (a scanned book) come through with nothing done to them. That is not a
+    // translation: they are not called translated, and the job says why.
+    if no_text && !outcome.cancelled {
+        db.execute(
+            "DELETE FROM translated_pages WHERE book_id = $1 AND lang = $2 AND page = ANY($3)",
+            &[&job.get::<_, String>(0), &job.get::<_, String>(1), &unmark],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        return Err("no_text".into());
     }
     if let Some(why) = outcome.failed {
         return Err(why);

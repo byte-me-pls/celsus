@@ -125,7 +125,12 @@ struct Session<'a> {
     offline: bool,
     /// The model has answered at least once in this run.
     answered: bool,
+    /// Answers in a row that could not be read or did not line up with the blocks asked for.
+    unusable: usize,
 }
+
+/// After this many unusable answers in a row the run stops: the model is not up to the job.
+const UNUSABLE: usize = 8;
 
 impl Session<'_> {
     /// Wait, giving up early when the job is stopped.
@@ -153,7 +158,11 @@ impl Session<'_> {
             book: self.options.book.clone(),
             previous_text: before.to_owned(),
             next_text: after.to_owned(),
-            blocks,
+            // Rows of leader dots go to the model cut short; see `short_leaders`.
+            blocks: blocks
+                .into_iter()
+                .map(|(id, text)| (id, crate::layout::short_leaders(&text)))
+                .collect(),
             feedback,
         };
         for attempt in 0..6u64 {
@@ -190,9 +199,26 @@ impl Session<'_> {
                 Err(e) => return Err(e),
             }
         }
-        Err(TranslateError::Provider(
+        // Not to be tried again block by block: every one of them would wait as long and be refused as well.
+        Err(TranslateError::Fatal(
             "the provider kept refusing requests: the rate limit is too low or the quota is used up".into(),
         ))
+    }
+
+    /// Take note of an answer that could not be used. Too many in a row end the run.
+    fn unusable(&mut self, e: &TranslateError) -> Result<(), TranslateError> {
+        if matches!(
+            e,
+            TranslateError::BadAnswer(_) | TranslateError::BoundaryMismatch { .. }
+        ) {
+            self.unusable += 1;
+            if self.unusable >= UNUSABLE {
+                return Err(TranslateError::Unusable {
+                    times: self.unusable,
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Translate blocks in batches; a batch that does not line up, or a translation that fails the local checks,
@@ -233,9 +259,10 @@ impl Session<'_> {
             let mut retry_alone = Vec::new();
             match self.ask(batch.clone(), before, after, Vec::new()) {
                 Ok(texts) => {
+                    self.unusable = 0;
                     for ((id, source), text) in batch.into_iter().zip(texts) {
                         let text = strip_source_glosses(&source, &text);
-                        if check(&source, &text).is_empty() {
+                        if check(&crate::layout::short_leaders(&source), &text).is_empty() {
                             let key = self.key(&source);
                             self.cache.put(&key, &text);
                             out.insert(id, text);
@@ -244,16 +271,28 @@ impl Session<'_> {
                         }
                     }
                 }
-                Err(e @ (TranslateError::Fatal(_) | TranslateError::NoAnswer { .. })) => {
+                Err(
+                    e @ (TranslateError::Fatal(_)
+                    | TranslateError::NoAnswer { .. }
+                    | TranslateError::Unusable { .. }),
+                ) => {
                     return Err(e);
                 }
                 Err(_) if self.cancel.load(Ordering::Relaxed) => return Ok(out),
-                Err(_) => retry_alone.extend(batch.into_iter().map(|(id, s)| (id, s, None))),
+                Err(e) => {
+                    self.unusable(&e)?;
+                    retry_alone.extend(batch.into_iter().map(|(id, s)| (id, s, None)));
+                }
             }
             for (id, source, first) in retry_alone {
                 let feedback: Vec<String> = first
                     .as_deref()
-                    .map(|f| check(&source, f).iter().map(describe).collect())
+                    .map(|f| {
+                        check(&crate::layout::short_leaders(&source), f)
+                            .iter()
+                            .map(describe)
+                            .collect()
+                    })
                     .unwrap_or_default();
                 let second =
                     match self.ask(vec![(id.clone(), source.clone())], before, after, feedback) {
@@ -265,15 +304,22 @@ impl Session<'_> {
                         ) => {
                             return Err(e);
                         }
-                        other => other,
+                        Err(e) => {
+                            self.unusable(&e)?;
+                            None
+                        }
+                        Ok(texts) => {
+                            self.unusable = 0;
+                            texts.into_iter().next()
+                        }
                     }
-                    .ok()
-                    .and_then(|t| t.into_iter().next())
                     .map(|t| strip_source_glosses(&source, &t));
+                // The translation is held against the text as the model was given it.
+                let asked = crate::layout::short_leaders(&source);
                 let chosen = match (first, second) {
-                    (_, Some(t)) if check(&source, &t).is_empty() => Some(t),
+                    (_, Some(t)) if check(&asked, &t).is_empty() => Some(t),
                     (Some(f), Some(t)) => {
-                        Some(if check(&source, &f).len() <= check(&source, &t).len() {
+                        Some(if check(&asked, &f).len() <= check(&asked, &t).len() {
                             f
                         } else {
                             t
@@ -422,6 +468,7 @@ pub fn translate_document(
         usage: Usage::default(),
         requests: 0,
         answered: false,
+        unusable: 0,
         progress,
         cancel,
         offline: false,

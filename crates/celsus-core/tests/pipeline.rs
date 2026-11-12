@@ -290,6 +290,46 @@ fn pages_translated_before_are_written_again_without_asking() {
 }
 
 #[test]
+fn a_model_whose_answers_are_never_usable_stops_the_run() {
+    // Eight pages, so that the answers run out of chances before the pages run out.
+    let pages: Vec<String> = (1..=8)
+        .map(|n| format!("Page number {n} of a longer book"))
+        .collect();
+    let texts: Vec<&str> = pages.iter().map(String::as_str).collect();
+    let to: Language = "tr".parse().unwrap();
+    let Some(fonts) = fonts(&to) else {
+        return;
+    };
+    let provider = Fake {
+        good: 0,
+        asked: Cell::new(0),
+        then: || TranslateError::BadAnswer("not JSON".into()),
+        stop: None,
+    };
+    let doc = celsus_pdf::Document::load(book(&texts)).unwrap();
+    let mut options = Options::new(to);
+    options.retry_secs = 0;
+    let mut cache: BTreeMap<String, String> = BTreeMap::new();
+    let mut progress = |_: Progress| {};
+    let (_, outcome) = translate_document(
+        &doc,
+        &fonts,
+        &provider,
+        &options,
+        &mut cache,
+        &mut progress,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let why = outcome
+        .failed
+        .expect("the run says the model is not up to it");
+    assert!(why.contains("could not be used 8 times in a row"), "{why}");
+    // Two requests a page (the page, then its one block alone) until the eighth unusable answer: not sixteen.
+    assert_eq!(provider.asked.get(), 8);
+}
+
+#[test]
 fn stopping_keeps_what_was_done_and_what_was_there_before() {
     let cancel = AtomicBool::new(false);
     let provider = Fake {

@@ -157,20 +157,28 @@ fn run(
     }
     // This job's pages, plus every page translated before, so the output holds all of them.
     let wanted: BTreeSet<i64> = job.pages.iter().copied().collect();
-    let mut all: BTreeSet<i64> = wanted.clone();
-    all.extend(
-        db::translated_pages(conn, book.id, &job.target_lang)?
-            .into_iter()
-            .map(|(p, _)| p),
-    );
+    let translated: BTreeSet<i64> = db::translated_pages(conn, book.id, &job.target_lang)?
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect();
+    let all: BTreeSet<i64> = wanted.union(&translated).copied().collect();
     options.pages = all.iter().map(|&p| p as usize).collect();
-    // The earlier pages are only written again: nothing is asked, and so nothing is paid, for them.
-    options.settled = all.difference(&wanted).map(|&p| p as usize).collect();
+    // What is left to do. A job that was stopped goes on from where it was: its pages that are translated
+    // already count as done from the start.
+    let todo: BTreeSet<i64> = wanted.difference(&translated).copied().collect();
+    // Pages translated before are only written again: nothing is asked, and so nothing is paid, for them.
+    options.settled = all.difference(&todo).map(|&p| p as usize).collect();
 
     let total = wanted.len();
-    let mut done = 0usize;
+    let mut done = wanted.len() - todo.len();
+    // Pages translated by this run.
+    let mut fresh = 0usize;
+    db::job_counters(conn, id, done as i64, total as i64, 0, 0, 0, 0, 0, &model)?;
+    let _ = app.emit("job-updated", db::job(conn, id)?);
     // Earlier pages whose translation could not be written again.
     let mut lost = 0usize;
+    // Blocks of text the pages of this job had to translate.
+    let mut texts = 0usize;
     // Pages of this job where the model gave no usable answer for some of the text.
     let mut unfinished = 0usize;
     let (mut replaced, mut kept) = (0i64, 0i64);
@@ -180,23 +188,31 @@ fn run(
         match p {
             Progress::PageDone {
                 page: n,
+                translated,
                 replaced: r,
                 kept: k,
                 missing,
-                ..
             } => {
                 page = n;
+                let n64 = n as i64;
+                if todo.contains(&n64) {
+                    texts += translated + missing;
+                }
                 // A page with text left untranslated is not marked, so "missing pages" picks it up again.
                 if missing == 0 {
-                    let _ = db::mark_page(conn, book.id, &job.target_lang, n as i64, k as i64);
-                } else if !wanted.contains(&(n as i64)) {
+                    let _ = db::mark_page(conn, book.id, &job.target_lang, n64, k as i64);
+                } else if !todo.contains(&n64) {
                     // It stays as the original in the new file, and is not called translated any more.
-                    let _ = db::unmark_page(conn, book.id, &job.target_lang, n as i64);
+                    let _ = db::unmark_page(conn, book.id, &job.target_lang, n64);
                     lost += 1;
+                    if wanted.contains(&n64) {
+                        done = done.saturating_sub(1);
+                    }
                 }
-                if wanted.contains(&(n as i64)) {
+                if todo.contains(&n64) {
                     if missing == 0 {
                         done += 1;
+                        fresh += 1;
                     } else {
                         unfinished += 1;
                     }
@@ -280,6 +296,14 @@ fn run(
         return Err(format!(
             "The model gave no usable answer for some text on {unfinished} page(s). Translate the missing pages again."
         ));
+    }
+    // Pages that are only pictures (a scanned book) come through with nothing done to them. That is not a
+    // translation: they are not called translated, and the job says why.
+    if texts == 0 && fresh > 0 && !outcome.cancelled {
+        for &n in &todo {
+            let _ = db::unmark_page(conn, book.id, &job.target_lang, n);
+        }
+        return Err("no_text".into());
     }
     if lost > 0 && !outcome.cancelled {
         return Err(format!(

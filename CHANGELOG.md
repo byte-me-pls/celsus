@@ -2,6 +2,26 @@
 
 Versions are 0.YYMM.N: year and month of the release, then a counter for further releases in that month.
 
+## 0.2611.3 (2026-11-12)
+
+- **Starting out.** Translating without a model no longer answers with a code: the app says that a model is
+  needed, takes you to where one is chosen, and shows a note on the library page until one is.
+- **A connection is tried before it is saved.** Its key is checked without spending anything. A connection that
+  turns the key away, or whose address is no address, is not saved and says why; a list of models that cannot be
+  read says why too.
+- **Contents pages.** A row of leader dots is cut to five before it goes to a model and filled out again when the
+  page is written, for single entries and for lists of them. A long row could keep a model writing dots until
+  its answer was cut off, so that the job stood on that page for minutes each time it was run.
+- **Continue.** A job that was stopped goes on from where it was: its pages that are translated already count as
+  done from the start and nothing is asked for them again. The button says *Continue*.
+- **A job says what it is doing.** While it works on a page for more than a few seconds, the job shows the page
+  and how long it has been on it, so that waiting for a slow model does not look like standing still.
+- **A model whose answers cannot be used ends the job.** After eight unusable answers in a row the job stops and
+  says to choose another model, in place of asking for every block of every page twice. A connection that keeps
+  refusing for its rate limit ends the job at once, not block by block.
+- **Pages without text.** A scanned book has only pictures of its pages. Queueing such pages is refused with an
+  explanation, and a job that finds nothing to translate no longer ends as done.
+
 ## 0.2611.2 (2026-11-12)
 
 - **Columns for languages read from right to left.** On a page of two or more columns translated into Arabic,

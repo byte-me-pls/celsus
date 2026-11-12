@@ -75,6 +75,12 @@ pub enum TranslateError {
         "the model did not answer within {seconds} seconds. Choose another model, or allow more time in the settings"
     )]
     NoAnswer { seconds: u64 },
+    /// Answer after answer could not be read or did not line up with what was asked: this model does not do
+    /// the job, and asking it for every block of every page would only spend requests.
+    #[error(
+        "the model's answers could not be used {times} times in a row. Choose another model for translation"
+    )]
+    Unusable { times: usize },
     /// The request can never succeed as it is (bad key, unknown or retired model): stop instead of retrying.
     #[error("provider refused: {0}")]
     Fatal(String),

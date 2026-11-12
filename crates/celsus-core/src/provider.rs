@@ -270,6 +270,22 @@ impl OpenAiCompatible {
         Ok(ids)
     }
 
+    /// Whether the connection takes the key, found out without spending anything: a request for a model that
+    /// does not exist is turned away for its key before anything else about it is looked at. A connection that
+    /// asks for no key takes any.
+    pub fn check_key(&self) -> Result<(), TranslateError> {
+        let body = json!({
+            "model": "celsus-key-check",
+            "messages": [{"role": "user", "content": "."}],
+            "max_tokens": 1
+        });
+        let (status, text, _) = self.post("chat/completions", &body, Duration::from_secs(30))?;
+        match status {
+            401 | 403 => Err(Self::failure(status, &text, None)),
+            _ => Ok(()),
+        }
+    }
+
     /// Whether the model draws through the images endpoint (OpenAI's picture models) rather than a chat that
     /// answers with a picture (Gemini and others through OpenRouter).
     pub fn uses_images_endpoint(&self) -> bool {
@@ -674,6 +690,34 @@ mod tests {
             started.elapsed() < Duration::from_secs(5),
             "{:?}",
             started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_refused_key_is_told_from_a_model_that_is_not_there() {
+        // The key is wrong: the server says so before it looks at the model.
+        let server = serve(vec![(
+            401,
+            vec![],
+            r#"{"error":{"message":"Incorrect API key provided"}}"#.into(),
+        )]);
+        let e = OpenAiCompatible::new(&server.url, Some("wrong".into()), "")
+            .check_key()
+            .unwrap_err();
+        assert!(
+            matches!(&e, TranslateError::Fatal(why) if why.contains("Incorrect API key")),
+            "{e:?}"
+        );
+        // The key is right: only the made-up model is not found.
+        let server = serve(vec![(
+            404,
+            vec![],
+            r#"{"error":{"message":"model not found"}}"#.into(),
+        )]);
+        assert!(
+            OpenAiCompatible::new(&server.url, Some("right".into()), "")
+                .check_key()
+                .is_ok()
         );
     }
 

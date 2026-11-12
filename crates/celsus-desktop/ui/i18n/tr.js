@@ -26,7 +26,8 @@ addLocale("tr", {
     // jobs
     jobsTitle: "Çeviriler", noJobs: "Henüz çeviri işi yok. Bir kitabı açıp çeviri başlatabilirsin.",
     st_queued: "Sırada", st_running: "Çevriliyor", st_done: "Bitti", st_failed: "Hata", st_cancelled: "Durduruldu", st_stopping: "Durduruluyor…",
-    cancel: "Durdur", retry: "Yeniden dene", openBook: "Kitabı aç", tokens: (n) => `${n.toLocaleString("tr")} token`, waitingS: (s) => `Sınır: ${s} sn bekleniyor`,
+    cancel: "Durdur", retry: "Devam et", openBook: "Kitabı aç", tokens: (n) => `${n.toLocaleString("tr")} token`, waitingS: (s) => `Sınır: ${s} sn bekleniyor`,
+    onPage: (n, s) => `sayfa ${n}, ${s} sn`,
     jobPages: (n) => `${n} sayfa`,
     // reader
     readerSide: "Yan yana", readerTrans: "Çeviri", readerOrig: "Orijinal", goPage: "Sayfa", original: "Orijinal", translation: "Çeviri",
@@ -46,7 +47,7 @@ addLocale("tr", {
     modelsTry: "Çalışan modelleri bul", modelsTrying: (a, b) => `Modeller deneniyor… ${a} / ${b}`, modelsTried: (a, b) => `${a} / ${b} model cevap verdi. Liste artık bunları gösteriyor.`,
     updateOut: (v) => `Celsus ${v} çıktı`, updateGet: "İndir", updateCheck: "Yeni sürümlere bak", updateCheckHint: "Uygulama açılırken GitHub'a yeni bir sürüm çıkıp çıkmadığını sorar. Sen ya da kitapların hakkında hiçbir şey gönderilmez.", upToDate: "En yeni sürümü kullanıyorsun",
     updateInstall: "Güncelle ve yeniden başlat", updateInstalling: "Güncelleniyor…", updateFailed: "Güncelleme kurulamadı. Yerine indirme sayfası açıldı.",
-    errors: { no_answer: "Model zamanında cevap vermedi, çeviri durduruldu. Ayarlar → Modeller'den başka bir model seç ya da Ayarlar → Çeviri'den bekleme süresini artır." },
+    errors: { no_model: "Çeviri için bir model gerekiyor. Önce bir bağlantı ekle ve çeviri için bir model seç.", no_text: "Bu sayfalarda çevrilecek metin yok. Taranmış bir kitap yalnızca sayfa resimlerinden oluşur; Celsus bunları henüz okuyamıyor.", bad_key: "Bağlantı bu anahtarı kabul etmedi. Anahtarın eksiksiz kopyalandığını ve bu servise ait olduğunu kontrol et.", bad_url: "Adres https:// ile başlamalı (kendi bilgisayarındaki ya da ağındaki bir model için http:// olabilir).", no_answer: "Model zamanında cevap vermedi, çeviri durduruldu. Ayarlar → Modeller'den başka bir model seç ya da Ayarlar → Çeviri'den bekleme süresini artır." },
     readable: "Okunabilirlik sınırı", readableHint: "Uzun çeviriler en fazla orijinal boyutun %70'ine, en az 6 pt'ye küçültülür. Sığmayan blok orijinal kalır ve işaretlenir.",
     fontsDir: "Font klasörü", fontsHint: "Çeviriyi yazmak için kullanılan TrueType fontların klasörü.",
     libraryPath: "Kütüphane klasörü", libraryBytes: "Kütüphane boyutu", database: "Veritabanı", cache: "Çeviri önbelleği",
@@ -128,7 +129,7 @@ addLocale("tr", {
     confirmDelete: (t) => `"${t}" silinsin mi? Bu geri alınamaz.`, deleted: "Kitap silindi", readOnly: "Bu kitabı başkası ekledi; okuyup çevirebilirsin.",
     // jobs
     jobsTitle: "Çeviriler", noJobs: "Henüz çeviri işi yok.", st_queued: "Sırada", st_running: "Çevriliyor", st_done: "Bitti", st_failed: "Hata", st_cancelled: "Durduruldu", st_stopping: "Durduruluyor…",
-    cancel: "Durdur", retry: "Yeniden dene", openBook: "Kitabı aç", tokens: (n) => `${n.toLocaleString("tr")} token`,
+    cancel: "Durdur", retry: "Devam et", openBook: "Kitabı aç", tokens: (n) => `${n.toLocaleString("tr")} token`,
     // account
     accountTitle: "Hesabım", profile: "Profil", role: "Rol", roles: { owner: "Sahip", admin: "Yönetici", member: "Üye" },
     changePassword: "Parolayı değiştir", currentPassword: "Şu anki parola", newPassword: "Yeni parola", passwordChanged: (n) => `Parola değişti. ${n} başka oturum kapatıldı.`,
@@ -165,6 +166,7 @@ addLocale("tr", {
     oauthAllow: "İzin ver", oauthDeny: "Reddet", oauthInvalid: "Bu istek onaylanamaz", signedInAs: (name, email) => `${name} (${email}) olarak giriş yaptın.`,
     // Messages for the server's error codes.
     errors: {
+      no_text: "Bu sayfalarda çevrilecek metin yok. Taranmış bir kitap yalnızca sayfa resimlerinden oluşur; Celsus bunları henüz okuyamıyor.",
       no_answer: "Model zamanında cevap vermedi, çeviri durduruldu. Bir yönetici Bağlantılar ve modeller bölümünden başka bir model seçebilir.",
       no_model: "Bunun için henüz bir model seçilmedi. Bir yönetici Bağlantılar ve modeller bölümünden seçebilir.",
       wrong_credentials: "E-posta ya da parola yanlış.",

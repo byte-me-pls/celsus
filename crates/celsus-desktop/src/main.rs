@@ -562,6 +562,9 @@ fn providers_list(app: State<App>) -> Res<Vec<db::Provider>> {
 /// Save a provider. `key`: `None` keeps the stored key, an empty string removes it.
 #[tauri::command]
 fn provider_save(app: State<App>, provider: db::Provider, key: Option<String>) -> Res<i64> {
+    if !web_address(&provider.url) {
+        return Err("bad_url".into());
+    }
     let id = db::save_provider(&app.db.lock().unwrap(), &provider)?;
     if let Some(k) = key {
         secrets::set_key(id, k.trim())?;
@@ -639,6 +642,41 @@ fn translate_test(client: OpenAiCompatible) -> TestResult {
             },
             error: Some(e.to_string()),
         },
+    }
+}
+
+/// Whether `url` can be the address of a model service: http or https, with a host after it.
+fn web_address(url: &str) -> bool {
+    ["https://", "http://"].iter().any(|scheme| {
+        url.trim()
+            .strip_prefix(scheme)
+            .is_some_and(|rest| !rest.trim_matches('/').is_empty())
+    })
+}
+
+/// Try a connection before it is relied on: its address, whether it answers, and whether it takes the key.
+/// Gives the number of models it lists.
+#[tauri::command]
+async fn provider_check(url: String, key: Option<String>, id: Option<i64>) -> Res<usize> {
+    if !web_address(&url) {
+        return Err("bad_url".into());
+    }
+    let key = key
+        .filter(|k| !k.is_empty())
+        .or_else(|| id.and_then(secrets::get_key));
+    let client = OpenAiCompatible::new(url, key, String::new());
+    // Some services list their models to anyone, so the list alone says nothing about the key.
+    let refused = |e: &celsus_core::translate::TranslateError| matches!(e, celsus_core::translate::TranslateError::Fatal(why) if why.starts_with("HTTP 401") || why.starts_with("HTTP 403"));
+    let models = match client.list_models() {
+        Ok(models) => models.len(),
+        Err(e) if refused(&e) => return Err("bad_key".into()),
+        Err(e) => return Err(e.to_string()),
+    };
+    match client.check_key() {
+        Ok(()) => Ok(models),
+        Err(e) if refused(&e) => Err("bad_key".into()),
+        // Anything else is about that one request, not about the key.
+        Err(_) => Ok(models),
     }
 }
 
@@ -1016,6 +1054,7 @@ fn main() {
             provider_default,
             provider_test,
             provider_models,
+            provider_check,
             settings_get,
             settings_set,
             usage_stats,
