@@ -426,3 +426,247 @@ fn columns_change_places_for_a_language_read_from_right_to_left() {
         .rect;
     assert!((top.x1 - edge_of("headline")).abs() < 1.0, "{top:?}");
 }
+
+/// A one-page PDF with a line of text and, under it, a picture with `bits` bits a pixel.
+fn text_on_a_picture(bits: u8) -> Vec<u8> {
+    let content = "q 400 0 0 30 72 690 cm /Im0 Do Q\nBT /F1 14 Tf 72 700 Td (The words of a scanned page) Tj ET";
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> /XObject << /Im0 6 0 R >> >> /Contents 5 0 R >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
+        format!(
+            "<< /Type /XObject /Subtype /Image /Width 8 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent {bits} /Length {} >>\nstream\n{}\nendstream",
+            if bits == 1 { 1 } else { 8 },
+            if bits == 1 { "\u{0}" } else { "\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}\u{0}" }
+        ),
+    ];
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = pdf.len();
+    pdf.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
+    for o in offsets {
+        pdf.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    pdf
+}
+
+/// Two lines, the first indented and ending short of the margin by as much: line for line they are centred
+/// on one another. Among paragraphs that begin the same way they are a paragraph, and set from the left.
+#[test]
+fn a_short_indented_paragraph_is_not_taken_for_centred_lines() {
+    let words = |n: usize| vec!["nn"; n].join(" ");
+    let content = format!(
+        "BT /F1 10 Tf 12 TL 86 700 Td ({}) Tj -14 -12 Td ({}) Tj T* ({}) Tj \
+         14 -12 Td ({}) Tj -14 -12 Td ({}) Tj ET",
+        words(24),
+        words(25),
+        words(9),
+        words(23),
+        words(25)
+    );
+    let doc = celsus_pdf::Document::load(page_pdf(&content, "")).unwrap();
+    let pages = doc.pages().unwrap();
+    let page = extract_page(&doc, &pages[0], 1).unwrap();
+    let blocks = &page.layout.blocks;
+    assert_eq!(
+        blocks.iter().map(|b| b.lines.len()).collect::<Vec<_>>(),
+        [3, 2]
+    );
+    let (first, second) = (&blocks[1].lines[0].rect, &blocks[1].lines[1].rect);
+    assert!(
+        ((first.x0 + first.x1) - (second.x0 + second.x1)).abs() < 4.0,
+        "the two lines are centred on one another: {first:?} {second:?}"
+    );
+    assert_ne!(blocks[1].align, celsus_core::layout::Align::Center);
+}
+
+/// A page with a paragraph of three lines and, under it, a figure drawn from `foot` up to 660 (in the
+/// coordinates of the page, from its bottom), written once with a font of ours: a page whose text is seen when
+/// the page is looked at, as the text of a real book is.
+fn paragraph_over_a_figure(foot: u32, fonts: &FontSet, tr: &Language) -> Vec<u8> {
+    let content = format!(
+        "BT /F1 12 Tf 14 TL 72 700 Td (The first of the three lines of a paragraph that stands over a figure) Tj \
+         T* (and goes on in a second line that is about as long as the first one) Tj \
+         T* (and ends in a third line which is the last line of the paragraph.) Tj ET\n\
+         0.8 w 100 {foot} 300 {} re S",
+        660 - foot
+    );
+    let doc = celsus_pdf::Document::load(page_pdf(&content, "")).unwrap();
+    let pages = doc.pages().unwrap();
+    let extracted = extract_page(&doc, &pages[0], 1).unwrap();
+    assert_eq!(extracted.layout.blocks.len(), 1);
+    let text = "Bir şeklin üstünde duran üç satırlık bir paragrafın ilk satırı budur, ikinci satırı da \
+                aşağı yukarı onun kadar uzundur ve paragraf üçüncü, yani son satırıyla burada biter.";
+    let translations = BTreeMap::from([(extracted.layout.blocks[0].id.clone(), text.to_string())]);
+    let mut writer = BookWriter::new(&doc, fonts);
+    writer
+        .translate_page(&pages[0], &extracted, &translations, tr)
+        .unwrap();
+    writer.finish().unwrap()
+}
+
+const TWICE_AS_LONG: &str = "Bir şeklin üstünde duran üç satırlık bir paragrafın ilk satırı budur, ikinci satırı \
+    da aşağı yukarı onun kadar uzundur ve paragraf üçüncü satırıyla bitmez, çünkü çevirisi aslından çok daha \
+    uzun tutmuştur: dördüncü, beşinci ve altıncı satırlar da gelir, onlara da sayfada yer açmak gerekir, yoksa \
+    yazı okunamayacak kadar küçülür ve sayfanın düzeni bozulur.";
+
+/// A translation that needs more lines than its original moves the figure under it down, when there is room
+/// under the figure, and keeps its size. The figure is drawn once more in its new place, and its old place is
+/// painted over.
+#[test]
+fn a_figure_moves_down_for_a_longer_translation() {
+    let tr: Language = "tr".parse().unwrap();
+    let Some(fonts) = fonts_for(&tr, TWICE_AS_LONG) else {
+        return;
+    };
+    let doc = celsus_pdf::Document::load(paragraph_over_a_figure(560, &fonts, &tr)).unwrap();
+    let pages = doc.pages().unwrap();
+    let extracted = extract_page(&doc, &pages[0], 1).unwrap();
+    let block = &extracted.layout.blocks[0];
+    let (size, lines) = (block.style.font_size, block.lines.len());
+    let figure_top = |page: &celsus_core::extract::ExtractedPage| {
+        page.obstacles
+            .iter()
+            .filter(|o| o.width() > 250.0)
+            .map(|o| o.y0)
+            .fold(0.0, f32::max)
+    };
+    let was = figure_top(&extracted);
+    let translations = BTreeMap::from([(block.id.clone(), TWICE_AS_LONG.to_string())]);
+    let mut writer = BookWriter::new(&doc, &fonts);
+    let report = writer
+        .translate_page(&pages[0], &extracted, &translations, &tr)
+        .unwrap();
+    assert_eq!(report.replaced.len(), 1, "{:?}", report.kept);
+
+    let back = celsus_pdf::Document::load(writer.finish().unwrap()).unwrap();
+    let back_pages = back.pages().unwrap();
+    let read = extract_page(&back, &back_pages[0], 1).unwrap();
+    let now = &read.layout.blocks[0];
+    assert!(now.lines.len() > lines, "{} lines", now.lines.len());
+    assert!(
+        (now.style.font_size - size).abs() < 0.05,
+        "{}",
+        now.style.font_size
+    );
+    let content =
+        String::from_utf8_lossy(&read.content.data[&celsus_pdf::interp::Source::Page]).into_owned();
+    assert!(content.contains("W n\n1 0 0 1 0 -"), "{content}");
+    assert!(
+        !content.contains("2 Tr"),
+        "no pen for text that kept its size"
+    );
+    // The figure stands lower than it did, under the last line of the text.
+    let moved = figure_top(&read) - was;
+    assert!(moved > 14.0, "moved {moved}");
+    assert!(now.rect.y1 < figure_top(&read), "{:?}", now.rect);
+}
+
+/// With no room under the figure it stays, and the text gets smaller instead: darker and with heavier strokes,
+/// to read as well as it did.
+#[test]
+fn text_that_gets_smaller_is_drawn_heavier() {
+    let tr: Language = "tr".parse().unwrap();
+    let longer = &TWICE_AS_LONG[..TWICE_AS_LONG.find("onlara").unwrap()];
+    let Some(fonts) = fonts_for(&tr, TWICE_AS_LONG) else {
+        return;
+    };
+    let doc = celsus_pdf::Document::load(paragraph_over_a_figure(60, &fonts, &tr)).unwrap();
+    let pages = doc.pages().unwrap();
+    let extracted = extract_page(&doc, &pages[0], 1).unwrap();
+    let block = &extracted.layout.blocks[0];
+    let size = block.style.font_size;
+    let translations = BTreeMap::from([(block.id.clone(), longer.trim().to_string())]);
+    let mut writer = BookWriter::new(&doc, &fonts);
+    let report = writer
+        .translate_page(&pages[0], &extracted, &translations, &tr)
+        .unwrap();
+    assert_eq!(report.replaced.len(), 1, "{:?}", report.kept);
+
+    let back = celsus_pdf::Document::load(writer.finish().unwrap()).unwrap();
+    let back_pages = back.pages().unwrap();
+    let read = extract_page(&back, &back_pages[0], 1).unwrap();
+    assert!(read.layout.blocks[0].style.font_size < size - 0.3);
+    let content =
+        String::from_utf8_lossy(&read.content.data[&celsus_pdf::interp::Source::Page]).into_owned();
+    assert!(!content.contains("W n\n1 0 0 1 0 -"), "nothing moved");
+    assert!(
+        content.contains(" RG ") && content.contains("2 Tr"),
+        "{content}"
+    );
+}
+
+/// The text laid on a scanned page says what the picture shows. It is read as the page's text and known to be
+/// of the scan; text over any other picture is ordinary text.
+#[test]
+fn the_text_layer_of_a_scanned_page_is_read_as_its_text() {
+    let read = |bits: u8| {
+        let doc = celsus_pdf::Document::load(text_on_a_picture(bits)).unwrap();
+        let pages = doc.pages().unwrap();
+        let page = extract_page(&doc, &pages[0], 1).unwrap();
+        let blocks: Vec<String> = page.layout.blocks.iter().map(|b| b.plain()).collect();
+        (blocks, page.scans.len())
+    };
+    assert_eq!(
+        read(1),
+        (vec!["The words of a scanned page".to_string()], 1)
+    );
+    assert_eq!(
+        read(8),
+        (vec!["The words of a scanned page".to_string()], 0)
+    );
+}
+
+/// The words of a scanned page are in its picture and stay there. The translation is written over a cover in
+/// the white of the paper, and the old text layer goes, so that the page is searched in its new language.
+#[test]
+fn a_translation_on_a_scanned_page_covers_the_words_of_the_picture() {
+    let tr: Language = "tr".parse().unwrap();
+    let text = "Taranmış bir sayfanın sözcükleri";
+    let Some(fonts) = fonts_for(&tr, text) else {
+        return;
+    };
+    let doc = celsus_pdf::Document::load(text_on_a_picture(1)).unwrap();
+    let pages = doc.pages().unwrap();
+    let extracted = extract_page(&doc, &pages[0], 1).unwrap();
+    let block = &extracted.layout.blocks[0];
+    let was = block.rect;
+    let translations = BTreeMap::from([(block.id.clone(), text.to_string())]);
+    let mut writer = BookWriter::new(&doc, &fonts);
+    let report = writer
+        .translate_page(&pages[0], &extracted, &translations, &tr)
+        .unwrap();
+    assert_eq!(report.replaced.len(), 1, "{:?}", report.kept);
+    let bytes = writer.finish().unwrap();
+
+    let back = celsus_pdf::Document::load(bytes).unwrap();
+    let back_pages = back.pages().unwrap();
+    let read = extract_page(&back, &back_pages[0], 1).unwrap();
+    let all: Vec<String> = read.layout.blocks.iter().map(|b| b.plain()).collect();
+    assert_eq!(all, [text], "only the translation is the page's text now");
+    // A white rectangle is painted where the line stood, before the new text and after the picture.
+    let content =
+        String::from_utf8_lossy(&read.content.data[&celsus_pdf::interp::Source::Page]).into_owned();
+    let picture = content.find("/Im0 Do").expect("the picture is still drawn");
+    let cover = content.find("1 1 1 rg").expect("a cover in white");
+    let words = content.rfind("BT").expect("the new text");
+    assert!(picture < cover && cover < words, "{content}");
+    // The translation does not go lower than the line it replaces.
+    let now = read.layout.blocks[0].rect;
+    assert!(now.y1 <= was.y1 + 14.0 * 0.3, "{now:?} against {was:?}");
+}

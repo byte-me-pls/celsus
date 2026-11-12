@@ -117,6 +117,8 @@ pub struct PageContent {
     pub runs: Vec<TextRun>,
     pub paths: Vec<PathItem>,
     pub images: Vec<Bounds>,
+    /// Those of the pictures that have one bit a pixel: scanned pages and line art.
+    pub bitonal: Vec<Bounds>,
     pub ops: HashMap<Source, Vec<Op>>,
     /// The decoded content each source's operations were parsed from.
     pub data: HashMap<Source, Vec<u8>>,
@@ -594,7 +596,20 @@ impl Interpreter<'_> {
                     .iter()
                     .map(|&(x, y)| apply(&gs.ctm, x, y))
                     .collect();
-                self.out.images.push(bounds_of(&corners));
+                let bounds = bounds_of(&corners);
+                self.out.images.push(bounds);
+                let one_bit = self
+                    .doc
+                    .get_in(&stream.dict, "BitsPerComponent")
+                    .and_then(|v| v.as_i64())
+                    == Some(1)
+                    || matches!(
+                        self.doc.get_in(&stream.dict, "ImageMask").as_deref(),
+                        Some(Object::Bool(true))
+                    );
+                if one_bit {
+                    self.out.bitonal.push(bounds);
+                }
             }
             Some(b"Form") => {
                 let Some(id) = entry.as_ref() else { return };

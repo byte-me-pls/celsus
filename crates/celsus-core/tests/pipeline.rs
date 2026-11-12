@@ -286,7 +286,8 @@ fn pages_translated_before_are_written_again_without_asking() {
     assert!(run.text[2].starts_with("Eski:"), "{:?}", run.text);
     // Page 2 stays as it was in the original and is reported as missing its text.
     assert_eq!(run.text[1], PAGES[1]);
-    assert_eq!(run.done, [(1, 0), (2, 1), (3, 0)]);
+    // The pages translated before are written first, then the new one.
+    assert_eq!(run.done, [(2, 1), (3, 0), (1, 0)]);
 }
 
 #[test]
@@ -364,4 +365,63 @@ fn a_block_that_gets_no_answer_leaves_its_page_unfinished() {
     assert_eq!(run.outcome.failed, None);
     assert_eq!(run.done, [(1, 1), (2, 1), (3, 0)]);
     assert_eq!(run.text[0], PAGES[0]);
+}
+
+#[test]
+fn the_file_is_handed_out_while_a_long_translation_goes_on() {
+    let to: Language = "tr".parse().unwrap();
+    let Some(fonts) = fonts(&to) else {
+        return;
+    };
+    let provider = Fake {
+        good: usize::MAX,
+        asked: Cell::new(0),
+        then: || TranslateError::Provider("never".into()),
+        stop: None,
+    };
+    let doc = celsus_pdf::Document::load(book(&PAGES)).unwrap();
+    let mut options = Options::new(to);
+    options.retry_secs = 0;
+    // As often as a page is finished.
+    options.written_every = 1;
+    let mut cache: BTreeMap<String, String> = BTreeMap::new();
+    let mut files: Vec<Vec<u8>> = Vec::new();
+    let mut progress = |p: Progress| {
+        if let Progress::Written { bytes } = p {
+            files.push(bytes);
+        }
+        // Each page takes a moment, as a model's answer would.
+        std::thread::sleep(std::time::Duration::from_millis(400));
+    };
+    let (last, outcome) = translate_document(
+        &doc,
+        &fonts,
+        &provider,
+        &options,
+        &mut cache,
+        &mut progress,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(outcome.failed, None);
+    assert!(!files.is_empty(), "no file was handed out on the way");
+    // A file handed out on the way opens, with the pages finished by then in it and the rest as they were.
+    let text = |bytes: &[u8]| -> Vec<String> {
+        let back = celsus_pdf::Document::load(bytes.to_vec()).unwrap();
+        back.pages()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let e = extract_page(&back, p, i as u32 + 1).unwrap();
+                let blocks: Vec<String> = e.layout.blocks.iter().map(|b| b.plain()).collect();
+                blocks.join(" ")
+            })
+            .collect()
+    };
+    let early = text(&files[0]);
+    assert!(early[0].starts_with("Sayfa:"), "{early:?}");
+    assert_eq!(early[2], PAGES[2], "{early:?}");
+    let end = text(&last);
+    assert!(end.iter().all(|t| t.starts_with("Sayfa:")), "{end:?}");
 }

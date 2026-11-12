@@ -596,6 +596,36 @@ class Reader {
       : `${langName(job.target_lang)} · ${RS.liveQueued}`;
   }
 
+  /**
+   * The translated file was written again while its job goes on. The pages on screen are drawn again from the
+   * new file where they stand, so that a page shows its translation as soon as it has one and nothing jumps
+   * under someone who is reading. Pages further away are drawn from the new file when they come into view.
+   */
+  translationWritten(lang) {
+    if (!this.alive) return;
+    // A first translation, or one in a language that is not the one shown, is for the full reload.
+    const path = this.files.outputs[lang];
+    if (this.view.lang !== lang || !path) { readerFilesChanged(); return; }
+    clearTimeout(this.writtenTimer);
+    this.writtenTimer = setTimeout(async () => {
+      // Only the translated file is read again; the original has not changed.
+      const old = openDocs.get(path);
+      openDocs.delete(path);
+      const docs = await Promise.all(this.sources().map(openPdf)).catch(() => null);
+      old?.doc.then((d) => d.destroy()).catch(() => {});
+      if (!docs || !this.alive) return;
+      this.docs = docs;
+      await this.loadTranslated();
+      for (const row of this.rows) {
+        if (this.translated.has(Number(row.el.dataset.page))) row.el.querySelector(".rd-untranslated")?.remove();
+      }
+      for (const p of [...this.drawnRows]) {
+        for (const s of this.rows[p - 1].slots) s.stale = true;
+        this.draw(p);
+      }
+    }, 300);
+  }
+
   /** The translated file was rewritten: load it again and stay on the same page. */
   async reloadTranslation() {
     if (!this.alive) return;
@@ -621,6 +651,9 @@ class Reader {
 
 listen("job-progress", ({ payload: p }) => {
   if (state.route.view === "reader" && reader && p.book_id === reader.book.id) reader.updateLive(p);
+});
+listen("book-written", ({ payload: [bookId, lang] }) => {
+  if (state.route.view === "reader" && reader && bookId === reader.book.id) reader.translationWritten(lang);
 });
 listen("job-updated", ({ payload: job }) => {
   if (state.route.view === "reader" && reader && job.book_id === reader.book.id) {

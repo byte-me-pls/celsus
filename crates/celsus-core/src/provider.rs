@@ -16,6 +16,9 @@ use crate::translate::{
 const LONGEST_WAIT: Duration = Duration::from_secs(600);
 /// How long a translation job waits for a model's answer unless the settings say otherwise, in seconds.
 pub const ANSWER_WAIT: u64 = 180;
+/// The shortest and the longest a job may be told to wait for an answer, in seconds. Shorter than this, no
+/// model would ever be in time.
+pub const ANSWER_WAIT_RANGE: std::ops::RangeInclusive<u64> = 20..=600;
 
 /// Send one JSON request and read the whole answer: status, body, and how long the server asks to wait.
 fn send(

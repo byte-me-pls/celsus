@@ -330,6 +330,8 @@ async fn book_estimate(handle: AppHandle, id: i64, pages: Vec<i64>) -> Res<u64> 
 #[tauri::command]
 async fn save_output(handle: AppHandle, id: i64, lang: String) -> Res<Option<String>> {
     let app = handle.state::<App>();
+    // The language names a file: only a real language tag will do.
+    parse_lang(&lang)?;
     let source = library::output_file(&app.library, id, &lang);
     let title = db::book(&app.db.lock().unwrap(), id)?.title;
     let suggested: String = title

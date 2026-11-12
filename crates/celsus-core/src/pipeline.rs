@@ -39,11 +39,19 @@ pub struct Options {
     /// missing, so that whoever keeps count can stop calling it translated.
     #[serde(default)]
     pub settled: Vec<usize>,
+    /// Hand out the file as it stands this often while pages are being translated, in seconds, so that a long
+    /// translation can be read as it grows. Zero: only at the end.
+    #[serde(default)]
+    pub written_every: u64,
 }
 
 fn default_retry_secs() -> u64 {
     5
 }
+
+/// The least and the most text one request may carry, in characters. A setting outside this is a slip of the
+/// hand: one character a request, or a whole chapter in one.
+pub const BATCH_CHARS: std::ops::RangeInclusive<usize> = 500..=20_000;
 
 impl Options {
     pub fn new(to: Language) -> Self {
@@ -56,6 +64,7 @@ impl Options {
             retry_secs: default_retry_secs(),
             images: Vec::new(),
             settled: Vec::new(),
+            written_every: 0,
         }
     }
 }
@@ -84,6 +93,11 @@ pub enum Progress {
     },
     Note {
         message: String,
+    },
+    /// The file as it stands, with every page translated so far.
+    Written {
+        #[serde(skip)]
+        bytes: Vec<u8>,
     },
 }
 
@@ -437,6 +451,9 @@ pub fn translate_document(
     };
     wanted.sort_unstable();
     wanted.dedup();
+    // The pages translated before come first, so that the file handed out while the others are being
+    // translated has all of them in it.
+    wanted.sort_by_key(|n| !options.settled.contains(n));
     progress(Progress::Started {
         pages: wanted.len(),
     });
@@ -473,6 +490,7 @@ pub fn translate_document(
         cancel,
         offline: false,
     };
+    let mut written = std::time::Instant::now();
     for n in wanted {
         if !session.offline && cancel.load(Ordering::Relaxed) {
             outcome.cancelled = true;
@@ -583,6 +601,15 @@ pub fn translate_document(
             kept: report.kept.len(),
             missing,
         });
+        if options.written_every > 0
+            && !session.offline
+            && written.elapsed() >= Duration::from_secs(options.written_every)
+        {
+            if let Ok(bytes) = writer.snapshot() {
+                (session.progress)(Progress::Written { bytes });
+            }
+            written = std::time::Instant::now();
+        }
     }
     outcome.requests = session.requests;
     outcome.usage = session.usage.clone();

@@ -420,7 +420,8 @@ async function renderBook(id) {
   $("#pic-page").onchange = () => renderPictures(book);
   renderPictures(book);
   $("#b-delete").onclick = async () => {
-    if (!confirm(T.confirmDelete(book.title))) return;
+    // In the app the question is answered later than it is asked: nothing is done before the answer.
+    if (!(await confirm(T.confirmDelete(book.title)))) return;
     await call("book_delete", { id: book.id });
     state.covers.delete(book.id);
     toast(T.deleted);
@@ -698,11 +699,33 @@ function settingsGeneral(box) {
   $("#g-target").onchange = (e) => saveSettings({ target_lang: e.target.value.trim().toLowerCase() || DEFAULT_TARGET });
 }
 
+/** What a number setting may be: the least, the most, and what it is when nothing sensible is typed. */
+const NUMBER_SETTINGS = { batch_chars: [500, 20000, 5000], answer_wait: [20, 600, 180] };
+
 function settingsSimple(box, fields, extra = "") {
-  box.innerHTML = `<section class="card">${fields.map(([k, label, hint, type]) => `
-    <div class="setting-row"><div><h3>${label}</h3><p>${hint}</p></div><input data-key="${k}" type="${type}" value="${esc(state.settings[k])}"></div>`).join("")}${extra}
+  box.innerHTML = `<section class="card">${fields.map(([k, label, hint, type]) => {
+    const [min, max] = NUMBER_SETTINGS[k] || [];
+    return `
+    <div class="setting-row"><div><h3>${label}</h3><p>${hint}</p></div><input data-key="${k}" type="${type}" ${min ? `min="${min}" max="${max}"` : ""} value="${esc(state.settings[k])}"></div>`;
+  }).join("")}${extra}
     <div class="form-actions"><button class="primary-button" id="s-save">${T.save}</button></div></section>`;
-  $("#s-save").onclick = () => saveSettings(Object.fromEntries($$("[data-key]", box).map((i) => [i.dataset.key, i.value.trim()])));
+  $("#s-save").onclick = () => {
+    const values = {};
+    for (const field of $$("[data-key]", box)) {
+      let value = field.value.trim();
+      const limits = NUMBER_SETTINGS[field.dataset.key];
+      if (limits) {
+        // A number that is no number, or out of all proportion, would break every job: it is put right here,
+        // and the field shows what was saved.
+        const [min, max, usual] = limits;
+        const n = Math.round(Number(value));
+        value = String(Number.isFinite(n) && value !== "" ? Math.min(max, Math.max(min, n)) : usual);
+        field.value = value;
+      }
+      values[field.dataset.key] = value;
+    }
+    saveSettings(values);
+  };
 }
 
 const TASKS = () => [
@@ -811,6 +834,8 @@ async function settingsModels(box) {
     };
     $("[data-save]", row).onclick = async () => {
       const p = provider();
+      // A connection without a model is nothing to save: the field is waiting for one.
+      if (p && !input.value.trim()) { input.focus(); return; }
       await call("task_model_set", { task, providerId: p ? p.id : null, model: p ? input.value.trim() : "" });
       toast(T.settingsSaved);
       refreshProfile();
@@ -836,7 +861,7 @@ async function apiConnections(box) {
   for (const b of $$("[data-edit]", box)) b.onclick = () => connectionForm(providers.find((p) => p.id === Number(b.dataset.edit)));
   for (const b of $$("[data-remove]", box)) b.onclick = async () => {
     const p = providers.find((x) => x.id === Number(b.dataset.remove));
-    if (!confirm(T.confirmRemoveModel(p.name))) return;
+    if (!(await confirm(T.confirmRemoveModel(p.name)))) return;
     await call("provider_delete", { id: p.id });
     modelLists.delete(p.id);
     refreshProfile();
@@ -931,7 +956,7 @@ async function settingsStorage(box) {
       <dt>${T.cache}</dt><dd>${T.cacheText(s.cached_translations, s.cached_chars)}</dd></dl>
     <div class="form-actions"><button class="quiet-button danger" id="c-clear">${T.clearCache}</button></div></section>`;
   $("#c-clear").onclick = async () => {
-    if (!confirm(T.confirmClear)) return;
+    if (!(await confirm(T.confirmClear))) return;
     await call("cache_clear");
     toast(T.cleared);
     settingsStorage(box);
@@ -994,7 +1019,7 @@ async function mcpCard(box) {
     };
     const remove = $("[data-mcp-remove]", el);
     if (remove) remove.onclick = async () => {
-      if (!confirm(T.mcpConfirmRemove(c.name))) return;
+      if (!(await confirm(T.mcpConfirmRemove(c.name)))) return;
       await call("mcp_client_remove", { id });
       toast(T.mcpRemoved(c.name));
       mcpCard(box);

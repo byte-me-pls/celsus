@@ -111,6 +111,19 @@ fn worker(app: AppHandle, db_path: &Path, library: &Path, wake: Receiver<()>, cu
     }
 }
 
+/// Write the translated book. It is written beside the old file and swapped in, so a crash cannot leave half
+/// a PDF.
+fn write_output(output: &Path, bytes: &[u8]) -> Result<(), String> {
+    let part = output.with_extension("pdf.part");
+    std::fs::write(&part, bytes).map_err(|e| e.to_string())?;
+    if std::fs::rename(&part, output).is_err() {
+        // The old file is open somewhere; write over it instead.
+        std::fs::write(output, bytes).map_err(|e| e.to_string())?;
+        let _ = std::fs::remove_file(&part);
+    }
+    Ok(())
+}
+
 /// Run one job. `Ok(true)` means it was cancelled part way (what was done is kept).
 fn run(
     app: &AppHandle,
@@ -133,7 +146,13 @@ fn run(
     .stopped_by(cancel.clone())
     .answers_within(
         db::setting(conn, "answer_wait")?
-            .and_then(|v| v.parse().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|v| {
+                v.clamp(
+                    *celsus_core::provider::ANSWER_WAIT_RANGE.start(),
+                    *celsus_core::provider::ANSWER_WAIT_RANGE.end(),
+                )
+            })
             .unwrap_or(celsus_core::provider::ANSWER_WAIT),
     );
 
@@ -152,8 +171,11 @@ fn run(
     options.book.title = book.title.clone();
     options.book.subject = book.subject.clone();
     options.images = library::redrawn_images(library, book.id, &job.target_lang);
-    if let Some(n) = db::setting(conn, "batch_chars")?.and_then(|v| v.parse().ok()) {
-        options.batch_chars = n;
+    if let Some(n) = db::setting(conn, "batch_chars")?.and_then(|v| v.parse::<usize>().ok()) {
+        options.batch_chars = n.clamp(
+            *celsus_core::pipeline::BATCH_CHARS.start(),
+            *celsus_core::pipeline::BATCH_CHARS.end(),
+        );
     }
     // This job's pages, plus every page translated before, so the output holds all of them.
     let wanted: BTreeSet<i64> = job.pages.iter().copied().collect();
@@ -168,6 +190,10 @@ fn run(
     let todo: BTreeSet<i64> = wanted.difference(&translated).copied().collect();
     // Pages translated before are only written again: nothing is asked, and so nothing is paid, for them.
     options.settled = all.difference(&todo).map(|&p| p as usize).collect();
+    // The file is written every few seconds while the job runs, so that a page shown as translated is
+    // translated in the reader too, long before the job ends.
+    options.written_every = 5;
+    let output = library::output_file(library, book.id, &job.target_lang);
 
     let total = wanted.len();
     let mut done = wanted.len() - todo.len();
@@ -232,6 +258,12 @@ fn run(
                     &model,
                 );
             }
+            Progress::Written { bytes } => {
+                if write_output(&output, &bytes).is_ok() {
+                    let _ = app.emit("book-written", (book.id, &job.target_lang));
+                }
+                return;
+            }
             Progress::PageStarted { page: n, .. } => page = n,
             Progress::Waiting { seconds } => message = Some(format!("wait:{seconds}")),
             Progress::Note { message: m } => message = Some(m),
@@ -275,15 +307,7 @@ fn run(
     )?;
     // A run that stopped early still has its finished pages; only one that wrote nothing leaves the file alone.
     if outcome.pages > 0 {
-        let output = library::output_file(library, book.id, &job.target_lang);
-        // Written beside the old file and swapped in, so a crash cannot leave half a PDF.
-        let part = output.with_extension("pdf.part");
-        std::fs::write(&part, &bytes).map_err(|e| e.to_string())?;
-        if std::fs::rename(&part, &output).is_err() {
-            // The old file is open somewhere; write over it instead.
-            std::fs::write(&output, &bytes).map_err(|e| e.to_string())?;
-            let _ = std::fs::remove_file(&part);
-        }
+        write_output(&output, &bytes)?;
     }
     // The interface has words of its own for a model that stayed silent.
     if outcome.no_answer {

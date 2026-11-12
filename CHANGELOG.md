@@ -2,6 +2,43 @@
 
 Versions are 0.YYMM.N: year and month of the release, then a counter for further releases in that month.
 
+## Unreleased
+
+- **Translated pages show while the job runs.** The translated book used to be written only when a job ended or
+  was stopped, so a page marked as translated still showed the original until then. It is written every few
+  seconds now, with every page finished so far, and the reader loads the new pages by itself: at once for the
+  pages in view, otherwise when you turn the page. On the server too.
+- **Pages are looked at.** Before a translation is placed, the page is drawn the way a reader sees it, and
+  what is on it besides the text to translate is found by looking: figures, rules, listings, the drawings of a
+  scanned page. It takes about a fiftieth of a second a page. A page that cannot be drawn is placed by what its
+  content says, as before.
+- **Figures make room.** A translation that needs more lines than its original used to get smaller as soon as
+  a figure, a listing or a rule stood under it. Now what stands under it goes down as it is, with its caption
+  and the text inside it, as far as the page has room, and only then does the text get smaller. The old place is
+  painted over with the paper around it. Not yet on pages whose columns change places for a language read from
+  right to left.
+- **Text stays together.** Paragraphs that follow one another without a blank line are one run of text, and a
+  listing or a figure set into it is part of the run. When a translation comes out shorter than its original,
+  what follows it closes up, so that no hole opens in the middle of the text; a page ends a little earlier
+  instead. And a block that is short of room goes up into room left above it before it is made smaller. Before
+  this, one paragraph that needed a line more could make all the text of a page smaller while other paragraphs
+  left white space behind them.
+- **A short paragraph is not centred by mistake.** Two lines, the first indented and ending short of the margin,
+  were taken for centred lines and their translation was centred.
+- **Smaller text stays readable.** Text that had to be set smaller than its original is drawn with slightly
+  heavier strokes and, where it was not black, a little darker, the more so the smaller it got.
+- **Scanned books that carry their text.** A book scanned in black and white, with the text laid on its pages
+  for searching, can be translated. The text is read from that layer, visible or not; the words in the picture
+  are covered with the white of the paper, exactly where their ink is seen, and the translation is written over
+  them. Figures are found by looking at the page, so text grows into free room and moves figures as it does in
+  any other book; only text inside a figure stays where it was. Code and whatever else is not translated stays
+  as the picture shows it. Before this, such a translation was written on top of the picture's own words.
+  Scans in grey or colour, and scans without a text layer, are still not read.
+- **Questions are asked before, not after.** Deleting a book, removing a connection, clearing the cache and
+  disconnecting a chat app went ahead without waiting for the answer to "are you sure?". They wait now.
+- **Settings that cannot break a job.** The number settings stay within sensible limits whatever is typed, and
+  a connection without a model is not saved as a choice.
+
 ## 0.2611.3 (2026-11-12)
 
 - **Starting out.** Translating without a model no longer answers with a code: the app says that a model is

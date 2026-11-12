@@ -101,6 +101,7 @@ fn ids_max(entries: &BTreeMap<u32, XrefEntry>, packed: &[(u32, Vec<u8>)]) -> u32
 }
 
 /// Changes to a document, saved as a new file.
+#[derive(Clone)]
 pub struct Saver<'d> {
     doc: &'d Document,
     changed: BTreeMap<u32, Object>,

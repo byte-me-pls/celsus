@@ -3,7 +3,7 @@
 //! Glyphs are joined into lines and lines into blocks using geometry only. Ruled lines, boxes and images act as
 //! walls: text on two sides of a table rule, or inside two different diagram boxes, never ends up in one block.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use celsus_pdf::interp::{self, PageContent};
 use celsus_pdf::{Document, Page};
@@ -26,6 +26,9 @@ pub struct ExtractedPage {
     pub glyphs: HashMap<BlockId, Vec<GlyphRef>>,
     /// Drawings and images (top-left coordinates) that new text must not run into.
     pub obstacles: Vec<Rect>,
+    /// Blocks read from the text layer of a scanned page. The words to be seen are in the picture under them:
+    /// to put a translation there, the picture's words are covered first.
+    pub scans: HashSet<BlockId>,
     pub content: PageContent,
 }
 
@@ -171,19 +174,42 @@ pub fn extract_page_in(
     };
 
     // Visible, horizontal glyphs. Rotated text is kept as its own protected blocks.
+    //
+    // A scanned page is a picture of the page with its text laid on it, for searching: some of it invisible,
+    // some drawn over the picture's own words. Both kinds are the text of that page. They are read like any
+    // other text, and remembered as lying on a scan.
+    let on_scan = |b: &[f32; 4]| {
+        let (x, y) = ((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0);
+        content
+            .bitonal
+            .iter()
+            .any(|s| x >= s[0] && x <= s[2] && y >= s[1] && y <= s[3])
+    };
     let mut glyphs = Vec::new();
+    let mut scan_glyphs: HashSet<GlyphRef> = HashSet::new();
     let mut rotated_runs = Vec::new();
     for (ri, run) in content.runs.iter().enumerate() {
-        if matches!(run.render_mode, 3 | 7) || run.size < 1.0 {
+        if run.render_mode == 7 || run.size < 1.0 {
             continue;
         }
+        let hidden = run.render_mode == 3;
         if run.angle.abs() > 0.02 {
-            rotated_runs.push(ri);
+            if !hidden {
+                rotated_runs.push(ri);
+            }
             continue;
         }
         for (gi, g) in run.glyphs.iter().enumerate() {
             if g.text.is_empty() || !g.visible {
                 continue;
+            }
+            let scan = on_scan(&g.bounds);
+            // Invisible text anywhere else is not part of what the page shows.
+            if hidden && !scan {
+                continue;
+            }
+            if scan {
+                scan_glyphs.insert(GlyphRef { run: ri, glyph: gi });
             }
             glyphs.push(G {
                 space: g.text.chars().all(char::is_whitespace),
@@ -254,8 +280,16 @@ pub fn extract_page_in(
         }
     }
     let pictures = containers.len();
-    for b in &content.images {
-        let r = to_rect(*b);
+    // A scanned picture is the page itself, not something on it that text stands in or runs around.
+    let pictures_on_the_page = || {
+        content
+            .images
+            .iter()
+            .copied()
+            .filter(|b| !content.bitonal.contains(b))
+    };
+    for b in pictures_on_the_page() {
+        let r = to_rect(b);
         if r.width() * r.height() < page_area * 0.7 {
             containers.push(r);
         }
@@ -264,7 +298,7 @@ pub fn extract_page_in(
     for b in drawn()
         .filter(|(p, _)| p.stroked || p.fill != [255, 255, 255])
         .map(|(_, b)| b)
-        .chain(content.images.iter().copied())
+        .chain(pictures_on_the_page())
     {
         let r = to_rect(b);
         if r.width() * r.height() < page_area * 0.7
@@ -962,9 +996,27 @@ pub fn extract_page_in(
     // Nor do two lines show whether the second hangs under the first or is centred under it. The entries of
     // a list begin at one edge; a label under a drawing shares its edge with nothing.
     let lefts: Vec<f32> = blocks.iter().map(|b| b.rect.x0).collect();
+    // And a paragraph of two lines whose first line is indented and stops short of the margin by about as
+    // much looks centred, line for line. It is a paragraph when the longer paragraphs of the page begin the
+    // same way: their first lines where its first line begins, their other lines where its second does.
+    let indented: Vec<(f32, f32)> = blocks
+        .iter()
+        .filter(|b| b.lines.len() >= 3 && !b.protected)
+        .map(|b| (b.lines[0].rect.x0, b.lines[1].rect.x0))
+        .collect();
     for (i, b) in blocks.iter_mut().enumerate() {
         if b.lines.len() != 2 || b.protected {
             continue;
+        }
+        if b.align == Align::Center {
+            let (first, second) = (b.lines[0].rect.x0, b.lines[1].rect.x0);
+            if first > second + b.style.font_size * 0.4
+                && indented
+                    .iter()
+                    .any(|(f, rest)| (f - first).abs() < 1.0 && (rest - second).abs() < 1.0)
+            {
+                b.align = Align::Left;
+            }
         }
         if b.align == Align::Justify && !edges.iter().any(|x1| (x1 - b.rect.x1).abs() < 1.5) {
             b.align = Align::Left;
@@ -1040,6 +1092,14 @@ pub fn extract_page_in(
             ocr: false,
             blocks,
         },
+        // A block is of the scan when most of its glyphs lie on it.
+        scans: refs
+            .iter()
+            .filter(|(_, list)| {
+                list.iter().filter(|g| scan_glyphs.contains(g)).count() * 2 > list.len()
+            })
+            .map(|(id, _)| id.clone())
+            .collect(),
         glyphs: refs,
         obstacles,
         content,

@@ -38,9 +38,11 @@ All three share the same engine and give the same pages.
 3. **A model translates block by block.** Each block goes to the model you chose with a little of the text around
    it. Every answer is checked on your computer: a missing number, a sentence left untranslated, an added comment
    or a list with the wrong number of lines sends the block back with the reason.
-4. **It puts the page together again.** All the blocks of a page are placed at once. A translation that is longer
-   than the original first takes the room the page has, then tighter lines, then smaller type: never below 70% of
-   the original size or 6 pt.
+4. **It puts the page together again.** The page is looked at as a reader sees it, to know where its figures,
+   rules and listings are, and all its blocks are placed at once. A translation that is longer than the original
+   first takes the room the page has, moving the paragraphs and the figures under it down as they are; then
+   tighter lines, then smaller type, drawn a little heavier so that it still reads well: never below 70% of the
+   original size or 6 pt.
 5. **Nothing is cut off.** A block that still does not fit keeps its original text and is listed in the job's
    report, so you know exactly where to look.
 
@@ -71,7 +73,9 @@ It also has a fast built-in reader with a side-by-side view of original and tran
 ## What it does not do yet
 
 - **PDF only.** EPUB and other formats are not read.
-- **No scanned books.** A page that is only a photograph of text has no text to read; Celsus does not do OCR.
+- **Scanned books only when they carry their text.** A book scanned in black and white that can be searched
+  has its text laid on the pages, and Celsus translates it from there. A scan in grey or colour, or one that
+  is only pictures, is not read yet: Celsus does not do OCR.
 - **Styles inside a paragraph** are kept for left-to-right languages. A right-to-left translation keeps the style
   of its block.
 - **Typeface matching** covers the Latin, Cyrillic and Greek alphabets. Other scripts are written with the system's
@@ -162,8 +166,9 @@ endpoint. Translation, book details and picture redrawing can each use a differe
 usually enough for the text.
 
 **Which PDFs work?**
-PDFs with real text in them: books from publishers, papers, manuals, anything you can select text in. Scans that
-are only pictures do not.
+PDFs with real text in them: books from publishers, papers, manuals, anything you can select text in. Scanned
+books work when they are in black and white and carry their text (you can search them); scans that are only
+pictures do not.
 
 **May I translate any book?**
 Celsus is a tool for books you have the right to translate: your own, public-domain ones, or for your own reading
@@ -226,4 +231,5 @@ Tests for writing every script use the fonts installed on the system (`C:\Window
 ## Licence
 
 Celsus is released under the [MIT licence](LICENSE). It bundles pdf.js (Apache-2.0) and the DM Sans and Instrument
-Serif fonts (SIL Open Font License 1.1); their licences are next to them in `crates/celsus-desktop/ui/`.
+Serif fonts (SIL Open Font License 1.1); their licences are next to them in `crates/celsus-desktop/ui/`. Pages are
+drawn for looking at with [hayro](https://github.com/LaurenzV/hayro) (Apache-2.0 or MIT).

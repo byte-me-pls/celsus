@@ -222,7 +222,13 @@ async fn run_job(state: &AppState, id: &str, cancel: Arc<AtomicBool>) -> Result<
         .answers_within(
             db_setting(state, "answer_wait")
                 .await
-                .and_then(|v| v.parse().ok())
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(|v| {
+                    v.clamp(
+                        *celsus_core::provider::ANSWER_WAIT_RANGE.start(),
+                        *celsus_core::provider::ANSWER_WAIT_RANGE.end(),
+                    )
+                })
                 .unwrap_or(celsus_core::provider::ANSWER_WAIT),
         );
     let model = client.model.clone();
@@ -234,9 +240,12 @@ async fn run_job(state: &AppState, id: &str, cancel: Arc<AtomicBool>) -> Result<
     options.from = book.get::<_, String>(2).parse().ok();
     if let Some(n) = db_setting(state, "batch_chars")
         .await
-        .and_then(|v| v.parse().ok())
+        .and_then(|v| v.parse::<usize>().ok())
     {
-        options.batch_chars = n;
+        options.batch_chars = n.clamp(
+            *celsus_core::pipeline::BATCH_CHARS.start(),
+            *celsus_core::pipeline::BATCH_CHARS.end(),
+        );
     }
     options.book.title = book.get(0);
     options.book.subject = book.get(1);
@@ -261,6 +270,9 @@ async fn run_job(state: &AppState, id: &str, cancel: Arc<AtomicBool>) -> Result<
         .copied()
         .filter(|p| !todo.contains(p))
         .collect();
+    // The file is written every few seconds while the job runs, so that a page shown as translated is
+    // translated in the reader too, long before the job ends.
+    options.written_every = 5;
     let already = (wanted.len() - todo.len()) as i32;
     let unmark: Vec<i32> = todo.iter().map(|&p| p as i32).collect();
 
@@ -271,6 +283,7 @@ async fn run_job(state: &AppState, id: &str, cancel: Arc<AtomicBool>) -> Result<
     // Pictures redrawn for this language stay in every new version of the book.
     options.images = library::redrawn_images(&state.config, &book_id, &lang);
     let lock_book = book_id.clone();
+    let (written_to, written_book, written_lang) = (output.clone(), book_id.clone(), lang.clone());
     let cache_book = book_id.clone();
     let lock_lang = lang.clone();
     let st = state.clone();
@@ -294,6 +307,16 @@ async fn run_job(state: &AppState, id: &str, cancel: Arc<AtomicBool>) -> Result<
         // Blocks of text the pages of this job had to translate.
         let mut texts = 0usize;
         let mut progress = |p: Progress| {
+            if let Progress::Written { bytes } = &p {
+                handle.block_on(async {
+                    // Next to the old file and swapped in, so readers never see half a PDF.
+                    let _guard = st.outputs.lock(&written_book, &written_lang).await;
+                    let tmp = written_to.with_extension("pdf.part");
+                    if tokio::fs::write(&tmp, bytes).await.is_ok() {
+                        let _ = tokio::fs::rename(&tmp, &written_to).await;
+                    }
+                });
+            }
             if let Progress::PageDone { page, translated, kept, missing, .. } = p {
                 if todo.contains(&page) {
                     texts += translated + missing;

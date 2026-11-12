@@ -21,7 +21,7 @@ use crate::extract::{ExtractedPage, GlyphRef};
 use crate::fit::Measure;
 use crate::fonts::FontSet;
 use crate::inline;
-use crate::layout::{BlockId, TextBlock};
+use crate::layout::{BlockId, Rect, TextBlock};
 use crate::mirror;
 use crate::place;
 use crate::shape::Shaper;
@@ -53,7 +53,23 @@ pub struct BookWriter<'d> {
     embedders: HashMap<usize, (FontEmbedder, ObjRef)>,
     /// Form XObjects already rewritten (shared forms are edited once).
     forms_done: BTreeSet<ObjRef>,
+    /// Looks at the pages, from the first page that is written on.
+    eye: std::cell::OnceCell<crate::see::Eye>,
 }
+
+/// On a page with more bodies than this, none is moved: it is a page of many small things, not of figures.
+const MOST_BODIES: usize = 80;
+
+/// On a page whose content is longer than this, nothing is moved.
+const HEAVY_CONTENT: usize = 2_000_000;
+
+/// A page with a picture of more pixels than this is not looked at: drawing the page means unpacking the
+/// picture whole, which takes four bytes a pixel. A page scanned at 600 dots to the inch has fewer.
+const MOST_PICTURE: i64 = 40_000_000;
+
+/// Text set smaller than it was is drawn with a pen around its letters, this wide for every point of size it
+/// lost. A typeface cut for small sizes is heavier by about as much.
+const PEN: f32 = 0.04;
 
 impl<'d> BookWriter<'d> {
     pub fn new(doc: &'d Document, fonts: &FontSet) -> Self {
@@ -65,6 +81,7 @@ impl<'d> BookWriter<'d> {
             saver: Saver::new(doc),
             embedders: HashMap::new(),
             forms_done: BTreeSet::new(),
+            eye: std::cell::OnceCell::new(),
         }
     }
 
@@ -295,6 +312,88 @@ impl<'d> BookWriter<'d> {
             .iter()
             .map(|e| Styled::new(fonts, &e.chains, rtl && !e.companion))
             .collect();
+        // The page as a reader sees it: what is on it besides the text to place. A page whose columns change
+        // places, or that is shown turned, is taken the way its content describes it.
+        let lines: Vec<Rect> = entries
+            .iter()
+            .flat_map(|e| e.block.lines.iter().map(|l| l.rect))
+            .collect();
+        let pictures_fit = || {
+            let Some(objects) = self.doc.get_in(&page.resources, "XObject") else {
+                return true;
+            };
+            let Some(objects) = objects.as_dict() else {
+                return true;
+            };
+            objects.values().all(|o| {
+                let Ok(o) = self.doc.resolve(o) else {
+                    return true;
+                };
+                let Object::Stream(s) = &*o else {
+                    return true;
+                };
+                let side = |key: &str| {
+                    self.doc
+                        .get_in(&s.dict, key)
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0)
+                        .max(0)
+                };
+                side("Width").saturating_mul(side("Height")) <= MOST_PICTURE
+            })
+        };
+        let picture =
+            (plan.is_none() && page.rotate % 360 == 0 && !lines.is_empty() && pictures_fit())
+                .then(|| {
+                    let eye = self.eye.get_or_init(|| {
+                        let pages = self.doc.pages().map_or(0, |p| p.len());
+                        crate::see::Eye::open(&self.doc.data, pages)
+                    });
+                    eye.look(layout.page as usize - 1, layout.width, layout.height)
+                })
+                .flatten();
+        let staying: Vec<Rect> = layout
+            .blocks
+            .iter()
+            .filter(|b| !entries.iter().any(|e| e.block.id == b.id))
+            .map(|b| b.rect)
+            .collect();
+        // What it shows: where the ink of each line really is, the rows of dots that lead on from lines, and
+        // the bodies. A picture that does not show the text where the content has it is not a picture of this
+        // page as it will be read, and is not gone by.
+        let seen = picture
+            .map(|p| (p.find(&lines, &staying), p))
+            .filter(|(seen, _)| seen.inks.iter().flatten().count() * 2 >= lines.len());
+        let (picture, inks, leaders, found) = match seen {
+            Some((seen, p)) => (Some(p), seen.inks, seen.leaders, seen.bodies),
+            None => (None, Vec::new(), Vec::new(), Vec::new()),
+        };
+        let papers: Vec<Option<[u8; 3]>> = found
+            .iter()
+            .map(|r| picture.as_ref().and_then(|p| p.paper_around(r)))
+            .collect();
+        // The content of the page is written once more for each distance something moves down.
+        let light = extracted
+            .content
+            .data
+            .get(&Source::Page)
+            .is_none_or(|d| d.len() <= HEAVY_CONTENT);
+        let bodies: Vec<place::Body> = found
+            .iter()
+            .zip(&papers)
+            .map(|(rect, paper)| place::Body {
+                rect: *rect,
+                movable: paper.is_some() && found.len() <= MOST_BODIES && light,
+            })
+            .collect();
+        // On a scanned page nothing but the picture says where the figures are.
+        let seen_obstacles: Vec<Rect>;
+        let obstacles = if extracted.scans.is_empty() || picture.is_none() {
+            obstacles
+        } else {
+            seen_obstacles = obstacles.iter().chain(&found).copied().collect();
+            seen_obstacles.as_slice()
+        };
         let items: Vec<place::Item> = entries
             .iter()
             .zip(&shapers)
@@ -314,10 +413,40 @@ impl<'d> BookWriter<'d> {
                             ..cap.rect
                         }
                     }),
+                // What a scanned figure holds inside its box is not known: text in there stays in its place.
+                confined: extracted.scans.contains(&e.block.id)
+                    && (picture.is_none()
+                        || bodies
+                            .iter()
+                            .any(|body| place::within(&body.rect, &e.block.rect))),
             })
             .collect();
-        let placed = place::solve(layout, obstacles, &items, rtl);
+        let solved = place::solve_among(layout, obstacles, &bodies, &items, rtl);
         drop(items);
+        let placed = solved.placed;
+        // The bodies that moved: where each was, with a point of the paper around it, how far down it went (or
+        // up, counted below nothing), and the colour of the paper it leaves behind.
+        let lowered = |r: &Rect, by: f32| Rect {
+            y0: r.y0 + by,
+            y1: r.y1 + by,
+            ..*r
+        };
+        let moves: Vec<(Rect, f32, [u8; 3])> = bodies
+            .iter()
+            .zip(&solved.moved)
+            .zip(&papers)
+            .filter(|((_, by), _)| by.abs() > 0.3)
+            .map(|((body, by), paper)| {
+                let r = &body.rect;
+                let was = Rect {
+                    x0: r.x0 - 1.0,
+                    y0: r.y0 - 1.0,
+                    x1: r.x1 + 1.0,
+                    y1: r.y1 + 1.0,
+                };
+                (was, *by, paper.unwrap_or([255; 3]))
+            })
+            .collect();
 
         // New text. Each block is drawn where its original text was drawn (right after the text object that held
         // it), so it keeps its depth: text that a later drawing covered stays covered.
@@ -325,11 +454,21 @@ impl<'d> BookWriter<'d> {
         let content = &extracted.content;
         let mut removals: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
         let mut drawn_last = String::new();
+        // The white that covers the words of a scanned picture where translations go. All of it is laid down
+        // before any of the new text, so that no cover falls on a translation written just before it.
+        let mut whites = String::new();
+        // The same for text that stands inside a body that moved: laid down once the body is in its new place.
+        let mut whites_after = String::new();
         let mut insertions: Vec<Insertion> = Vec::new();
         let mut used_faces = BTreeSet::new();
         let mut drawn = 0usize;
-        for ((entry, shaper), placed) in entries.iter().zip(&shapers).zip(&placed) {
+        let mut first_line = 0usize;
+        for (k, ((entry, shaper), placed)) in entries.iter().zip(&shapers).zip(&placed).enumerate()
+        {
             let b = entry.block;
+            let line0 = first_line;
+            first_line += b.lines.len();
+            let carried = solved.carried[k];
             let Some(placed) = placed else {
                 if !entry.companion {
                     report.kept.push(Issue::DoesNotFit { id: b.id.clone() });
@@ -367,7 +506,23 @@ impl<'d> BookWriter<'d> {
                 .collect();
             // Text of a column that moved is drawn after the page's own content as well: the place its original
             // was drawn in belongs to the column, and that is drawn somewhere else.
-            let at = if in_column.contains(&b.id) {
+            // So is text read from a scanned page: it goes on top of the picture, over the picture's own words.
+            let scan = extracted.scans.contains(&b.id);
+            // And text in or near the old or the new place of a body that moved: the paper painted over the old
+            // place, and the body drawn in its new one, come after the page's own content.
+            let reach = placed.lines.iter().fold(b.rect, |r, l| {
+                r.union(&Rect {
+                    x0: l.x,
+                    y0: l.baseline - size,
+                    x1: l.x + l.width,
+                    y1: l.baseline + size * 0.3,
+                })
+            });
+            let by_a_move = carried > 0.3
+                || moves
+                    .iter()
+                    .any(|(was, by, _)| was.union(&lowered(was, *by)).overlaps(&reach, -2.0));
+            let at = if in_column.contains(&b.id) || scan || by_a_move {
                 None
             } else {
                 insertion_point(content, refs)
@@ -383,8 +538,23 @@ impl<'d> BookWriter<'d> {
                         && !covers.iter().any(|p| touches(p, &ink))
                 })
             });
+            // Smaller letters have thinner strokes and look paler than the text around them. They are drawn a
+            // little heavier and a little darker, the more so the smaller they got, so that they read as well as
+            // they did.
+            let lost = (b.style.font_size - size).max(0.0);
+            let pen = if lost > b.style.font_size * 0.02 {
+                PEN * lost
+            } else {
+                0.0
+            };
+            let darker = if pen > 0.0 {
+                f64::from(size / b.style.font_size)
+            } else {
+                1.0
+            };
             let ink = |c: u32| {
-                [(c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF].map(|v| real(f64::from(v) / 255.0))
+                [(c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF]
+                    .map(|v| real(f64::from(v) / 255.0 * darker))
             };
             let rgb = ink(b.style.color);
             // Inserted right after an operator: start on a new line so the two never run together.
@@ -394,16 +564,88 @@ impl<'d> BookWriter<'d> {
             {
                 writeln!(draw, "{} cm", inv.map(real).join(" ")).unwrap();
             }
+            if scan {
+                // The words of the original are in the picture and cannot be taken out of it: they are covered
+                // with the white of the paper, each line with a little room around it for the strokes that reach
+                // above and below. A page scanned in one bit a pixel has no other white.
+                // Where the page was looked at, the cover is the box of the ink that was seen there.
+                let (dx, dy) = (b.style.font_size * 0.3, b.style.font_size * 0.22);
+                let out = if carried > 0.3 {
+                    &mut whites_after
+                } else {
+                    &mut whites
+                };
+                for (n, line) in b.lines.iter().enumerate() {
+                    let r = match inks.get(line0 + n) {
+                        Some(Some(ink)) => Rect {
+                            x0: ink.x0.min(line.rect.x0) - 1.0,
+                            y0: ink.y0.min(line.rect.y0) - 1.0,
+                            x1: ink.x1.max(line.rect.x1) + 1.0,
+                            y1: ink.y1.max(line.rect.y1) + 1.0,
+                        },
+                        Some(None) => line.rect,
+                        None => Rect {
+                            x0: line.rect.x0 - dx,
+                            y0: line.rect.y0 - dy,
+                            x1: line.rect.x1 + dx,
+                            y1: line.rect.y1 + dy,
+                        },
+                    };
+                    let mut cover = |r: &Rect| {
+                        writeln!(
+                            out,
+                            "{} {} {} {} re",
+                            real(cx0 + f64::from(r.x0)),
+                            real(cy1 - f64::from(r.y1 + carried)),
+                            real(f64::from(r.x1 - r.x0)),
+                            real(f64::from(r.y1 - r.y0))
+                        )
+                        .unwrap();
+                    };
+                    cover(&r);
+                    // A row of dots that led on from the line gives way to a longer line: as much of it is
+                    // covered as the new text takes, and a little more, so that the dots begin after a space.
+                    if let Some(Some(dots)) = leaders.get(line0 + n) {
+                        let reach = placed
+                            .lines
+                            .iter()
+                            .filter(|l| {
+                                let foot = l.baseline - placed.shift;
+                                foot > dots.y0 - size && foot < dots.y1 + size * 0.5
+                            })
+                            .map(|l| l.x + l.width + size * 0.4)
+                            .fold(0.0, f32::max);
+                        if reach > dots.x0 {
+                            cover(&Rect {
+                                x0: dots.x0 - 1.0,
+                                y0: dots.y0 - 1.0,
+                                x1: reach.min(dots.x1 + 1.0),
+                                y1: dots.y1 + 1.0,
+                            });
+                        }
+                    }
+                }
+            }
             // Text state is part of the graphics state the original may have left set.
             writeln!(
                 draw,
-                "{} {} {} rg 0 Tc 0 Tw {} Tz 0 Ts 0 Tr BT",
+                "{} {} {} rg 0 Tc 0 Tw {} Tz 0 Ts 0 Tr",
                 rgb[0],
                 rgb[1],
                 rgb[2],
                 real(f64::from(squeeze * 100.0))
             )
             .unwrap();
+            if pen > 0.0 {
+                writeln!(
+                    draw,
+                    "{} RG {} w 1 j [] 0 d",
+                    rgb.join(" "),
+                    real(f64::from(pen))
+                )
+                .unwrap();
+            }
+            draw.push_str("BT\n");
             if let Some(cap) = b.initial.filter(|_| !entry.initial.is_empty()) {
                 let shaped = shaper.of(0).shape_line(&entry.initial, cap.size);
                 let (px, py) = (
@@ -419,6 +661,10 @@ impl<'d> BookWriter<'d> {
                     write_run(&mut draw, run, font, embedder, cap.size, 0.0);
                 }
                 writeln!(draw, "{} Tz", real(f64::from(squeeze * 100.0))).unwrap();
+            }
+            // The pen is for the text that got smaller, not for an initial that kept its size.
+            if pen > 0.0 {
+                draw.push_str("2 Tr\n");
             }
             // Words set apart inside the block may have a colour of their own.
             let mut colour = b.style.color;
@@ -454,7 +700,12 @@ impl<'d> BookWriter<'d> {
                         .map_or(b.style.color, |s| s.color);
                     if wanted != colour && !piece.runs.is_empty() {
                         colour = wanted;
-                        writeln!(draw, "{} rg", ink(colour).join(" ")).unwrap();
+                        let c = ink(colour).join(" ");
+                        if pen > 0.0 {
+                            writeln!(draw, "{c} rg {c} RG").unwrap();
+                        } else {
+                            writeln!(draw, "{c} rg").unwrap();
+                        }
                     }
                     for run in &piece.runs {
                         self.font_ref(run.face);
@@ -497,8 +748,41 @@ impl<'d> BookWriter<'d> {
             }
             out
         };
+        // On a page where bodies moved, the page's own content is drawn once for what stays and once for each
+        // distance something went down, and here too no text is in the file twice. `step` is that distance, or
+        // `None` for what stays.
+        let steps: Vec<f32> = {
+            let mut steps: Vec<f32> = moves.iter().map(|(_, by, _)| *by).collect();
+            steps.sort_by(f32::total_cmp);
+            steps.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+            steps
+        };
+        let step_of = |by: f32| steps.iter().position(|s| (s - by).abs() < 0.01);
+        let apart = |step: Option<usize>| {
+            let mut out = removals.clone();
+            for (r, run) in content.runs.iter().enumerate() {
+                if run.source != Source::Page {
+                    continue;
+                }
+                for (g, glyph) in run.glyphs.iter().enumerate() {
+                    let [x0, y0, x1, y1] = glyph.bounds;
+                    let (x, y) = ((x0 + x1) / 2.0 - cx0 as f32, cy1 as f32 - (y0 + y1) / 2.0);
+                    let of = moves
+                        .iter()
+                        .find(|(was, _, _)| {
+                            x >= was.x0 && x <= was.x1 && y >= was.y0 && y <= was.y1
+                        })
+                        .and_then(|(_, by, _)| step_of(*by));
+                    if of != step {
+                        out.entry(r).or_default().insert(g);
+                    }
+                }
+            }
+            out
+        };
         let mut edited = match &plan {
             Some(plan) => edit(content, &without(plan, None), &insertions),
+            None if !moves.is_empty() => edit(content, &apart(None), &insertions),
             None => edit(content, &removals, &insertions),
         };
 
@@ -596,6 +880,48 @@ impl<'d> BookWriter<'d> {
                     stream.extend_from_slice(b"Q\n");
                 }
             }
+        }
+        // The old place of each body that moved is painted over with the paper around it.
+        for (was, _, paper) in &moves {
+            let colour = paper.map(|v| real(f64::from(v) / 255.0)).join(" ");
+            let fill = format!(
+                "q {colour} rg {} {} {} {} re f Q\n",
+                real(cx0 + f64::from(was.x0)),
+                real(cy1 - f64::from(was.y1)),
+                real(f64::from(was.x1 - was.x0)),
+                real(f64::from(was.y1 - was.y0))
+            );
+            stream.extend_from_slice(fill.as_bytes());
+        }
+        if !whites.is_empty() {
+            stream.extend_from_slice(format!("q 1 1 1 rg\n{whites}f Q\n").as_bytes());
+        }
+        // Then each body in its new place: the page's content once more, moved down, and of it only what shows
+        // through the new places of the bodies that went this far.
+        for (n, step) in steps.iter().enumerate() {
+            let mut lead = String::from("q\n");
+            for (was, _, _) in moves.iter().filter(|(_, by, _)| step_of(*by) == Some(n)) {
+                writeln!(
+                    lead,
+                    "{} {} {} {} re",
+                    real(cx0 + f64::from(was.x0)),
+                    real(cy1 - f64::from(was.y1 + step)),
+                    real(f64::from(was.x1 - was.x0)),
+                    real(f64::from(was.y1 - was.y0))
+                )
+                .unwrap();
+            }
+            writeln!(lead, "W n\n1 0 0 1 0 {} cm", real(f64::from(-step))).unwrap();
+            let own = edit(content, &apart(Some(n)), &[])
+                .remove(&Source::Page)
+                .or_else(|| extracted.content.data.get(&Source::Page).cloned())
+                .unwrap_or_default();
+            stream.extend_from_slice(lead.as_bytes());
+            wrapped(&mut stream, &own);
+            stream.extend_from_slice(b"Q\n");
+        }
+        if !whites_after.is_empty() {
+            stream.extend_from_slice(format!("q 1 1 1 rg\n{whites_after}f Q\n").as_bytes());
         }
         stream.extend_from_slice(drawn_last.as_bytes());
         let contents = self.saver.add(Object::Stream(Stream {
@@ -710,6 +1036,22 @@ impl<'d> BookWriter<'d> {
 
     /// Embed the fonts and produce the new file.
     pub fn finish(mut self) -> celsus_pdf::Result<Vec<u8>> {
+        let mut saver = std::mem::replace(&mut self.saver, Saver::new(self.doc));
+        self.embed(&mut saver);
+        saver.save()
+    }
+
+    /// The file as it stands, with the pages translated so far, while the writer goes on. For showing a long
+    /// translation as it grows.
+    pub fn snapshot(&self) -> celsus_pdf::Result<Vec<u8>> {
+        // The fonts go into a copy: they are written again, with more glyphs, the next time.
+        let mut saver = self.saver.clone();
+        self.embed(&mut saver);
+        saver.save()
+    }
+
+    /// Put the fonts used so far, each cut down to the glyphs it needed, into `saver`.
+    fn embed(&self, saver: &mut Saver) {
         let mut faces: Vec<usize> = self.embedders.keys().copied().collect();
         faces.sort_unstable();
         for face in faces {
@@ -723,9 +1065,8 @@ impl<'d> BookWriter<'d> {
             } else {
                 written.postscript.clone()
             };
-            embedder.write(&mut self.saver, &name, *target);
+            embedder.write(saver, &name, *target);
         }
-        self.saver.save()
     }
 }
 
