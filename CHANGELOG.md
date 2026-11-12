@@ -2,7 +2,7 @@
 
 Versions are 0.YYMM.N: year and month of the release, then a counter for further releases in that month.
 
-## Unreleased
+## 0.2611.2 (2026-11-12)
 
 - **Columns for languages read from right to left.** On a page of two or more columns translated into Arabic,
   Hebrew, Persian or Urdu, the columns change places, each with its pictures, formulas, rules and links, so the
@@ -27,6 +27,8 @@ Versions are 0.YYMM.N: year and month of the release, then a counter for further
   cleared, so a book's pages no longer go back to the original the next time it is written.
 - **One spelling for a language.** Redrawing a picture in a translation such as zh-hans or pt-br no longer writes
   a second, nearly empty translation over the first.
+- **Chinese, Japanese and Korean.** A complete translation into these scripts is no longer taken for one that
+  was cut short because it has far fewer characters than its source.
 - **Sturdier against bad input.** A font table with an impossible range of codes no longer keeps the reader busy
   for ever. On the server, a list of pages has a total limit however it is written, and passwords are hashed only
   for a valid invitation, a few at a time.
