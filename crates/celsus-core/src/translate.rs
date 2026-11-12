@@ -252,6 +252,22 @@ pub fn strip_source_glosses(source: &str, translation: &str) -> String {
     out
 }
 
+/// How long a text is, in letters of an alphabet. A Chinese character says about as much as three of them, and
+/// a Japanese kana or a Korean syllable about as much as two: a complete translation into those scripts has far
+/// fewer characters than its source, and one out of them far more.
+fn length(text: &str) -> usize {
+    text.chars()
+        .map(|c| match c {
+            '\u{3400}'..='\u{4DBF}'
+            | '\u{4E00}'..='\u{9FFF}'
+            | '\u{F900}'..='\u{FAFF}'
+            | '\u{20000}'..='\u{2FFFF}' => 3,
+            '\u{3040}'..='\u{30FF}' | '\u{AC00}'..='\u{D7AF}' => 2,
+            _ => 1,
+        })
+        .sum()
+}
+
 /// What a problem means, for the model when it is asked again.
 pub fn describe(problem: &Problem) -> String {
     match problem {
@@ -319,7 +335,7 @@ pub fn check(source: &str, translation: &str) -> Vec<Problem> {
     if translation.matches('(').count() > source.matches('(').count() {
         problems.push(Problem::AddedExplanation);
     }
-    if source.chars().count() > 40 && translation.chars().count() * 3 < source.chars().count() {
+    if length(source) > 40 && length(translation) * 3 < length(source) {
         problems.push(Problem::TooShort);
     }
     let lines = |s: &str| s.lines().filter(|l| !l.trim().is_empty()).count();
@@ -452,5 +468,22 @@ Katmanları İlişkilendirmek",
             check("There was no persistence", "Kalıcılık (persistence) yoktu"),
             vec![Problem::AddedExplanation]
         );
+    }
+
+    #[test]
+    fn a_complete_translation_into_chinese_is_not_called_too_short() {
+        let source = "When you see an expression that begins with this terrifying symbol, you will henceforth \
+                      know that it is put there merely to give you instructions that you are now to perform the \
+                      operation (if you can) of totalling up all the little bits that are indicated by the \
+                      symbols that follow.";
+        let whole = "当你看到一个以这个可怕符号开头的式子时，你今后就会知道，它放在那里只是为了指示你：现在要做的运算\
+                     （如果你做得到）是把后面那些符号所表示的所有小段加起来求总和。";
+        assert!(!check(source, whole).contains(&Problem::TooShort));
+        // A third of it is still caught.
+        let cut = "当你看到一个以这个可怕符号开头的式子时，你今后就会知道";
+        assert!(check(source, cut).contains(&Problem::TooShort));
+        // And the other way: a full English translation of a short Chinese text, and one cut off.
+        assert!(!check(whole, source).contains(&Problem::TooShort));
+        assert!(check(whole, "When you see an expression").contains(&Problem::TooShort));
     }
 }
