@@ -2,7 +2,7 @@
 
 Versions are 0.YYMM.N: year and month of the release, then a counter for further releases in that month.
 
-## Unreleased
+## 0.2611.5 (2026-11-13)
 
 - **Finding working models says what is wrong.** When not one model answered, the result was "0 of 60" and
   nothing more. Now it shows what most of them said, which is most often something about the connection, such as
