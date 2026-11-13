@@ -2,7 +2,7 @@
 
 Versions are 0.YYMM.N: year and month of the release, then a counter for further releases in that month.
 
-## Unreleased
+## 0.2611.6 (2026-11-13)
 
 - **Titles set flush right stay flush right.** A title or subtitle of two lines, set against the right edge as on
   the title page of a book, was taken for a paragraph with a deep hanging indent: the translation began where the

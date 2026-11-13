@@ -438,7 +438,7 @@ dependencies = [
 
 [[package]]
 name = "celsus-core"
-version = "0.2611.5"
+version = "0.2611.6"
 dependencies = [
  "celsus-pdf",
  "hayro",
@@ -455,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "celsus-desktop"
-version = "0.2611.5"
+version = "0.2611.6"
 dependencies = [
  "celsus-core",
  "celsus-pdf",
@@ -471,7 +471,7 @@ dependencies = [
 
 [[package]]
 name = "celsus-mcp"
-version = "0.2611.5"
+version = "0.2611.6"
 dependencies = [
  "celsus-core",
  "celsus-pdf",
@@ -482,14 +482,14 @@ dependencies = [
 
 [[package]]
 name = "celsus-pdf"
-version = "0.2611.5"
+version = "0.2611.6"
 dependencies = [
  "miniz_oxide 0.9.1",
 ]
 
 [[package]]
 name = "celsus-server"
-version = "0.2611.5"
+version = "0.2611.6"
 dependencies = [
  "argon2",
  "axum",
@@ -516,7 +516,7 @@ dependencies = [
 
 [[package]]
 name = "celsus-store"
-version = "0.2611.5"
+version = "0.2611.6"
 dependencies = [
  "celsus-core",
  "celsus-pdf",
