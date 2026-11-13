@@ -2,6 +2,22 @@
 
 Versions are 0.YYMM.N: year and month of the release, then a counter for further releases in that month.
 
+## Unreleased
+
+- **Titles set flush right stay flush right.** A title or subtitle of two lines, set against the right edge as on
+  the title page of a book, was taken for a paragraph with a deep hanging indent: the translation began where the
+  first line began and its other lines were pushed far in, so far that a word had to be broken in two.
+- **Words are not broken while a smaller size keeps them whole.** A word wider than its line was broken
+  between two letters. Now the text first gets a little smaller, as far as the usual limits go; only a word that
+  would not fit at any size, such as a long address, is still broken.
+- **Heavy faces stay bold.** A title set in a heavy display face whose font calls itself regular, as many do,
+  came back in a regular weight. The page is looked at now: text of 14 points and up whose strokes are as thick
+  as those of a black or heavy face is set in bold. Smaller text is left to what its font says, since at that
+  size the strokes cannot be told apart on the page.
+- **Condensed faces stay narrow.** Text set in a condensed face (titles, running heads, the code of some
+  publishers) was written in a font of ordinary width and took more room than it had. Its letters are now drawn
+  as narrow as the original's.
+
 ## 0.2611.5 (2026-11-13)
 
 - **Finding working models says what is wrong.** When not one model answered, the result was "0 of 60" and

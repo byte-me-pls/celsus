@@ -495,6 +495,25 @@ fn a_short_indented_paragraph_is_not_taken_for_centred_lines() {
     assert_ne!(blocks[1].align, celsus_core::layout::Align::Center);
 }
 
+/// A title of two lines set flush right, the first line much longer: it is flush right, not a paragraph with
+/// a hanging indent, and its translation ends where it ended.
+#[test]
+fn a_title_of_two_lines_set_flush_right_stays_flush_right() {
+    let content = "BT /F1 28 Tf 136.8 700 Td (Building Quietly Reliable) Tj ET\n\
+                   BT /F1 28 Tf 332.884 668 Td (Services) Tj ET";
+    let doc = celsus_pdf::Document::load(page_pdf(content, "")).unwrap();
+    let pages = doc.pages().unwrap();
+    let page = extract_page(&doc, &pages[0], 1).unwrap();
+    let blocks = &page.layout.blocks;
+    assert_eq!(blocks.len(), 1, "{blocks:?}");
+    let lines = &blocks[0].lines;
+    assert!(
+        (lines[0].rect.x1 - lines[1].rect.x1).abs() < 3.0,
+        "the two lines end together: {lines:?}"
+    );
+    assert_eq!(blocks[0].align, celsus_core::layout::Align::Right);
+}
+
 /// A page with a paragraph of three lines and, under it, a figure drawn from `foot` up to 660 (in the
 /// coordinates of the page, from its bottom), written once with a font of ours: a page whose text is seen when
 /// the page is looked at, as the text of a real book is.

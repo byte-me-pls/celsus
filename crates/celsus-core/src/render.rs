@@ -21,7 +21,7 @@ use crate::extract::{ExtractedPage, GlyphRef};
 use crate::fit::Measure;
 use crate::fonts::FontSet;
 use crate::inline;
-use crate::layout::{BlockId, Rect, TextBlock};
+use crate::layout::{BlockId, Rect, TextBlock, TextStyle};
 use crate::mirror;
 use crate::place;
 use crate::shape::Shaper;
@@ -59,6 +59,13 @@ pub struct BookWriter<'d> {
 
 /// On a page with more bodies than this, none is moved: it is a page of many small things, not of figures.
 const MOST_BODIES: usize = 80;
+
+/// Strokes at least this thick, against the size of the text, are of a heavy face, whatever the font says of
+/// itself. Measured on thirty-four faces at sizes from 11 to 30 points, the regular ones stay under 0.16 and
+/// the black and heavy ones over 0.2; bold ones fall between, and say that they are bold.
+const HEAVY: f32 = 0.185;
+/// Text smaller than this, in points, is not judged by its strokes.
+const HEAVY_FROM: f32 = 14.0;
 
 /// On a page whose content is longer than this, nothing is moved.
 const HEAVY_CONTENT: usize = 2_000_000;
@@ -308,9 +315,17 @@ impl<'d> BookWriter<'d> {
             });
         }
 
-        let shapers: Vec<Styled> = entries
+        let mut shapers: Vec<Styled> = entries
             .iter()
-            .map(|e| Styled::new(fonts, &e.chains, rtl && !e.companion))
+            .map(|e| {
+                let mut shaper = Styled::new(fonts, &e.chains, rtl && !e.companion);
+                // A title set in a condensed face is drawn narrow again, so that it takes the room it took.
+                // Not for text from a scan: what the scan's text layer says of the widths is rough.
+                if !e.companion && !rtl && !extracted.scans.contains(&e.block.id) {
+                    shaper.narrow = shaper.narrowness(e.block).unwrap_or(1.0);
+                }
+                shaper
+            })
             .collect();
         // The page as a reader sees it: what is on it besides the text to place. A page whose columns change
         // places, or that is shown turned, is taken the way its content describes it.
@@ -368,6 +383,58 @@ impl<'d> BookWriter<'d> {
             Some((seen, p)) => (Some(p), seen.inks, seen.leaders, seen.bodies),
             None => (None, Vec::new(), Vec::new(), Vec::new()),
         };
+        // A face can look heavy and say it is regular: a display face drawn heavy is made that way and named
+        // for nothing else. What the picture shows decides, and the translation is set in bold.
+        if let Some(picture) = &picture {
+            let mut at = 0;
+            for (k, e) in entries.iter_mut().enumerate() {
+                let lines = at..at + e.block.lines.len();
+                at = lines.end;
+                let style = &e.block.style;
+                // Small text is drawn too few pixels high for its strokes to be told apart: a regular face can
+                // look as thick as a heavy one there. Titles and headings, where heavy faces are used, are
+                // large enough.
+                if e.companion
+                    || style.bold
+                    || style.monospace
+                    || style.font_size < HEAVY_FROM
+                    || e.chains.is_empty()
+                {
+                    continue;
+                }
+                let mut strokes: Vec<f32> = inks[lines]
+                    .iter()
+                    .flatten()
+                    .filter_map(|ink| picture.stroke(ink))
+                    .collect();
+                if strokes.is_empty() {
+                    continue;
+                }
+                strokes.sort_by(f32::total_cmp);
+                if strokes[strokes.len() / 2] < style.font_size * HEAVY {
+                    continue;
+                }
+                let bold = TextStyle {
+                    bold: true,
+                    ..style.clone()
+                };
+                let chain = fonts.chain_for(&bold, script);
+                let text = inline::strip_marks(&e.text);
+                if chain.is_empty()
+                    || !Shaper::new(fonts, chain.clone(), rtl)
+                        .missing(&text)
+                        .is_empty()
+                {
+                    continue;
+                }
+                e.chains[0] = chain;
+                let mut shaper = Styled::new(fonts, &e.chains, rtl);
+                if !rtl && !extracted.scans.contains(&e.block.id) {
+                    shaper.narrow = shaper.narrowness(e.block).unwrap_or(1.0);
+                }
+                shapers[k] = shaper;
+            }
+        }
         let papers: Vec<Option<[u8; 3]>> = found
             .iter()
             .map(|r| picture.as_ref().and_then(|p| p.paper_around(r)))
@@ -483,7 +550,8 @@ impl<'d> BookWriter<'d> {
             for g in refs {
                 removals.entry(g.run).or_default().insert(g.glyph);
             }
-            let (size, squeeze) = (placed.size, placed.squeeze);
+            // The letters are drawn as narrow as the placement measured them.
+            let (size, squeeze) = (placed.size, placed.squeeze * shaper.narrow);
             // The original may have been drawn under a clipping path (a printable area, a frame). A translation
             // that reaches past it would be cut there, so it is drawn after the page's own content instead.
             // The same goes for a background painted later (the white ground of a figure further down): it left
@@ -652,7 +720,14 @@ impl<'d> BookWriter<'d> {
                     cx0 + f64::from(cap.rect.x0),
                     cy1 - f64::from(cap.rect.y1 + placed.shift),
                 );
-                writeln!(draw, "100 Tz 1 0 0 1 {} {} Tm", real(px), real(py)).unwrap();
+                writeln!(
+                    draw,
+                    "{} Tz 1 0 0 1 {} {} Tm",
+                    real(f64::from(shaper.narrow * 100.0)),
+                    real(px),
+                    real(py)
+                )
+                .unwrap();
                 for run in &shaped.runs {
                     self.font_ref(run.face);
                     used_faces.insert(run.face);
@@ -1102,7 +1177,16 @@ fn document_fonts(doc: &Document) -> Vec<Font> {
 /// with it says with marks where each style begins (see [`crate::inline`]).
 struct Styled<'f> {
     shapers: Vec<Shaper<'f>>,
+    /// How much narrower the letters are drawn than the fonts have them: the original was set in a condensed
+    /// face, and none of the fonts is one.
+    narrow: f32,
 }
+
+/// Original letters narrower than this, against the letters of the font that stands in for them, are of a
+/// condensed face. Less than that is the ordinary difference between two faces of one kind.
+const CONDENSED: f32 = 0.85;
+/// Letters are never drawn narrower than this.
+const NARROWEST: f32 = 0.72;
 
 impl<'f> Styled<'f> {
     fn new(fonts: &'f FontSet, chains: &[Vec<usize>], rtl: bool) -> Self {
@@ -1111,7 +1195,38 @@ impl<'f> Styled<'f> {
                 .iter()
                 .map(|chain| Shaper::new(fonts, chain.clone(), rtl))
                 .collect(),
+            narrow: 1.0,
         }
+    }
+
+    /// How wide the original letters of `block` are against these fonts' letters for the same words, when the
+    /// original face is clearly the narrower: the middle of what its lines say. `None` when they are about as
+    /// wide, or the fonts lack some of the original's letters.
+    fn narrowness(&self, block: &TextBlock) -> Option<f32> {
+        let size = block.style.font_size;
+        let mut ratios: Vec<f32> = block
+            .lines
+            .iter()
+            // Lines of words: a row of leader dots, or letters spaced out, say nothing of the face.
+            .filter(|l| {
+                let all = l.text.trim().chars().count();
+                let letters = l.text.chars().filter(|c| c.is_alphabetic()).count();
+                all >= 4 && letters * 10 >= all * 7
+            })
+            .filter(|l| self.shapers[0].missing(&l.text).is_empty())
+            .filter_map(|l| {
+                let wide = self.shapers[0].width(l.text.trim(), size);
+                (wide > 0.0).then(|| l.rect.width() / wide)
+            })
+            .collect();
+        if ratios.is_empty() {
+            return None;
+        }
+        ratios.sort_by(f32::total_cmp);
+        let ratio = ratios[ratios.len() / 2];
+        // Much narrower than that is not a face but something else: letters drawn in another size than the
+        // one read, or squeezed by the document itself.
+        (ratio < CONDENSED && ratio > NARROWEST * 0.85).then_some(ratio.max(NARROWEST))
     }
 
     /// The fonts of a style; the block's own where the text uses none of the others.
@@ -1123,12 +1238,13 @@ impl<'f> Styled<'f> {
 impl Measure for Styled<'_> {
     fn width(&self, text: &str, size: f32) -> f32 {
         if self.shapers.len() == 1 {
-            return self.shapers[0].width(text, size);
+            return self.shapers[0].width(text, size) * self.narrow;
         }
         inline::pieces(text)
             .into_iter()
             .map(|(style, piece)| self.of(style).width(piece, size))
-            .sum()
+            .sum::<f32>()
+            * self.narrow
     }
 
     fn ascent(&self) -> f32 {

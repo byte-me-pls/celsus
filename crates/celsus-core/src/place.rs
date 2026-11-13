@@ -170,6 +170,8 @@ struct Shape {
     /// The lines stand on the baselines of the original lines.
     own: bool,
     gap: f32,
+    /// A word had to be broken in two to fit its line, and would fit whole at a size further down the ladder.
+    cramped: bool,
 }
 
 struct Node {
@@ -1033,6 +1035,7 @@ fn build(
                 height: r.height(),
                 own: true,
                 gap: 1.0,
+                cramped: false,
             }),
             around: Vec::new(),
         });
@@ -1162,6 +1165,7 @@ fn fixed_shape(item: &Item, node: &Node) -> Option<Shape> {
         height: node.r.height(),
         own: true,
         gap: 1.0,
+        cramped: false,
     };
     match node.kind {
         Kind::Single => {
@@ -1249,6 +1253,20 @@ fn shape_at(i: usize, item: &Item, node: &Node, level: usize, cache: &mut ShapeC
             .map(|(n, l)| (l, indent.of_line(n) + clear(n).0, clear(n).1))
             .collect()
     };
+    // A word wider than a line is broken in two. That reads worse than a smaller size, as long as some rung
+    // further down gives it a line of its own: a long address may not fit at any size, and is not worth the
+    // smaller type.
+    let room = width - node.indent.first.max(node.indent.rest);
+    let last = &LADDER[LADDER.len() - 1];
+    let narrowest = Squeezed {
+        inner: item.measure,
+        by: last.squeeze,
+    };
+    let cramped = level + 1 < LADDER.len()
+        && item.text.split_whitespace().any(|word| {
+            m.width(word, size) > room + 0.05
+                && narrowest.width(word, smallest(node.size0)) <= room + 0.05
+        });
     let scale = size / node.size0;
     let shape = Shape {
         height: (node.base_off + node.desc_off) * scale
@@ -1259,6 +1277,7 @@ fn shape_at(i: usize, item: &Item, node: &Node, level: usize, cache: &mut ShapeC
         lines,
         own: false,
         gap: step.gap,
+        cramped,
     };
     cache.insert(key, shape.clone());
     shape
@@ -1391,6 +1410,12 @@ fn attempt(
                     .map(|nd| shape_of(i, items, nd, level[i], cache))
             })
             .collect();
+        if let Some(i) = (0..n)
+            .find(|&i| shapes[i].as_ref().is_some_and(|s| s.cramped) && level[i] + 1 < LADDER.len())
+        {
+            level[i] += 1;
+            continue;
+        }
         let (top, pusher) = push_down(nodes, &shapes, &lift);
         let height = |i: usize| shapes[i].as_ref().unwrap().height;
         // The first block, from the top, that ends below its floor or left a place it is tied to.
@@ -2096,6 +2121,24 @@ mod tests {
         let out = solve_bodies(&layout, &[figure(165.0, 200.0, true)], &texts);
         assert_eq!(out.moved, [0.0]);
         assert_eq!(out.placed[1].as_ref().unwrap().shift, 0.0);
+    }
+
+    #[test]
+    fn a_word_is_not_broken_while_a_smaller_size_keeps_it_whole() {
+        // A narrow block, and a word of 22 letters: 110 points at full size, 100 points of room.
+        let layout = page(vec![block("a", 100.0, 200.0, 100.0, 2, false)]);
+        let text = format!("one {} two", "w".repeat(22));
+        let out = solve_page(&layout, &[("a", text.clone())]);
+        let a = out[0].as_ref().unwrap();
+        assert!(a.size < 10.0, "{a:?}");
+        assert!(
+            a.lines.iter().any(|l| l.text.contains(&"w".repeat(22))),
+            "{a:?}"
+        );
+        // A word that no size would fit is broken, and the text keeps its size.
+        let text = format!("one {} two", "w".repeat(40));
+        let a = solve_page(&layout, &[("a", text)])[0].clone().unwrap();
+        assert_eq!(a.size, 10.0);
     }
 
     #[test]

@@ -631,6 +631,57 @@ impl Picture {
             .collect()
     }
 
+    /// How thick the strokes of a line of text look, in points: in the middle band of its letters (`ink`, the
+    /// box around them as they are seen), the ink of each row divided by the number of strokes it crosses, the
+    /// middle of that over the rows. `None` where nothing is seen.
+    pub fn stroke(&self, ink: &Rect) -> Option<f32> {
+        let (x0, y0, x1, y1) = self.pixels(ink);
+        if x1 <= x0 + 2 || y1 <= y0 + 4 {
+            return None;
+        }
+        let band = (y1 - y0) as f32;
+        let (b0, b1) = (
+            y0 + (band * 0.40) as usize,
+            (y0 + (band * 0.65).ceil() as usize).min(y1),
+        );
+        // How dark a pixel is, from the paper (0) to the darkest ink of the line (1).
+        let darkest = (y0..y1)
+            .flat_map(|y| (x0..x1).map(move |x| (y, x)))
+            .map(|(y, x)| self.apart_at(x, y))
+            .max()
+            .unwrap_or(0);
+        if darkest < self.apart.saturating_mul(2) {
+            return None;
+        }
+        let mut strokes: Vec<f32> = Vec::new();
+        for y in b0..b1.max(b0 + 1) {
+            let (mut ink, mut runs, mut on) = (0.0f32, 0usize, false);
+            for x in x0..x1 {
+                let d = f32::from(self.apart_at(x, y)) / f32::from(darkest);
+                ink += d.min(1.0);
+                if d > 0.5 && !on {
+                    runs += 1;
+                }
+                on = d > 0.5;
+            }
+            if runs > 0 {
+                strokes.push(ink / runs as f32);
+            }
+        }
+        if strokes.is_empty() {
+            return None;
+        }
+        // A row through the bar of an E or a T crosses one long stroke and says little; most rows cross only
+        // the upright ones, and the thinner rows are taken.
+        strokes.sort_by(f32::total_cmp);
+        Some(strokes[strokes.len() * 3 / 10] / self.scale)
+    }
+
+    fn apart_at(&self, x: usize, y: usize) -> u8 {
+        let i = (y * self.width + x) * 3;
+        apart([self.rgb[i], self.rgb[i + 1], self.rgb[i + 2]], self.paper)
+    }
+
     /// The colour around `r`, if the paper there is of one colour: what the place of a body is to be painted
     /// with once the body has been moved away.
     pub fn paper_around(&self, r: &Rect) -> Option<[u8; 3]> {
@@ -745,6 +796,17 @@ mod tests {
         // Three dots are an ellipsis or dust, not a leader.
         let p = picture(&black[..5]);
         assert_eq!(p.find(&[line], &[]).leaders, [None]);
+    }
+
+    #[test]
+    fn the_strokes_of_letters_are_measured() {
+        // Four upright strokes of 3 pixels and four of 6, at 2 pixels to a point.
+        let thin: Vec<_> = (0..4).map(|k| (20 + k * 12, 20, 23 + k * 12, 40)).collect();
+        let thick: Vec<_> = (0..4).map(|k| (20 + k * 14, 60, 26 + k * 14, 80)).collect();
+        let p = picture(&[thin, thick].concat());
+        assert_eq!(p.stroke(&rect(10.0, 10.0, 30.0, 20.0)), Some(1.5));
+        assert_eq!(p.stroke(&rect(10.0, 30.0, 40.0, 40.0)), Some(3.0));
+        assert_eq!(p.stroke(&rect(60.0, 100.0, 80.0, 120.0)), None);
     }
 
     #[test]

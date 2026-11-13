@@ -996,6 +996,12 @@ pub fn extract_page_in(
     // Nor do two lines show whether the second hangs under the first or is centred under it. The entries of
     // a list begin at one edge; a label under a drawing shares its edge with nothing.
     let lefts: Vec<f32> = blocks.iter().map(|b| b.rect.x0).collect();
+    // Where each line of each block begins: an edge that other text begins at too is the edge of a column.
+    let starts: Vec<(usize, f32)> = blocks
+        .iter()
+        .enumerate()
+        .flat_map(|(i, b)| b.lines.iter().map(move |l| (i, l.rect.x0)))
+        .collect();
     // And a paragraph of two lines whose first line is indented and stops short of the margin by about as
     // much looks centred, line for line. It is a paragraph when the longer paragraphs of the page begin the
     // same way: their first lines where its first line begins, their other lines where its second does.
@@ -1023,6 +1029,23 @@ pub fn extract_page_in(
         }
         let (first, second) = (&b.lines[0].rect, &b.lines[1].rect);
         let tol = (b.style.font_size * 0.25).max(1.0);
+        // Two lines that end at one edge and begin far apart, where no other text begins, are set flush right,
+        // as the title of a book is on its title page. Read from the left they look like a paragraph with a deep
+        // hanging indent, and the translation would run from where the first line began, its other lines pushed
+        // far in. A paragraph, a list entry or an index entry begins where others do; a list with a hanging
+        // indent shows itself in its longer entries.
+        let alone = |x: f32| !starts.iter().any(|&(j, x0)| j != i && (x0 - x).abs() < 1.0);
+        if matches!(b.align, Align::Left | Align::Justify)
+            && (first.x1 - second.x1).abs() < tol
+            && second.x0 > first.x0 + b.style.font_size
+            && alone(first.x0)
+            && alone(second.x0)
+            && !indented.iter().any(|(f, rest)| {
+                (f - first.x0).abs() < 1.0 && (rest - second.x0).abs() < b.style.font_size
+            })
+        {
+            b.align = Align::Right;
+        }
         if b.align == Align::Left
             && ((first.x0 + first.x1) - (second.x0 + second.x1)).abs() / 2.0 < tol
             && second.x0 > first.x0 + b.style.font_size * 0.7
