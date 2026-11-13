@@ -750,14 +750,39 @@ async fn model_test(
     quick: Option<bool>,
 ) -> TestResult {
     let start = std::time::Instant::now();
-    let client = OpenAiCompatible::new(url, secrets::get_key(provider_id), model.clone())
-        .answers_within(if quick == Some(true) {
+    let key = match secrets::read_key(provider_id) {
+        Ok(key) => key,
+        Err(e) => {
+            return TestResult {
+                ok: false,
+                millis: 0,
+                sample: String::new(),
+                error: Some(format!(
+                    "The key of this connection could not be read from the system's key store ({e}). \
+                     Allow Celsus to read it when the system asks, or enter the key again."
+                )),
+                wait: None,
+            };
+        }
+    };
+    let client =
+        OpenAiCompatible::new(url, key, model.clone()).answers_within(if quick == Some(true) {
             30
         } else {
             celsus_core::provider::ANSWER_WAIT
         });
     if !picture {
-        return translate_test(client);
+        // Many models are tried at once, each waiting for its answer: that is no work for the threads that
+        // run the app's other requests.
+        return tauri::async_runtime::spawn_blocking(move || translate_test(client))
+            .await
+            .unwrap_or_else(|e| TestResult {
+                ok: false,
+                millis: start.elapsed().as_millis(),
+                sample: String::new(),
+                error: Some(e.to_string()),
+                wait: None,
+            });
     }
     let (ok, error) = match client.list_models() {
         Ok(list) if list.iter().any(|m| m == &model) => (true, None),

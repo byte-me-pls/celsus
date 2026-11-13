@@ -23,12 +23,15 @@ async function tryModels(connection, models, ask, onStep) {
   const pause = (ms) => new Promise((r) => setTimeout(r, ms));
   let done = 0, answered = 0;
   const running = new Set();
+  // What went wrong, and how often: when no model answers, the reason most of them gave is shown.
+  const errors = new Map();
   for (const model of models) {
     const one = (async () => {
       let r = await ask(model);
       if (!r.ok && r.wait) { await pause(Math.min(r.wait, 60) * 1000); r = await ask(model); }
       rememberTest(connection, model, r.ok, r.millis);
       if (r.ok) answered++;
+      else if (r.error) errors.set(r.error, (errors.get(r.error) || 0) + 1);
       onStep(++done, answered);
     })().finally(() => running.delete(one));
     running.add(one);
@@ -38,7 +41,8 @@ async function tryModels(connection, models, ask, onStep) {
   await Promise.all(running);
   // Under the empty name: the connection's models have all been tried.
   rememberTest(connection, "", answered > 0, 0);
-  return answered;
+  const reason = [...errors].sort((a, b) => b[1] - a[1])[0]?.[0] || "";
+  return { answered, reason };
 }
 
 /**
@@ -116,10 +120,12 @@ function modelField({ input, list, button, out, connection, models, ask, canTry 
     refresh();
     const say = (text, ok) => (out.innerHTML = `<div class="test-result ${ok ? "ok" : ""}">${ok ? `<b>${esc(text)}</b>` : esc(text)}</div>`);
     say(T.modelsTrying(0, all.length));
-    const answered = await tryModels(id, all, (model) => ask(model, id), (done) => { say(T.modelsTrying(done, all.length)); redraw(); });
+    const { answered, reason } = await tryModels(id, all, (model) => ask(model, id), (done) => { say(T.modelsTrying(done, all.length)); redraw(); });
     trying = false;
     refresh();
-    say(T.modelsTried(answered, all.length), true);
+    if (answered || !reason) say(T.modelsTried(answered, all.length), true);
+    // Not one answered: what most of them said is what is wrong, most often with the connection itself.
+    else out.innerHTML = `<div class="test-result bad"><b>${esc(T.modelsTried(0, all.length))}</b><br>${esc(reason)}</div>`;
     redraw();
   };
   refresh();

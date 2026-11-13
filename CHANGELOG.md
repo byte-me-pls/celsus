@@ -2,6 +2,16 @@
 
 Versions are 0.YYMM.N: year and month of the release, then a counter for further releases in that month.
 
+## Unreleased
+
+- **Finding working models says what is wrong.** When not one model answered, the result was "0 of 60" and
+  nothing more. Now it shows what most of them said, which is most often something about the connection, such as
+  a key that was refused.
+- **A key the system will not give is said to be so.** On a Mac the keychain asks again, after an update, before
+  the new version may read the key the old one stored; until it is allowed, every request went out without a key
+  and every model seemed not to answer. Celsus now says that the key could not be read, and asks the keychain
+  once a run instead of once for every model tried.
+
 ## 0.2611.4 (2026-11-13)
 
 - **Translated pages show while the job runs.** The translated book used to be written only when a job ended or
