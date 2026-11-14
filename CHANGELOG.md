@@ -2,7 +2,7 @@
 
 Versions are 0.YYMM.N: year and month of the release, then a counter for further releases in that month.
 
-## Unreleased
+## 0.2611.7 (2026-11-14)
 
 - **A night light for reading.** The reader has a reading light beside its zoom: pages can stay as printed, take a warm evening light, or be shown light on dark. Warmth and brightness are set with two sliders, and N turns the night light on and off. The choice is kept for every book.
 - **Colours of your own.** Settings has a page for colours: whole palettes to start from (four for each theme),
