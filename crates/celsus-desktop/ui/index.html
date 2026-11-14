@@ -8,13 +8,11 @@
     try { const t = localStorage.getItem("celsus-theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch {}
   </script>
   <link rel="stylesheet" href="style.css">
+  <script src="colors.js"></script>
 </head>
 <body>
   <header class="titlebar" data-tauri-drag-region>
-    <div class="titlebar-brand" data-tauri-drag-region>
-      <span class="brand-mark" aria-hidden="true"></span>
-      <span class="brand-name" data-tauri-drag-region>Celsus</span>
-    </div>
+    <div class="titlebar-brand" data-tauri-drag-region><span class="app-version" id="app-version" data-tauri-drag-region></span></div>
     <div class="titlebar-crumbs" id="crumbs" data-tauri-drag-region></div>
     <div class="window-dots" role="group" aria-label="Window">
       <button class="dot dot-min" id="win-min" data-i18n-title="winMin">
@@ -31,7 +29,9 @@
   </header>
   <div class="shell">
     <aside class="sidebar">
-      <p class="sidebar-tagline" data-i18n="tagline"></p>
+      <button class="side-brand" data-go="library" aria-label="Celsus">
+        <span class="side-logo" aria-hidden="true"></span>
+      </button>
       <nav id="nav">
         <button class="nav-link" data-go="library">
           <svg viewBox="0 0 24 24"><path d="M4 19.5V5a2 2 0 0 1 2-2h4v18H6a2 2 0 0 1-2-1.5z"/><path d="M10 3h4v18h-4"/><path d="M14 4.5l3.8-1 3.4 16.5-3.8.9z"/></svg>

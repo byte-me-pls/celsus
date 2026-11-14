@@ -25,6 +25,78 @@ struct App {
     runner: jobs::Runner,
 }
 
+/// The icon beside the clock, with the two entries of its menu, when the system has a place for one.
+struct Tray {
+    open: tauri::menu::MenuItem<tauri::Wry>,
+    quit: tauri::menu::MenuItem<tauri::Wry>,
+}
+
+/// Bring the window back from the tray, from the taskbar or from behind the others.
+fn show_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+/// The icon beside the clock. Closing the window leaves Celsus there, at work on its queue; its menu opens the
+/// window again or quits.
+fn make_tray(app: &AppHandle) -> tauri::Result<Tray> {
+    use tauri::menu::{Menu, MenuItem};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+    let open = MenuItem::with_id(app, "open", "Open Celsus", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open, &quit])?;
+    let mut tray = TrayIconBuilder::with_id("main")
+        .tooltip("Celsus")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "open" => show_window(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_window(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
+    Ok(Tray { open, quit })
+}
+
+/// Whether closing the window leaves Celsus running in the tray: when there is a tray, and the setting does not
+/// say otherwise.
+fn closes_to_tray(app: &AppHandle) -> bool {
+    if app.try_state::<Tray>().is_none() {
+        return false;
+    }
+    app.try_state::<App>().is_none_or(|state| {
+        db::setting(&state.db.lock().unwrap(), "close_to_tray")
+            .ok()
+            .flatten()
+            .is_none_or(|v| v != "0")
+    })
+}
+
+/// The words of the tray's menu, in the language of the interface.
+#[tauri::command]
+fn tray_texts(app: AppHandle, open: String, quit: String) {
+    if let Some(tray) = app.try_state::<Tray>() {
+        let _ = tray.open.set_text(open);
+        let _ = tray.quit.set_text(quit);
+    }
+}
+
 type Res<T> = Result<T, String>;
 
 pub use celsus_store::default_fonts_dir;
@@ -539,6 +611,46 @@ fn job_cancel(handle: AppHandle, app: State<App>, id: i64) -> Res<()> {
     Ok(())
 }
 
+/// The translations the cache holds for `texts` in `lang`, where it holds one: the titles of a book's outline
+/// are the headings of its pages, and those were translated with the pages.
+#[tauri::command]
+fn cached_translations(
+    app: State<App>,
+    lang: String,
+    texts: Vec<String>,
+) -> Res<Vec<Option<String>>> {
+    use celsus_core::pipeline::Cache;
+    let to = parse_lang(&lang)?;
+    let conn = app.db.lock().unwrap();
+    let cache = db::DbCache(&conn);
+    Ok(texts
+        .iter()
+        .take(5000)
+        .map(|text| {
+            let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            cache
+                .get(&celsus_core::pipeline::cache_key(&to, &text))
+                .map(|t| celsus_core::inline::strip_marks(&t))
+        })
+        .collect())
+}
+
+/// Take a job that has ended off the list, or with no id every job that has ended.
+#[tauri::command]
+fn job_remove(handle: AppHandle, app: State<App>, id: Option<i64>) -> Res<()> {
+    let conn = app.db.lock().unwrap();
+    match id {
+        Some(id) => {
+            db::hide_job(&conn, id)?;
+        }
+        None => {
+            db::hide_finished(&conn)?;
+        }
+    }
+    let _ = handle.emit("jobs-changed", ());
+    Ok(())
+}
+
 #[tauri::command]
 fn job_retry(handle: AppHandle, app: State<App>, id: i64) -> Res<()> {
     {
@@ -813,6 +925,8 @@ fn settings_get(app: State<App>) -> Res<BTreeMap<String, String>> {
     s.entry("answer_wait".into())
         .or_insert_with(|| celsus_core::provider::ANSWER_WAIT.to_string());
     s.entry("update_check".into()).or_insert_with(|| "1".into());
+    s.entry("close_to_tray".into())
+        .or_insert_with(|| "1".into());
     Ok(s)
 }
 
@@ -992,6 +1106,19 @@ struct Update {
     #[serde(flatten)]
     release: celsus_core::release::Release,
     installs_itself: bool,
+    /// What it brings, in short.
+    headlines: Vec<String>,
+}
+
+/// The changelog, as this version was built with it.
+const CHANGELOG: &str = include_str!("../../../CHANGELOG.md");
+
+/// What this version brought, in short: shown once after an update.
+#[tauri::command]
+fn release_notes() -> Vec<String> {
+    celsus_core::release::section(CHANGELOG, env!("CARGO_PKG_VERSION"))
+        .map(celsus_core::release::headlines)
+        .unwrap_or_default()
 }
 
 /// The Windows and macOS apps and the AppImage can replace themselves. A package installed through the system's
@@ -1005,6 +1132,7 @@ fn installs_itself() -> bool {
 async fn update_check() -> Res<Option<Update>> {
     let release = celsus_core::release::latest("byte-me-pls/celsus", env!("CARGO_PKG_VERSION"))?;
     Ok(release.map(|release| Update {
+        headlines: celsus_core::release::headlines(&release.notes),
         release,
         installs_itself: installs_itself(),
     }))
@@ -1031,6 +1159,15 @@ async fn update_install(handle: AppHandle) -> Res<()> {
 
 fn main() {
     tauri::Builder::default()
+        // One Celsus at a time: starting it again brings the open window forward instead of opening a second
+        // app on the same library, with a second queue that would run the same jobs.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
@@ -1042,6 +1179,13 @@ fn main() {
                 eprintln!("could not set up the first provider: {e}");
             }
             let runner = jobs::start(app.handle().clone(), db_path.clone(), library.clone());
+            // A system without a place for tray icons closes the app with its window, as before.
+            match make_tray(app.handle()) {
+                Ok(tray) => {
+                    app.manage(tray);
+                }
+                Err(e) => eprintln!("no tray icon: {e}"),
+            }
             app.manage(App {
                 db: Mutex::new(conn),
                 library,
@@ -1075,6 +1219,8 @@ fn main() {
             jobs_list,
             job_cancel,
             job_retry,
+            job_remove,
+            cached_translations,
             providers_list,
             provider_save,
             provider_delete,
@@ -1094,10 +1240,29 @@ fn main() {
             update_check,
             update_install,
             languages,
-            open_url
+            open_url,
+            tray_texts,
+            release_notes
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Celsus");
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event
+                && window.label() == "main"
+                && closes_to_tray(window.app_handle())
+            {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building Celsus")
+        .run(|app, event| {
+            // On a Mac, a click on the icon in the Dock brings the window back.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                show_window(app);
+            }
+            let _ = (app, event);
+        });
 }
 
 #[cfg(test)]

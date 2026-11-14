@@ -94,6 +94,30 @@ pub fn open(path: &Path) -> Result<Connection> {
         )
         .map_err(err)?;
     }
+    // Jobs can be taken off the list (what they used still counts), and a job that failed for a passing reason
+    // is tried again on its own after a while.
+    if version < 3 {
+        // A library that was at this version before, and set back, has them already.
+        let mut stmt = conn.prepare("PRAGMA table_info(jobs)").map_err(err)?;
+        let columns: Vec<String> = stmt
+            .query_map([], |r| r.get(1))
+            .map_err(err)?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(err)?;
+        drop(stmt);
+        for (name, kind) in [
+            ("hidden", "INTEGER NOT NULL DEFAULT 0"),
+            ("retry_at", "INTEGER"),
+            ("retries", "INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            if !columns.iter().any(|c| c == name) {
+                conn.execute_batch(&format!("ALTER TABLE jobs ADD COLUMN {name} {kind};"))
+                    .map_err(err)?;
+            }
+        }
+        conn.execute_batch("PRAGMA user_version = 3;")
+            .map_err(err)?;
+    }
     Ok(conn)
 }
 
@@ -303,11 +327,13 @@ pub struct Job {
     pub created_at: i64,
     pub started_at: Option<i64>,
     pub finished_at: Option<i64>,
+    /// A queued job that failed for a passing reason waits until then before it is tried again.
+    pub retry_at: Option<i64>,
 }
 
 const JOB_SELECT: &str = "SELECT j.id, j.book_id, b.title, j.target_lang, j.pages, j.status, j.done_pages, j.total_pages,
     j.replaced, j.kept, j.requests, j.prompt_tokens, j.completion_tokens, j.model, j.error, j.created_at, j.started_at,
-    j.finished_at FROM jobs j JOIN books b ON b.id = j.book_id";
+    j.finished_at, j.retry_at FROM jobs j JOIN books b ON b.id = j.book_id";
 
 fn job_row(r: &rusqlite::Row) -> rusqlite::Result<Job> {
     let pages: String = r.get(4)?;
@@ -330,13 +356,16 @@ fn job_row(r: &rusqlite::Row) -> rusqlite::Result<Job> {
         created_at: r.get(15)?,
         started_at: r.get(16)?,
         finished_at: r.get(17)?,
+        retry_at: r.get(18)?,
     })
 }
 
 pub fn jobs(conn: &Connection, book: Option<i64>) -> Result<Vec<Job>> {
     let sql = match book {
-        Some(_) => format!("{JOB_SELECT} WHERE j.book_id = ?1 ORDER BY j.id DESC"),
-        None => format!("{JOB_SELECT} WHERE ?1 IS NULL ORDER BY j.id DESC LIMIT 200"),
+        Some(_) => format!("{JOB_SELECT} WHERE j.book_id = ?1 AND j.hidden = 0 ORDER BY j.id DESC"),
+        None => {
+            format!("{JOB_SELECT} WHERE ?1 IS NULL AND j.hidden = 0 ORDER BY j.id DESC LIMIT 200")
+        }
     };
     let mut stmt = conn.prepare(&sql).map_err(err)?;
     stmt.query_map([book], job_row)
@@ -360,14 +389,104 @@ pub fn insert_job(conn: &Connection, book: i64, lang: &str, pages: &[i64]) -> Re
     Ok(conn.last_insert_rowid())
 }
 
+/// The next job to run: queued, and not waiting to be tried again later.
 pub fn next_queued(conn: &Connection) -> Result<Option<i64>> {
     conn.query_row(
-        "SELECT id FROM jobs WHERE status = 'queued' ORDER BY id LIMIT 1",
-        [],
+        "SELECT id FROM jobs WHERE status = 'queued' AND (retry_at IS NULL OR retry_at <= ?) ORDER BY id LIMIT 1",
+        [now()],
         |r| r.get(0),
     )
     .optional()
     .map_err(err)
+}
+
+/// Take a queued job to run it. False when it is no longer queued: someone else took it, or it was stopped.
+pub fn claim_job(conn: &Connection, id: i64) -> Result<bool> {
+    let n = conn
+        .execute(
+            "UPDATE jobs SET status = 'running', error = NULL, started_at = ?, finished_at = NULL,
+             retry_at = NULL WHERE id = ? AND status = 'queued'",
+            params![now(), id],
+        )
+        .map_err(err)?;
+    Ok(n == 1)
+}
+
+/// Put a job that failed for a passing reason back in the queue, to be tried at `at` (seconds since 1970).
+/// `fresh` says the failed run got some pages done, and the count of tries without progress starts again.
+/// Returns that count.
+pub fn schedule_retry(
+    conn: &Connection,
+    id: i64,
+    error: &str,
+    at: i64,
+    fresh: bool,
+) -> Result<i64> {
+    conn.execute(
+        "UPDATE jobs SET status = 'queued', error = ?, retry_at = ?, finished_at = ?,
+         retries = CASE WHEN ? THEN 1 ELSE retries + 1 END WHERE id = ?",
+        params![error, at, now(), fresh, id],
+    )
+    .map_err(err)?;
+    conn.query_row("SELECT retries FROM jobs WHERE id = ?", [id], |r| r.get(0))
+        .map_err(err)
+}
+
+/// How many times in a row a job has been tried again without getting further.
+pub fn retries(conn: &Connection, id: i64) -> Result<i64> {
+    conn.query_row("SELECT retries FROM jobs WHERE id = ?", [id], |r| r.get(0))
+        .map_err(err)
+}
+
+/// Take a job that has ended off the list. What it used still counts in the totals.
+pub fn hide_job(conn: &Connection, id: i64) -> Result<bool> {
+    let n = conn
+        .execute(
+            "UPDATE jobs SET hidden = 1 WHERE id = ? AND status IN ('done', 'failed', 'cancelled')",
+            [id],
+        )
+        .map_err(err)?;
+    Ok(n > 0)
+}
+
+/// Take every job that has ended off the list.
+pub fn hide_finished(conn: &Connection) -> Result<usize> {
+    conn.execute(
+        "UPDATE jobs SET hidden = 1 WHERE hidden = 0 AND status IN ('done', 'failed', 'cancelled')",
+        [],
+    )
+    .map_err(err)
+}
+
+/// Take off the list the stopped and failed jobs of a book in a language whose pages have all been translated
+/// since, by a later job: there is nothing left for them to go on with.
+pub fn hide_superseded(conn: &Connection, book: i64, lang: &str) -> Result<usize> {
+    let lang = lang_key(lang);
+    let done: std::collections::HashSet<i64> = translated_pages(conn, book, &lang)?
+        .into_iter()
+        .map(|(page, _)| page)
+        .collect();
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, pages FROM jobs WHERE book_id = ? AND target_lang = ? AND hidden = 0
+             AND status IN ('failed', 'cancelled')",
+        )
+        .map_err(err)?;
+    let jobs: Vec<(i64, String)> = stmt
+        .query_map(params![book, lang], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(err)?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(err)?;
+    let mut hidden = 0;
+    for (id, pages) in jobs {
+        let pages: Vec<i64> = serde_json::from_str(&pages).unwrap_or_default();
+        if !pages.is_empty() && pages.iter().all(|p| done.contains(p)) {
+            hidden += conn
+                .execute("UPDATE jobs SET hidden = 1 WHERE id = ?", [id])
+                .map_err(err)?;
+        }
+    }
+    Ok(hidden)
 }
 
 pub fn set_status(conn: &Connection, id: i64, status: &str, error: Option<&str>) -> Result<()> {
@@ -376,9 +495,12 @@ pub fn set_status(conn: &Connection, id: i64, status: &str, error: Option<&str>)
         "done" | "failed" | "cancelled" => (None, Some(now())),
         _ => (None, None),
     };
+    // Any change of state but a scheduled retry ends the wait for one; a job that is started again by hand
+    // starts its count of tries again too.
     conn.execute(
-        "UPDATE jobs SET status = ?, error = ?, started_at = COALESCE(?, started_at), finished_at = ? WHERE id = ?",
-        params![status, error, started, finished, id],
+        "UPDATE jobs SET status = ?, error = ?, started_at = COALESCE(?, started_at), finished_at = ?, retry_at = NULL,
+         retries = CASE WHEN ? = 'queued' THEN 0 ELSE retries END WHERE id = ?",
+        params![status, error, started, finished, status, id],
     )
     .map_err(err)?;
     Ok(())
@@ -863,5 +985,96 @@ mod tests {
         );
         unmark_page(&c, 1, "TR", 5).unwrap();
         assert_eq!(translated_pages(&c, 1, "tr").unwrap(), [(2, 0)]);
+    }
+
+    fn book(c: &Connection) {
+        c.execute_batch(
+            "INSERT INTO books (id, title, author, subject, original_name, pages, bytes, source_lang, has_cover, added_at)
+             VALUES (1, 'A book', '', '', 'a.pdf', 10, 1, 'en', 0, 0);",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_job_to_be_tried_again_waits_for_its_time() {
+        let c = conn();
+        book(&c);
+        let id = insert_job(&c, 1, "tr", &[1, 2]).unwrap();
+        set_status(&c, id, "running", None).unwrap();
+        assert_eq!(
+            schedule_retry(&c, id, "no_answer", now() + 120, false).unwrap(),
+            1
+        );
+        assert_eq!(next_queued(&c).unwrap(), None, "not before its time");
+        let job = job(&c, id).unwrap();
+        assert_eq!(
+            (job.status.as_str(), job.error.as_deref()),
+            ("queued", Some("no_answer"))
+        );
+        assert!(job.retry_at.is_some());
+        assert_eq!(
+            schedule_retry(&c, id, "no_answer", now() - 1, false).unwrap(),
+            2
+        );
+        assert_eq!(next_queued(&c).unwrap(), Some(id));
+        // A run that got further starts the count again; one started by hand clears it and the wait.
+        assert_eq!(
+            schedule_retry(&c, id, "no_answer", now() + 60, true).unwrap(),
+            1
+        );
+        set_status(&c, id, "queued", None).unwrap();
+        assert_eq!(
+            (retries(&c, id).unwrap(), next_queued(&c).unwrap()),
+            (0, Some(id))
+        );
+        assert_eq!(super::job(&c, id).unwrap().retry_at, None);
+    }
+
+    #[test]
+    fn a_job_is_taken_from_the_queue_once() {
+        let c = conn();
+        book(&c);
+        let id = insert_job(&c, 1, "tr", &[1]).unwrap();
+        assert!(claim_job(&c, id).unwrap());
+        assert!(!claim_job(&c, id).unwrap(), "it is running already");
+        assert_eq!(job(&c, id).unwrap().status, "running");
+        assert_eq!(next_queued(&c).unwrap(), None);
+    }
+
+    #[test]
+    fn jobs_that_ended_can_be_taken_off_the_list() {
+        let c = conn();
+        book(&c);
+        let a = insert_job(&c, 1, "tr", &[1, 2]).unwrap();
+        let b = insert_job(&c, 1, "tr", &[3]).unwrap();
+        let running = insert_job(&c, 1, "tr", &[4]).unwrap();
+        set_status(&c, a, "failed", Some("no_answer")).unwrap();
+        set_status(&c, b, "done", None).unwrap();
+        set_status(&c, running, "running", None).unwrap();
+        // A job still at work stays.
+        assert!(!hide_job(&c, running).unwrap());
+        assert!(hide_job(&c, b).unwrap());
+        let ids: Vec<i64> = jobs(&c, None).unwrap().iter().map(|j| j.id).collect();
+        assert_eq!(ids, [running, a]);
+        assert_eq!(hide_finished(&c).unwrap(), 1);
+        assert_eq!(jobs(&c, Some(1)).unwrap().len(), 1);
+        // What they used still counts.
+        assert_eq!(usage(&c).unwrap().jobs, 3);
+    }
+
+    #[test]
+    fn a_stopped_job_whose_pages_were_translated_since_leaves_the_list() {
+        let c = conn();
+        book(&c);
+        let stopped = insert_job(&c, 1, "tr", &[1, 2, 3]).unwrap();
+        let other = insert_job(&c, 1, "tr", &[4, 5]).unwrap();
+        set_status(&c, stopped, "cancelled", None).unwrap();
+        set_status(&c, other, "failed", Some("no_answer")).unwrap();
+        for page in [1, 2, 3, 4] {
+            mark_page(&c, 1, "tr", page, 0).unwrap();
+        }
+        assert_eq!(hide_superseded(&c, 1, "TR").unwrap(), 1);
+        let ids: Vec<i64> = jobs(&c, None).unwrap().iter().map(|j| j.id).collect();
+        assert_eq!(ids, [other], "page 5 is still to do");
     }
 }

@@ -1214,12 +1214,18 @@ fn uncovered(paths: &[interp::PathItem]) -> Vec<Option<[f32; 4]>> {
         .iter()
         .enumerate()
         .filter(|(_, q)| {
-            q.is_rect
-                && q.filled
-                && q.bounds[2] - q.bounds[0] > 20.0
-                && q.bounds[3] - q.bounds[1] > 20.0
+            q.filled && q.bounds[2] - q.bounds[0] > 20.0 && q.bounds[3] - q.bounds[1] > 20.0
         })
-        .map(|(i, q)| (i, q.bounds))
+        .map(|(i, q)| {
+            if q.is_rect {
+                return (i, q.bounds);
+            }
+            // A round shape (a speech bubble, a disc, a box with round corners) covers for sure what lies in
+            // the box inside its own: for an ellipse that box reaches seven tenths of the way out.
+            let [x0, y0, x1, y1] = q.bounds;
+            let (dx, dy) = ((x1 - x0) * 0.15, (y1 - y0) * 0.15);
+            (i, [x0 + dx, y0 + dy, x1 - dx, y1 - dy])
+        })
         .collect();
     paths
         .iter()

@@ -18,6 +18,39 @@ pub struct Release {
     pub notes: String,
 }
 
+/// What release notes say in short: the words in bold that open each of their entries (`- **Like this.** …`).
+pub fn headlines(notes: &str) -> Vec<String> {
+    notes
+        .lines()
+        .filter_map(|line| {
+            let rest = line.trim_start().strip_prefix("- **")?;
+            let end = rest.find("**")?;
+            let headline = rest[..end].trim().trim_end_matches('.').trim();
+            (!headline.is_empty()).then(|| headline.to_owned())
+        })
+        .collect()
+}
+
+/// The notes of `version` in a changelog written as this project's is: its section (`## 0.2611.6 (date)`), or
+/// for a build made before its version had notes, the section not released yet (`## Unreleased`).
+pub fn section<'a>(changelog: &'a str, version: &str) -> Option<&'a str> {
+    let heading = |title: &str| {
+        changelog
+            .match_indices("\n## ")
+            .map(|(at, _)| at + 1)
+            .find(|&at| {
+                changelog[at + 3..]
+                    .split_whitespace()
+                    .next()
+                    .is_some_and(|w| w == title)
+            })
+    };
+    let start = heading(version.trim_start_matches('v')).or_else(|| heading("Unreleased"))?;
+    let body = &changelog[start..];
+    let body = &body[body.find('\n').map_or(body.len(), |n| n + 1)..];
+    Some(&body[..body.find("\n## ").map_or(body.len(), |n| n + 1)])
+}
+
 /// The numbers of a version such as `0.2611.1` or `v0.2611.1`. Anything else has none.
 fn numbers(version: &str) -> Option<Vec<u64>> {
     let version = version.trim().trim_start_matches('v');
@@ -122,5 +155,27 @@ mod tests {
             "html_url": "https://example.com/byte-me-pls/celsus/releases/tag/v9.0.0"
         });
         assert_eq!(read(&answer, "byte-me-pls/celsus", "0.2611.1"), None);
+    }
+
+    #[test]
+    fn the_notes_of_a_version_are_told_in_short() {
+        let changelog = "# Changelog\n\nIntro.\n\n## Unreleased\n\n- **Coming.** Soon.\n\n## 0.2611.6 (2026-11-13)\n\n\
+                         - **Titles stay flush right.** A title of two lines\n  was read as a paragraph.\n\
+                         - **Words are not broken.** More.\n\n## 0.2611.5 (2026-11-13)\n\n- **Older.** Text.\n";
+        let notes = section(changelog, "0.2611.6").unwrap();
+        assert_eq!(
+            headlines(notes),
+            ["Titles stay flush right", "Words are not broken"]
+        );
+        assert_eq!(
+            headlines(section(changelog, "v0.2611.5").unwrap()),
+            ["Older"]
+        );
+        // A version with no notes of its own yet is told what is not released.
+        assert_eq!(
+            headlines(section(changelog, "0.2611.7").unwrap()),
+            ["Coming"]
+        );
+        assert_eq!(section("# Changelog\n", "0.1"), None);
     }
 }

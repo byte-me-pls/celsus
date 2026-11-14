@@ -21,15 +21,14 @@
   <!-- Signed in -->
   <div id="app" hidden>
     <header class="titlebar web-bar">
-      <div class="titlebar-brand">
-        <span class="brand-mark" aria-hidden="true"></span>
-        <span class="brand-name">Celsus</span>
-      </div>
+      <div class="titlebar-brand"></div>
       <div class="titlebar-crumbs" id="crumbs"></div>
     </header>
     <div class="shell">
       <aside class="sidebar">
-        <p class="sidebar-tagline" data-i18n="tagline"></p>
+        <button class="side-brand" data-go="library" aria-label="Celsus">
+          <span class="side-logo" aria-hidden="true"></span>
+        </button>
         <nav id="nav">
           <button class="nav-link" data-go="library">
             <svg viewBox="0 0 24 24"><path d="M4 19.5V5a2 2 0 0 1 2-2h4v18H6a2 2 0 0 1-2-1.5z"/><path d="M10 3h4v18h-4"/><path d="M14 4.5l3.8-1 3.4 16.5-3.8.9z"/></svg>

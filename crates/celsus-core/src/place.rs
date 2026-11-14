@@ -254,6 +254,9 @@ struct State {
     held: Vec<bool>,
     /// The bottom margin may be used further than usual.
     deep: bool,
+    /// Pairs of blocks of which the second began on the last line of the first and now begins under it: the
+    /// first came out longer, and its last line has no room left for the start of the other.
+    apart: Vec<(usize, usize)>,
 }
 
 enum Change {
@@ -261,6 +264,8 @@ enum Change {
     Restrict(usize),
     /// This body stays where it is.
     Hold(usize),
+    /// The second block begins under the first, not on its last line.
+    Apart(usize, usize),
     Deep,
 }
 
@@ -316,13 +321,16 @@ pub fn solve_among(
             .collect(),
         held: bodies.iter().map(|b| !b.movable).collect(),
         deep: false,
+        apart: Vec::new(),
     };
     let mut cache = ShapeCache::new();
-    // Every change confines or gives up one more block or holds one more body, so this ends.
-    for _ in 0..n * 3 + bodies.len() + 2 {
+    // Every change confines or gives up one more block, holds one more body or sets one more pair apart, so this
+    // ends.
+    for _ in 0..n * 6 + bodies.len() + 8 {
         match attempt(layout, obstacles, bodies, items, rtl, &state, &mut cache) {
             Ok(solved) => return solved,
             Err(Change::Deep) => state.deep = true,
+            Err(Change::Apart(a, b)) => state.apart.push((a, b)),
             Err(Change::Hold(b)) => state.held[b] = true,
             Err(Change::Keep(i)) => state.kept[i] = true,
             Err(Change::Restrict(i)) => {
@@ -1061,7 +1069,13 @@ fn build(
                 .iter()
                 .any(|&m| m != i && m != j && under(i, m) && under(m, j));
             if !between {
-                above[j].push((i, node(j).r.y0 - node(i).r.y1));
+                let gap = node(j).r.y0 - node(i).r.y1;
+                let gap = if state.apart.contains(&(i, j)) {
+                    gap.max(0.0)
+                } else {
+                    gap
+                };
+                above[j].push((i, gap));
             }
         }
     }
@@ -1680,6 +1694,18 @@ fn conflict(
             .map(|l| core(l.rect.x0, l.rect.x1, l.baseline + by, f.style.font_size))
             .collect()
     };
+    // Where the lines of a block stood. Two blocks whose boxes overlap need not have had lines over one another
+    // (a list entry that begins on the last line of the one before, a bubble that a drawn line cut in two), and
+    // their translations must not run over one another either. Only lines that stood over one another already
+    // may do so again.
+    let stood = |b: &TextBlock| -> Vec<Rect> {
+        b.lines
+            .iter()
+            .map(|l| core(l.rect.x0, l.rect.x1, l.baseline, b.style.font_size))
+            .collect()
+    };
+    let crossed =
+        |a: &TextBlock, b: &TextBlock| a.rect.overlaps(&b.rect, 0.5) && clash(&stood(a), &stood(b));
     for &i in &live {
         let r = &items[i].block.rect;
         let ride = frame.rides[i];
@@ -1709,7 +1735,10 @@ fn conflict(
             }
         }
         for f in layout.blocks.iter().filter(|f| !is_live(&f.id)) {
-            if f.rect.overlaps(r, 0.5) || still {
+            // Something that stays inside the box of the block (a sign or a small picture in a line of it) is
+            // run around where it can be, and written over where it cannot: a paragraph is not left untranslated
+            // for it.
+            if still || crossed(f, items[i].block) || encloses(r, &f.rect) {
                 continue;
             }
             if clash(&boxes[i], &lines_of(f)) {
@@ -1717,8 +1746,19 @@ fn conflict(
             }
         }
         for &j in live.iter().filter(|&&j| j > i) {
-            if items[j].block.rect.overlaps(r, 0.5) || !clash(&boxes[i], &boxes[j]) {
+            if crossed(items[j].block, items[i].block) || !clash(&boxes[i], &boxes[j]) {
                 continue;
+            }
+            // A block that began on the last line of the one before it (a paragraph cut in two by a small
+            // picture in its line, an entry that follows on the line of the last) begins under it instead.
+            let (up, down) = if items[i].block.rect.y0 <= items[j].block.rect.y0 {
+                (i, j)
+            } else {
+                (j, i)
+            };
+            let (ru, rd) = (&items[up].block.rect, &items[down].block.rect);
+            if rd.y0 < ru.y1 - 0.5 && is_below(ru, rd) && !state.apart.contains(&(up, down)) {
+                return Some(Change::Apart(up, down));
             }
             // Confine the one that strayed further, unless it is confined already.
             let (far, near) = if outside(i) >= outside(j) {
@@ -2139,6 +2179,38 @@ mod tests {
         let text = format!("one {} two", "w".repeat(40));
         let a = solve_page(&layout, &[("a", text)])[0].clone().unwrap();
         assert_eq!(a.size, 10.0);
+    }
+
+    #[test]
+    fn blocks_whose_boxes_overlap_do_not_write_over_one_another() {
+        // A block of two lines, the second short, and a block that begins on the same row after it: their boxes
+        // overlap, their lines do not. The first comes out longer, and its second line would run into the other.
+        let mut a = block("a", 100.0, 300.0, 100.0, 2, false);
+        a.lines[1].rect.x1 = 180.0;
+        let mut b = block("b", 100.0, 300.0, 112.0, 2, false);
+        b.lines[0].rect.x0 = 200.0;
+        b.rect.x0 = 100.0;
+        let layout = page(vec![a, b]);
+        let out = solve_page(&layout, &[("a", words(1.9)), ("b", words(1.2))]);
+        let lines: Vec<Vec<Rect>> = out
+            .iter()
+            .map(|p| {
+                p.as_ref().map_or_else(Vec::new, |p| {
+                    p.lines
+                        .iter()
+                        .map(|l| core(l.x, l.x + l.width, l.baseline, p.size))
+                        .collect()
+                })
+            })
+            .collect();
+        let over = lines[0]
+            .iter()
+            .any(|x| lines[1].iter().any(|y| x.overlaps(y, 0.6)));
+        assert!(!over, "{out:?}");
+        // Both are translated: the second begins under the first.
+        let (a, b) = (out[0].as_ref().unwrap(), out[1].as_ref().unwrap());
+        assert!(b.lines[0].baseline > a.lines.last().unwrap().baseline + 5.0);
+        assert_eq!(b.lines[0].x, 100.0, "from the start of the line");
     }
 
     #[test]

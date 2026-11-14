@@ -34,6 +34,7 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 const main = $("#main");
 const fmtBytes = (n) => (n > 1e9 ? `${(n / 1e9).toFixed(1)} GB` : n > 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.round(n / 1e3)} KB`);
 const fmtDate = (s) => (s ? new Date(s * 1000).toLocaleString(UI_LANG, { dateStyle: "medium", timeStyle: "short" }) : "");
+const fmtTime = (s) => (s ? new Date(s * 1000).toLocaleTimeString(UI_LANG, { timeStyle: "short" }) : "");
 const num = (n) => Number(n || 0).toLocaleString(UI_LANG);
 
 function toast(message, error = false) {
@@ -139,6 +140,8 @@ if (appWindow) {
   $("#win-min").onclick = () => appWindow.minimize();
   $("#win-max").onclick = () => appWindow.toggleMaximize();
   $("#win-close").onclick = () => appWindow.close();
+  // The menu of the icon beside the clock speaks the language of the interface.
+  invoke("tray_texts", { open: T.trayOpen, quit: T.trayQuit }).catch(() => {});
   appWindow.onResized(syncMaximized);
   syncMaximized();
 }
@@ -155,7 +158,14 @@ function setTheme(theme) {
   document.documentElement.dataset.theme = theme;
   try { localStorage.setItem("celsus-theme", theme); } catch {}
   for (const b of $$("[data-theme-choice]")) b.setAttribute("aria-pressed", String(b.dataset.themeChoice === theme));
+  applyAccent();
 }
+
+/* ---------- the accent colour ---------- */
+
+/** Accent colours to choose from at once, besides any other. The first is the app's own. */
+const ACCENTS = ["#ffa45c", "#e8b04a", "#7fc98a", "#4fc1b6", "#6aa8f0", "#a48cf0", "#f07fb0", "#ef6f5e"];
+const applyAccent = () => celsusColors.apply();
 
 async function refreshCounts() {
   state.books = await invoke("library_list");
@@ -233,14 +243,21 @@ function bookStatus(book) {
   return `<div class="book-status">${T.translatedOf(lang, n, book.pages)}<div class="meter"><span style="width:${(100 * n) / book.pages}%"></span></div></div>`;
 }
 
+/** Whether a book has been translated into a language from its first page to its last. A few pages of it
+    are a start, not a translated book. */
+const wholeIn = (book, lang) => (book.translated[lang] || 0) >= book.pages;
+const translatedWhole = (book) => Object.keys(book.translated).some((l) => wholeIn(book, l));
+
 function filteredBooks() {
   const q = state.query.trim().toLowerCase();
   return state.books.filter((b) => {
     if (q && !`${b.title} ${b.author}`.toLowerCase().includes(q)) return false;
-    const translated = Object.keys(b.translated).length > 0;
-    if (state.filter === "translated") return translated;
+    const begun = Object.keys(b.translated).length > 0;
+    const whole = translatedWhole(b);
+    if (state.filter === "translated") return whole;
+    if (state.filter === "partial") return begun && !whole;
     if (state.filter === "busy") return b.busy;
-    if (state.filter === "untranslated") return !translated;
+    if (state.filter === "untranslated") return !begun;
     return true;
   });
 }
@@ -256,7 +273,7 @@ async function renderLibrary() {
     for (const b of $$("[data-set-up]", main)) b.onclick = setUpModel;
     return;
   }
-  const filters = [["all", T.fAll], ["translated", T.fTranslated], ["busy", T.fBusy], ["untranslated", T.fUntranslated]];
+  const filters = [["all", T.fAll], ["translated", T.fTranslated], ["partial", T.fPartial], ["busy", T.fBusy], ["untranslated", T.fUntranslated]];
   main.innerHTML = `${modelNotice()}
     <div class="page-heading">
       <h1>${T.libraryTitle}<span class="count">${state.books.length}</span></h1>
@@ -286,7 +303,10 @@ function drawGrid() {
     return;
   }
   grid.innerHTML = list.map((b) => {
-    const langs = Object.keys(b.translated).map((l) => `<span class="language-badge">${esc(l)}</span>`).join("");
+    // A language the book is wholly in is a badge of its own; one it is partly in says how far it got.
+    const langs = Object.entries(b.translated).map(([l, n]) => wholeIn(b, l)
+      ? `<span class="language-badge">${esc(l)}</span>`
+      : `<span class="language-badge partial" title="${esc(T.translatedOf(l, n, b.pages))}">${esc(l)} %${Math.max(1, Math.floor((100 * n) / b.pages))}</span>`).join("");
     return `<div class="book-card-wrap">
       <button class="book-card" data-book="${b.id}" title="${T.read}">
         <div class="book-cover">${coverHtml(b)}${b.busy ? `<span class="cover-badge">${T.translating}</span>` : ""}</div>
@@ -608,16 +628,25 @@ function jobRow(job, showBook = true) {
   const pct = job.total_pages ? (100 * done) / job.total_pages : 0;
   const tokens = job.prompt_tokens + job.completion_tokens;
   const stopping = job.status === "running" && state.stopping.has(job.id);
-  const sub = job.error
-    ? `<p class="error">${esc(T.errors?.[job.error] || job.error)}</p>`
-    : `<p>${esc(langName(job.target_lang))} · ${T.jobPages(job.pages.length)} · ${fmtDate(job.created_at)}${tokens ? ` · ${T.tokens(tokens)}` : ""}</p>`;
+  // A job that failed for a passing reason waits in the queue to be tried again on its own.
+  const later = job.status === "queued" && job.retry_at;
+  const why = job.error ? T.errors?.[job.error] || job.error : "";
+  // The model that translates, or translated: while a job runs, the one that is being asked now.
+  const model = job.model ? `<span class="job-model${job.status === "running" ? " live" : ""}" title="${esc(job.model)}">${esc(job.model.split("/").pop())}</span>` : "";
+  const sub = later
+    ? `<p title="${esc(why)}">${esc(T.retryAt(fmtTime(job.retry_at)))}</p>`
+    : job.error
+      ? `<p class="error">${esc(why)}</p>`
+      : `<p>${esc(langName(job.target_lang))} · ${T.jobPages(job.pages.length)} · ${fmtDate(job.created_at)}${tokens ? ` · ${T.tokens(tokens)}` : ""}</p>`;
   const waiting = job.status === "running" ? liveNote(live) : "";
+  const ended = job.status === "done" || job.status === "failed" || job.status === "cancelled";
   const actions = [];
   if ((job.status === "queued" || job.status === "running") && !stopping) actions.push(`<button class="quiet-button" data-cancel="${job.id}">${T.cancel}</button>`);
-  if (job.status === "failed" || job.status === "cancelled") actions.push(`<button class="quiet-button" data-retry="${job.id}">${T.retry}</button>`);
+  if (job.status === "failed" || job.status === "cancelled" || later) actions.push(`<button class="quiet-button" data-retry="${job.id}">${T.retry}</button>`);
   if (showBook) actions.push(`<button class="quiet-button" data-open="${job.book_id}">${T.openBook}</button>`);
+  if (ended) actions.push(`<button class="quiet-button" data-remove="${job.id}" title="${esc(T.jobRemoveHint)}">${T.jobRemove}</button>`);
   return `<div class="job-row" data-job-row="${job.id}">
-    <div class="job-main"><h3>${showBook ? esc(job.book_title) : T.jobPages(job.pages.length) + " · " + esc(langName(job.target_lang))}</h3>${sub}</div>
+    <div class="job-main"><h3>${showBook ? esc(job.book_title) : T.jobPages(job.pages.length) + " · " + esc(langName(job.target_lang))}</h3>${sub}${model ? `<p class="job-model-line">${model}</p>` : ""}</div>
     <span><span class="chip ${job.status}">${stopping ? T.st_stopping : T["st_" + job.status]}</span></span>
     <div class="job-progress"><span data-job-text="${job.id}">${done}/${job.total_pages}${waiting}</span><div class="meter"><span data-job-meter="${job.id}" style="width:${pct}%"></span></div></div>
     <div class="job-actions">${actions.join("")}</div>
@@ -637,16 +666,36 @@ function bindJobActions(root) {
     call("job_cancel", { id });
   };
   for (const b of $$("[data-retry]", root)) b.onclick = () => call("job_retry", { id: Number(b.dataset.retry) });
+  // Taking a job off the list leaves its translated pages and what it used alone: nothing to ask about.
+  for (const b of $$("[data-remove]", root)) b.onclick = async () => {
+    await call("job_remove", { id: Number(b.dataset.remove) });
+    await refreshJobViews();
+  };
   for (const b of $$("[data-open]", root)) b.onclick = () => go("book", { id: Number(b.dataset.open) });
 }
 
 async function renderJobs() {
   await refreshCounts();
-  main.innerHTML = `<div class="page-heading"><h1>${T.jobsTitle}<span class="count">${state.jobs.length}</span></h1></div>` +
+  const ended = state.jobs.filter((j) => j.status === "done" || j.status === "failed" || j.status === "cancelled").length;
+  main.innerHTML = `<div class="page-heading"><h1>${T.jobsTitle}<span class="count">${state.jobs.length}</span></h1>
+      ${ended ? `<div class="heading-actions"><button class="quiet-button" id="jobs-clear">${T.jobsClear(ended)}</button></div>` : ""}</div>` +
     (state.jobs.length
       ? `<section class="card"><div class="job-list">${state.jobs.map((j) => jobRow(j)).join("")}</div></section>`
       : `<div class="empty-results"><span class="hero-logo"></span><p>${T.noJobs}</p></div>`);
   bindJobActions(main);
+  const clear = $("#jobs-clear");
+  if (clear) clear.onclick = async () => {
+    await call("job_remove", { id: null });
+    await refreshJobViews();
+  };
+}
+
+/** Draw again whatever shows jobs, after some were taken off the list. */
+async function refreshJobViews() {
+  await refreshCounts();
+  const v = state.route.view;
+  if (v === "jobs") await renderJobs();
+  if (v === "book") renderBookStatus({ id: state.route.id });
 }
 
 /* The reader lives in reader.js. */
@@ -655,7 +704,7 @@ async function renderJobs() {
 
 async function renderSettings(tab) {
   state.settings = await loadSettings();
-  const tabs = [["general", T.tGeneral], ["connections", T.tConnections], ["models", T.tModels], ["translation", T.tTranslation], ["fonts", T.tFonts], ["storage", T.tStorage], ["about", T.tAbout]];
+  const tabs = [["general", T.tGeneral], ["colors", T.tColors], ["connections", T.tConnections], ["models", T.tModels], ["translation", T.tTranslation], ["fonts", T.tFonts], ["storage", T.tStorage], ["about", T.tAbout]];
   main.innerHTML = `<div class="page-heading"><h1>${T.settingsTitle}</h1></div>
     <div class="settings-layout">
       <nav class="settings-tabs">${tabs.map(([k, l]) => `<button data-tab="${k}" class="${k === tab ? "active" : ""}">${l}</button>`).join("")}</nav>
@@ -664,6 +713,7 @@ async function renderSettings(tab) {
   for (const b of $$("[data-tab]")) b.onclick = () => go("settings", { tab: b.dataset.tab });
   const box = $("#tab");
   if (tab === "general") settingsGeneral(box);
+  if (tab === "colors") settingsColors(box);
   if (tab === "models") await settingsModels(box);
   if (tab === "translation") settingsSimple(box, [["batch_chars", T.batchChars, T.batchCharsHint, "number"], ["answer_wait", T.answerWait, T.answerWaitHint, "number"]], `<div class="setting-row"><div><h3>${T.readable}</h3><p>${T.readableHint}</p></div><span class="caption">70% · 6 pt</span></div>`);
   if (tab === "fonts") settingsSimple(box, [["fonts_dir", T.fontsDir, T.fontsHint, "text"]]);
@@ -678,6 +728,56 @@ async function saveSettings(values) {
   toast(T.settingsSaved);
 }
 
+/**
+ * Every colour of the interface, for the theme in use: whole palettes to start from, the accent at once, and each
+ * colour on its own. A change shows at once; each theme keeps its own.
+ */
+function settingsColors(box) {
+  const theme = document.documentElement.dataset.theme === "light" ? "light" : "dark";
+  const presets = celsusColors.PRESETS[theme];
+  const own = celsusColors.DEFAULTS[theme];
+  const labels = { background: T.colBackground, panel: T.colPanel, surface: T.colSurface, field: T.colField, line: T.colLine,
+    text: T.colText, soft: T.colSoft, accent: T.accent, good: T.colGood, bad: T.colBad, warn: T.colWarn, info: T.colInfo };
+  const draw = () => {
+    const now = celsusColors.current(theme);
+    const same = (p) => celsusColors.KEYS.every((k) => (p[k] || own[k]) === now[k]);
+    box.innerHTML = `<section class="card">
+      <div class="setting-row"><div><h3>${T.theme}</h3><p>${T.colorsHint}</p></div>
+        <select id="c-theme"><option value="dark">${T.dark}</option><option value="light">${T.light}</option></select></div>
+      <div class="palette-list">${Object.entries(presets).map(([k, p]) => {
+        const c = { ...own, ...p };
+        return `<button class="palette" data-palette="${k}" aria-pressed="${same(p)}">
+          <span class="palette-strip"><i style="background:${c.background}"></i><i style="background:${c.panel}"></i><i style="background:${c.surface}"></i><i style="background:${c.text}"></i><i style="background:${c.accent}"></i></span>
+          ${esc(T.palettes[k] || k)}</button>`;
+      }).join("")}</div>
+    </section>
+    <section class="card">
+      <div class="setting-row"><div><h3>${T.accent}</h3><p>${T.accentHint}</p></div>
+        <div class="accent-pick">
+          ${ACCENTS.map((c) => `<button class="swatch" data-accent="${c}" style="--swatch:${c}" aria-label="${c}" aria-pressed="${now.accent === (c === ACCENTS[0] ? own.accent : c)}"></button>`).join("")}
+        </div></div>
+    </section>
+    <section class="card">
+      ${celsusColors.KEYS.map((k) => `<div class="color-row"><h3>${esc(labels[k])}</h3>
+        <div class="color-pick"><code>${now[k]}</code><input type="color" data-color="${k}" value="${now[k]}" aria-label="${esc(labels[k])}">
+        <button class="text-button" data-reset="${k}" ${now[k] === own[k] ? "disabled" : ""}>${T.colorsResetOne}</button></div></div>`).join("")}
+      <div class="color-row"><span></span><button class="quiet-button" id="c-reset" ${celsusColors.changed(theme) ? "" : "disabled"}>${T.colorsReset}</button></div>
+    </section>`;
+    $("#c-theme").value = theme;
+    $("#c-theme").onchange = (e) => { setTheme(e.target.value); settingsColors(box); };
+    for (const b of $$("[data-palette]", box)) b.onclick = () => { celsusColors.usePalette(theme, presets[b.dataset.palette]); draw(); };
+    for (const b of $$("[data-accent]", box)) b.onclick = () => { celsusColors.choose(theme, "accent", b.dataset.accent === ACCENTS[0] ? null : b.dataset.accent); draw(); };
+    for (const input of $$("[data-color]", box)) {
+      // Moving across the picker shows each colour at once; the page is drawn again when the choice is made.
+      input.oninput = () => { celsusColors.choose(theme, input.dataset.color, input.value); input.previousElementSibling.textContent = input.value; };
+      input.onchange = draw;
+    }
+    for (const b of $$("[data-reset]", box)) b.onclick = () => { celsusColors.choose(theme, b.dataset.reset, null); draw(); };
+    $("#c-reset").onclick = () => { celsusColors.usePalette(theme, null); draw(); };
+  };
+  draw();
+}
+
 function settingsGeneral(box) {
   const ui = (() => { try { return localStorage.getItem("celsus-ui-lang") || "system"; } catch { return "system"; } })();
   const theme = document.documentElement.dataset.theme;
@@ -690,8 +790,11 @@ function settingsGeneral(box) {
       <input id="g-target" list="languages" value="${esc(state.settings.target_lang)}"></div>
     <div class="setting-row"><div><h3>${T.updateCheck}</h3><p>${T.updateCheckHint}</p></div>
       <input id="g-update" type="checkbox" style="justify-self:end;width:auto" ${state.settings.update_check === "0" ? "" : "checked"}></div>
+    <div class="setting-row"><div><h3>${T.closeToTray}</h3><p>${T.closeToTrayHint}</p></div>
+      <input id="g-tray" type="checkbox" style="justify-self:end;width:auto" ${state.settings.close_to_tray === "0" ? "" : "checked"}></div>
   </section>`;
   $("#g-update").onchange = (e) => saveSettings({ update_check: e.target.checked ? "1" : "0" });
+  $("#g-tray").onchange = (e) => saveSettings({ close_to_tray: e.target.checked ? "1" : "0" });
   $("#g-ui").value = ui;
   $("#g-theme").value = theme;
   $("#g-ui").onchange = (e) => { try { if (e.target.value === "system") localStorage.removeItem("celsus-ui-lang"); else localStorage.setItem("celsus-ui-lang", e.target.value); } catch {} location.reload(); };
@@ -1079,6 +1182,33 @@ async function getUpdate(update, button) {
   }
 }
 
+/** A short list of what a version brings. */
+const newsList = (headlines) => (headlines?.length
+  ? `<ul class="news-list">${headlines.slice(0, 6).map((h) => `<li>${esc(h)}</li>`).join("")}${headlines.length > 6 ? `<li class="caption">${esc(T.newsMore(headlines.length - 6))}</li>` : ""}</ul>`
+  : "");
+
+/**
+ * After an update, say once what the new version brought. The first start of a new library has nothing to
+ * compare with and says nothing; a library used before the app could tell this has books in it.
+ */
+async function announceNews() {
+  const version = await invoke("app_version").catch(() => null);
+  if (!version) return;
+  let seen = null;
+  try { seen = localStorage.getItem("celsus-news-seen"); localStorage.setItem("celsus-news-seen", version); } catch { return; }
+  if (seen === version || (!seen && !state.books.length)) return;
+  const headlines = await invoke("release_notes").catch(() => []);
+  if (!headlines.length) return;
+  const card = document.createElement("div");
+  card.className = "update-bar news-card";
+  card.innerHTML = `<div class="news-text"><b>${esc(T.newsTitle(version))}</b>${newsList(headlines)}
+      <button class="text-button" data-all>${T.newsAll}</button></div>
+    <button class="quiet-button" data-close aria-label="${T.winClose}">✕</button>`;
+  document.body.append(card);
+  $("[data-close]", card).onclick = () => card.remove();
+  $("[data-all]", card).onclick = () => call("open_url", { url: `https://github.com/byte-me-pls/celsus/releases/tag/v${version}` });
+}
+
 /** Say that a newer release is out, once for each release, until it is closed. */
 async function announceUpdate() {
   if (state.settings.update_check === "0") return;
@@ -1087,7 +1217,7 @@ async function announceUpdate() {
   try { if (localStorage.getItem("celsus-update-seen") === update.version) return; } catch {}
   const bar = document.createElement("div");
   bar.className = "update-bar";
-  bar.innerHTML = `<span>${esc(T.updateOut(update.version))}</span><button class="primary-button" data-get>${update.installs_itself ? T.updateInstall : T.updateGet}</button><button class="quiet-button" data-close aria-label="${T.winClose}">✕</button>`;
+  bar.innerHTML = `<div class="news-text"><span>${esc(T.updateOut(update.version))}</span>${newsList(update.headlines)}</div><button class="primary-button" data-get>${update.installs_itself ? T.updateInstall : T.updateGet}</button><button class="quiet-button" data-close aria-label="${T.winClose}">✕</button>`;
   document.body.append(bar);
   const close = () => { try { localStorage.setItem("celsus-update-seen", update.version); } catch {} bar.remove(); };
   $("[data-get]", bar).onclick = async (e) => {
@@ -1139,6 +1269,8 @@ listen("library-changed", async () => {
     else renderLibrary();
   }
 });
+
+listen("jobs-changed", () => refreshJobViews());
 
 listen("job-updated", async ({ payload: job }) => {
   if (job.status !== "running") state.stopping.delete(job.id);
@@ -1211,9 +1343,12 @@ invoke("languages").then((list) => {
 }).catch(() => {});
 applyStrings();
 setTheme(document.documentElement.dataset.theme || "dark");
+invoke("app_version").then((v) => { const el = $("#app-version"); if (el) el.textContent = `v${v}`; }).catch(() => {});
 (async () => {
   state.settings = await loadSettings().catch(() => ({ target_lang: DEFAULT_TARGET }));
   await refreshProfile().catch(() => {});
   go("library");
+  await refreshCounts().catch(() => {});
+  await announceNews();
   announceUpdate();
 })();

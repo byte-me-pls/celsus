@@ -6,7 +6,7 @@ addLocale("tr", {
     profileDefault: "Profil", noModel: "Model yok",
     // library
     libraryTitle: "Kütüphane", addBooks: "Kitap ekle", search: "Kitap ya da yazar ara", results: (n) => `${n} kitap`,
-    fAll: "Tümü", fTranslated: "Çevrilmiş", fBusy: "Çevriliyor", fUntranslated: "Çevrilmemiş",
+    fAll: "Tümü", fTranslated: "Çevrilmiş", fPartial: "Yarım kalan", fBusy: "Çevriliyor", fUntranslated: "Çevrilmemiş",
     emptyTitle: "Kütüphane boş", emptyText: "İlk kitabını eklemek için bir PDF sürükle ya da seç.", emptyFilter: "Bu filtrede kitap yok.",
     pagesN: (n) => `${n} sayfa`, notTranslated: "Henüz çevrilmedi", translating: "Çevriliyor…", queued: "Sırada",
     translatedOf: (l, a, b) => `${l.toUpperCase()} · ${a}/${b} sayfa`,
@@ -26,15 +26,15 @@ addLocale("tr", {
     // jobs
     jobsTitle: "Çeviriler", noJobs: "Henüz çeviri işi yok. Bir kitabı açıp çeviri başlatabilirsin.",
     st_queued: "Sırada", st_running: "Çevriliyor", st_done: "Bitti", st_failed: "Hata", st_cancelled: "Durduruldu", st_stopping: "Durduruluyor…",
-    cancel: "Durdur", retry: "Devam et", openBook: "Kitabı aç", tokens: (n) => `${n.toLocaleString("tr")} token`, waitingS: (s) => `Sınır: ${s} sn bekleniyor`,
+    cancel: "Durdur", retry: "Devam et", jobRemove: "Kaldır", jobRemoveHint: "Bu işi listeden kaldır. Çevrilmiş sayfaları kalır.", jobsClear: (n) => `Bitenleri kaldır (${n})`, retryAt: (t) => `Şimdilik durdu; ${t} sularında kendiliğinden yeniden denenecek.`, openBook: "Kitabı aç", tokens: (n) => `${n.toLocaleString("tr")} token`, waitingS: (s) => `Sınır: ${s} sn bekleniyor`,
     onPage: (n, s) => `sayfa ${n}, ${s} sn`,
     jobPages: (n) => `${n} sayfa`,
     // reader
     readerSide: "Yan yana", readerTrans: "Çeviri", readerOrig: "Orijinal", goPage: "Sayfa", original: "Orijinal", translation: "Çeviri",
     noOutput: "Bu dilde henüz çeviri yok",
     // settings
-    settingsTitle: "Ayarlar", tGeneral: "Genel", tModels: "Modeller", tTranslation: "Çeviri", tFonts: "Yazı tipleri", tStorage: "Depolama", tAbout: "Hakkında",
-    uiLang: "Arayüz dili", uiLangHint: "Değişiklik uygulama yeniden yüklenince geçerli olur.", system: "Sistem", theme: "Tema", themeHint: "Cygnus renkleri.",
+    settingsTitle: "Ayarlar", tGeneral: "Genel", tColors: "Renkler", tModels: "Modeller", tTranslation: "Çeviri", tFonts: "Yazı tipleri", tStorage: "Depolama", tAbout: "Hakkında",
+    uiLang: "Arayüz dili", uiLangHint: "Değişiklik uygulama yeniden yüklenince geçerli olur.", system: "Sistem", theme: "Tema", themeHint: "Cygnus renkleri.", colorsHint: "Arayüzün bütün renkleri. Her temanın renkleri ayrı tutulur; ötekini ayarlamak için temayı değiştir.", colorsReset: "Temanın renklerine dön", colorsResetOne: "Temanınki", colBackground: "Arka plan", colPanel: "Kenar çubuğu ve kartlar", colSurface: "Yükseltilmiş yüzeyler", colField: "Giriş alanları", colLine: "Çizgiler", colText: "Yazı", colSoft: "İkincil yazı", colGood: "Başarı", colBad: "Hata", colWarn: "Uyarı", colInfo: "Bilgi", palettes: { charcoal: "Kömür", night: "Gece", forest: "Orman", plum: "Erik", parchment: "Parşömen", paper: "Kâğıt", mist: "Sis", sage: "Adaçayı" }, accent: "Vurgu rengi", accentHint: "Düğmelerin, bağlantıların ve seçili olanın rengi. Birini seç ya da kendi rengini belirle.", accentDefault: "Celsus'un kendi rengi", accentOwn: "Kendi rengin",
     defaultTarget: "Varsayılan hedef dil", defaultTargetHint: "Yeni çevirilerde önce bu dil seçili gelir.",
     modelsHint: "OpenAI uyumlu herhangi bir uç nokta kullanılabilir. Anahtarlar Windows Kimlik Bilgisi Yöneticisi'nde saklanır.",
     addModel: "Model ekle", isDefault: "Varsayılan", makeDefault: "Varsayılan yap", edit: "Düzenle", remove: "Sil", keyStored: "anahtar kayıtlı", noKey: "anahtar yok",
@@ -45,7 +45,7 @@ addLocale("tr", {
     answerWait: "Cevap bekleme süresi", answerWaitHint: "Saniye. Bu sürede cevap vermeyen model beklenmez, iş bir uyarıyla durur. Kendi bilgisayarında çalışan yavaş bir model için süreyi artır.",
     modelsAll: (n) => `${n} modelin hepsini göster`, modelsNote: "Adlar modeli yapanın adıyla başlar. Metinle cevap vermeyen modeller (ses, arama, güvenlik) listede gösterilmez.",
     modelsTry: "Çalışan modelleri bul", modelsTrying: (a, b) => `Modeller deneniyor… ${a} / ${b}`, modelsTried: (a, b) => `${a} / ${b} model cevap verdi. Liste artık bunları gösteriyor.`,
-    updateOut: (v) => `Celsus ${v} çıktı`, updateGet: "İndir", updateCheck: "Yeni sürümlere bak", updateCheckHint: "Uygulama açılırken GitHub'a yeni bir sürüm çıkıp çıkmadığını sorar. Sen ya da kitapların hakkında hiçbir şey gönderilmez.", upToDate: "En yeni sürümü kullanıyorsun",
+    updateOut: (v) => `Celsus ${v} çıktı`, updateGet: "İndir", newsTitle: (v) => `Celsus ${v} ile gelenler`, newsAll: "Tüm notlar", newsMore: (n) => `ve ${n} değişiklik daha`, updateCheck: "Yeni sürümlere bak", updateCheckHint: "Uygulama açılırken GitHub'a yeni bir sürüm çıkıp çıkmadığını sorar. Sen ya da kitapların hakkında hiçbir şey gönderilmez.", closeToTray: "Kapatınca arka planda çalışsın", closeToTrayHint: "Pencereyi kapatınca Celsus saatin yanında simge olarak kalır ve sıradaki çevirileri sürdürür. Simgeye tıklayınca yeniden açılır; menüsünden tamamen kapatılır.", trayOpen: "Celsus'u aç", trayQuit: "Celsus'tan çık", upToDate: "En yeni sürümü kullanıyorsun",
     updateInstall: "Güncelle ve yeniden başlat", updateInstalling: "Güncelleniyor…", updateFailed: "Güncelleme kurulamadı. Yerine indirme sayfası açıldı.",
     errors: { no_model: "Çeviri için bir model gerekiyor. Önce bir bağlantı ekle ve çeviri için bir model seç.", no_text: "Bu sayfalarda çevrilecek metin yok. Taranmış bir kitap yalnızca sayfa resimlerinden oluşur; Celsus bunları henüz okuyamıyor.", bad_key: "Bağlantı bu anahtarı kabul etmedi. Anahtarın eksiksiz kopyalandığını ve bu servise ait olduğunu kontrol et.", bad_url: "Adres https:// ile başlamalı (kendi bilgisayarındaki ya da ağındaki bir model için http:// olabilir).", no_answer: "Model zamanında cevap vermedi, çeviri durduruldu. Ayarlar → Modeller'den başka bir model seç ya da Ayarlar → Çeviri'den bekleme süresini artır." },
     readable: "Okunabilirlik sınırı", readableHint: "Uzun çeviriler en fazla orijinal boyutun %70'ine, en az 6 pt'ye küçültülür. Sığmayan blok orijinal kalır ve işaretlenir.",
@@ -101,7 +101,7 @@ addLocale("tr", {
     popTitle: "Çeviri başlat", popLang: "Hedef dil", thisPage: (p) => `Bu sayfa (${p})`, nextTen: (a, b) => `Buradan 10 sayfa (${a}–${b})`,
     allMissing: (n) => `Çevrilmemiş tüm sayfalar (${n})`, start: "Kuyruğa ekle", moreOptions: "Ayrıntılı ayarlar", queued: "Çeviri sıraya alındı. Bitince burada görünür.",
     ready: (l) => `${l} çeviri güncellendi`, loading: "Açılıyor…", failed: "Bu PDF açılamadı", nothing: "Seçilen sayfalar zaten çevrilmiş.",
-    pageOf: (n) => `/ ${n}`, prev: "Önceki sayfa", next: "Sonraki sayfa",
+    pageOf: (n) => `/ ${n}`, prev: "Önceki sayfa", next: "Sonraki sayfa", contents: "İçindekiler", find: "Ara", close: "Kapat", noContents: "Bu PDF'in kendi içindekiler listesi yok.", findPlaceholder: "Kitapta ara", searching: (a, b) => `Aranıyor… ${a}/${b} sayfa`, found: (n) => (n ? `${n} sonuç` : "Bulunamadı"), pageN: (n) => `Sayfa ${n}`, light: "Okuma ışığı", lightPaper: "Kağıt", lightNight: "Gece ışığı", lightDark: "Karanlık", warmth: "Sıcaklık", brightness: "Parlaklık", lightNightNote: "Sayfalar akşamları gözü yormayan sıcak bir ışıkla gösterilir. N tuşu açıp kapatır.", lightDarkNote: "Sayfalar koyu zemin üzerinde açık renkte gösterilir. Resimler de tersine döner.",
   },
   // The web edition (server).
   web: {

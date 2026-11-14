@@ -138,7 +138,35 @@ const ICON = {
   translate: '<svg viewBox="0 0 24 24"><path d="M4 5h9M8.5 3v2M6 5c.6 3.6 2.8 6.5 6 8"/><path d="M11 5c-.6 3.4-2.9 6.4-7 8.5"/><path d="M13 21l4-10 4 10M14.5 17.5h5"/></svg>',
   left: '<svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>',
   right: '<svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>',
+  contents: '<svg viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1"/><circle cx="4.5" cy="12" r="1"/><circle cx="4.5" cy="18" r="1"/></svg>',
+  find: '<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>',
+  close: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+  light: '<svg viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/></svg>',
 };
+
+/* ---------- the reading light ---------- */
+
+/** How pages are lit: as printed, warmer for the evening, or light on dark. Warmth and brightness from 0 to 1. */
+function readingLight() {
+  const l = viewPrefs().light || {};
+  const num = (v, d, lo) => (typeof v === "number" && v >= lo && v <= 1 ? v : d);
+  return {
+    mode: ["paper", "night", "dark"].includes(l.mode) ? l.mode : "paper",
+    warmth: num(l.warmth, 0.35, 0),
+    brightness: num(l.brightness, 1, 0.4),
+  };
+}
+
+/** Lay the light over the pages. The colour is multiplied into each page, the way a warm lamp takes the blue out
+    of white paper; dark pages are the page turned over, with its colours kept. */
+function applyReadingLight(box, light) {
+  const warm = light.mode === "paper" ? 0 : light.warmth;
+  // Towards candlelight as the warmth goes up, dimmer as the brightness goes down.
+  const tint = [255, 150, 60].map((c) => Math.round((255 + (c - 255) * warm) * light.brightness));
+  box.classList.toggle("lit", warm > 0 || light.brightness < 1);
+  box.classList.toggle("dark-pages", light.mode === "dark");
+  box.style.setProperty("--rd-tint", `rgb(${tint.join(",")})`);
+}
 
 async function renderReader(r) {
   reader?.destroy();
@@ -161,6 +189,8 @@ async function renderReader(r) {
     <div class="rd">
       <header class="rd-bar">
         <button class="rd-icon" id="rd-back" title="${RS.back}">${ICON.back}</button>
+        <button class="rd-icon" id="rd-contents" title="${RS.contents}">${ICON.contents}</button>
+        <button class="rd-icon" id="rd-find" title="${RS.find}">${ICON.find}</button>
         <div class="rd-title"><b>${esc(book.title)}</b><small>${esc(book.author || "")}</small></div>
         <div class="segmented" id="rd-lang">
           <button data-lang="orig">${RS.original}</button>
@@ -174,6 +204,16 @@ async function renderReader(r) {
           <button class="rd-zoom-val" id="rd-zoom-val" title="${RS.fit}"></button>
           <button class="rd-icon" id="rd-zoom-in" title="${RS.zoomIn}">${ICON.plus}</button>
         </div>
+        <div class="rd-menu-wrap" id="rd-light-wrap">
+          <button class="rd-icon" id="rd-light" title="${RS.light} (N)">${ICON.light}</button>
+          <div class="rd-light" id="rd-light-menu" hidden>
+            <h3>${RS.light}</h3>
+            <div class="segmented" id="rd-light-mode"><button data-light="paper">${RS.lightPaper}</button><button data-light="night">${RS.lightNight}</button><button data-light="dark">${RS.lightDark}</button></div>
+            <label class="rd-slider" id="rd-warmth-row"><span>${RS.warmth}</span><input type="range" id="rd-warmth" min="0" max="100" step="1"></label>
+            <label class="rd-slider"><span>${RS.brightness}</span><input type="range" id="rd-brightness" min="40" max="100" step="1"></label>
+            <p class="rd-light-note" id="rd-light-note"></p>
+          </div>
+        </div>
         <label class="rd-pageno"><input id="rd-page" type="number" min="1" max="${book.pages}" value="1"><span>${RS.pageOf(book.pages)}</span></label>
         <span class="spacer"></span>
         <span class="rd-live" id="rd-live" hidden></span>
@@ -186,13 +226,28 @@ async function renderReader(r) {
           </div>
         </div>
       </header>
-      <div class="rd-scroll" id="rd-scroll" tabindex="0"><div class="rd-pages" id="rd-pages"></div></div>
-      <button class="rd-flip prev" id="rd-prev" title="${RS.prev}" hidden>${ICON.left}</button>
-      <button class="rd-flip next" id="rd-next" title="${RS.next}" hidden>${ICON.right}</button>
+      <div class="rd-main">
+        <aside class="rd-side" id="rd-side" hidden>
+          <div class="rd-side-head">
+            <div class="segmented" id="rd-side-tabs"><button data-side="contents">${RS.contents}</button><button data-side="find">${RS.find}</button></div>
+            <button class="rd-icon" id="rd-side-close" title="${RS.close}">${ICON.close}</button>
+          </div>
+          <div class="rd-side-body" id="rd-side-body"></div>
+        </aside>
+        <div class="rd-scroll" id="rd-scroll" tabindex="0"><div class="rd-pages" id="rd-pages"></div></div>
+        <button class="rd-flip prev" id="rd-prev" title="${RS.prev}" hidden>${ICON.left}</button>
+        <button class="rd-flip next" id="rd-next" title="${RS.next}" hidden>${ICON.right}</button>
+      </div>
       <div class="rd-pop" id="rd-pop" hidden></div>
     </div>`;
   reader = new Reader(book, files, view);
   await reader.start(Math.max(1, Math.min(book.pages, r.page || 1)));
+}
+
+/** A letter as a search compares it: small, without its accents, and an I the same with or without its dot, so
+    that what is looked for is found whatever the case and the language of the book. */
+function fold(c) {
+  return c.toLowerCase().normalize("NFD").replace(/\p{M}/gu, "").replace(/ı/g, "i");
 }
 
 class Reader {
@@ -217,6 +272,7 @@ class Reader {
 
   destroy() {
     this.alive = false;
+    this.findRun = null;
     this.observer?.disconnect();
     document.removeEventListener("keydown", this.onKey);
     window.removeEventListener("resize", this.onResize);
@@ -233,6 +289,7 @@ class Reader {
 
   async start(page) {
     this.bindBar();
+    applyReadingLight($(".rd"), readingLight());
     this.pagesBox.innerHTML = `<p class="rd-msg">${RS.loading}</p>`;
     try {
       this.docs = await Promise.all(this.sources().map(openPdf));
@@ -249,6 +306,253 @@ class Reader {
     this.build();
     this.goTo(page, false);
     this.updateLive();
+    const side = viewPrefs().side;
+    if (side) this.openSide(side);
+  }
+
+  /* ----- the side panel: the book's contents, and search ----- */
+
+  openSide(tab) {
+    const side = $("#rd-side");
+    const wasOpen = !side.hidden;
+    side.hidden = false;
+    this.sideTab = tab;
+    saveViewPrefs({ side: tab });
+    for (const b of $$("#rd-side-tabs button")) b.setAttribute("aria-pressed", String(b.dataset.side === tab));
+    $("#rd-contents").setAttribute("aria-pressed", String(tab === "contents"));
+    $("#rd-find").setAttribute("aria-pressed", String(tab === "find"));
+    if (tab === "contents") this.showContents();
+    else this.showFind();
+    // The pages have less room beside the panel.
+    if (!wasOpen) this.layout(true);
+  }
+
+  closeSide() {
+    $("#rd-side").hidden = true;
+    saveViewPrefs({ side: null });
+    $("#rd-contents").setAttribute("aria-pressed", "false");
+    $("#rd-find").setAttribute("aria-pressed", "false");
+    this.layout(true);
+  }
+
+  /** The outline the PDF carries (what a browser shows beside a PDF), with its titles in the language read. */
+  async outline() {
+    if (this.outlineItems) return this.outlineItems;
+    const shown = this.docs[this.docs.length - 1];
+    let items = await shown.getOutline().catch(() => null);
+    let doc = shown;
+    if (!items?.length && this.docs.length > 1) {
+      doc = this.docs[0];
+      items = await doc.getOutline().catch(() => null);
+    }
+    const flat = [];
+    const walk = async (list, depth) => {
+      for (const it of list || []) {
+        let page = null;
+        try {
+          let dest = it.dest;
+          if (typeof dest === "string") dest = await doc.getDestination(dest);
+          if (Array.isArray(dest)) {
+            const ref = dest[0];
+            page = typeof ref === "number" ? ref + 1 : (await doc.getPageIndex(ref)) + 1;
+          }
+        } catch {}
+        flat.push({ title: (it.title || "").trim(), page, depth });
+        if (flat.length < 3000) await walk(it.items, depth + 1);
+      }
+    };
+    await walk(items, 0);
+    // Titles are headings of the book, translated with its pages: show them as the pages show them.
+    if (this.view.lang !== "orig" && flat.length) {
+      const got = await invoke("cached_translations", { lang: this.view.lang, texts: flat.map((f) => f.title) }).catch(() => null);
+      if (got) flat.forEach((f, i) => { if (got[i]) f.title = got[i]; });
+    }
+    this.outlineItems = flat;
+    return flat;
+  }
+
+  async showContents() {
+    const body = $("#rd-side-body");
+    body.innerHTML = `<p class="rd-side-note">${RS.loading}</p>`;
+    const items = await this.outline();
+    if (!this.alive || this.sideTab !== "contents") return;
+    if (!items.length) { body.innerHTML = `<p class="rd-side-note">${RS.noContents}</p>`; return; }
+    body.innerHTML = `<nav class="rd-toc">${items.map((it, i) => `<button data-toc="${i}" style="--depth:${Math.min(it.depth, 5)}" ${it.page ? "" : "disabled"}>
+      <span>${esc(it.title || "—")}</span>${it.page ? `<small>${it.page}</small>` : ""}</button>`).join("")}</nav>`;
+    for (const b of $$("[data-toc]", body)) b.onclick = () => this.goTo(items[Number(b.dataset.toc)].page, false);
+    this.markContents(true);
+  }
+
+  /** Mark in the contents the part the page being read belongs to. */
+  markContents(reveal) {
+    if (this.sideTab !== "contents" || $("#rd-side").hidden || !this.outlineItems) return;
+    let at = -1;
+    this.outlineItems.forEach((it, i) => { if (it.page && it.page <= this.page) at = i; });
+    for (const b of $$("[data-toc]")) {
+      const on = Number(b.dataset.toc) === at;
+      b.classList.toggle("here", on);
+      if (on && reveal) b.scrollIntoView({ block: "center" });
+    }
+  }
+
+  showFind() {
+    const body = $("#rd-side-body");
+    const f = this.found || { query: "", hits: [] };
+    body.innerHTML = `<form class="rd-find" id="rd-find-form">
+        <input id="rd-find-q" type="search" placeholder="${esc(RS.findPlaceholder)}" value="${esc(f.query)}" autocomplete="off">
+      </form>
+      <p class="rd-side-note" id="rd-find-status"></p>
+      <div class="rd-hits" id="rd-hits"></div>`;
+    const q = $("#rd-find-q");
+    q.focus();
+    q.select();
+    $("#rd-find-form").onsubmit = (e) => {
+      e.preventDefault();
+      const query = q.value.trim();
+      if (query && query === this.found?.query && this.found.hits.length) this.nextHit(1);
+      else this.search(query);
+    };
+    this.drawHits();
+  }
+
+  /** The text of a page of document `d`, with where each piece of it begins in that text. */
+  async pageText(d, p) {
+    this.texts ||= new Map();
+    const key = `${d}:${p}`;
+    if (this.texts.has(key)) return this.texts.get(key);
+    const doc = this.docs[d];
+    const page = await doc.getPage(Math.min(p, doc.numPages));
+    const content = await page.getTextContent();
+    let text = "";
+    const pieces = [];
+    for (const item of content.items) {
+      if (typeof item.str !== "string") continue;
+      // Pieces of one line seldom say where the spaces between them are: one is put in, and runs are one.
+      if (text && !/\s$/.test(text) && !/^\s/.test(item.str)) text += " ";
+      pieces.push({ start: text.length, item });
+      text += item.str + (item.hasEOL ? " " : "");
+    }
+    // What is matched: the letters alone, folded, with no spaces, and no hyphen where a word was broken at the
+    // end of a line. A word in capitals, set in small capitals or broken over two lines is found as it is
+    // written. `at` says where each letter stands in `text`.
+    let letters = "";
+    const at = [];
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (/\s/.test(c)) continue;
+      if ((c === "-" || c === "­") && /^\s/.test(text.slice(i + 1, i + 2))) continue;
+      for (const f of fold(c)) {
+        letters += f;
+        at.push(i);
+      }
+    }
+    const entry = { text, letters, at, pieces };
+    this.texts.set(key, entry);
+    return entry;
+  }
+
+  /** Look for `query` in the pages shown, page by page; each page is listed as soon as it is read. */
+  async search(query) {
+    const run = {};
+    this.findRun = run;
+    this.found = { query, hits: [], at: -1 };
+    this.clearHighlights();
+    const status = $("#rd-find-status");
+    if (!query) { this.drawHits(); if (status) status.textContent = ""; return; }
+    const needle = [...query.replace(/\s+/g, "")].map(fold).join("");
+    const pages = this.book.pages;
+    for (let p = 1; p <= pages; p++) {
+      for (let d = 0; d < this.docs.length; d++) {
+        const page = await this.pageText(d, p).catch(() => null);
+        if (this.findRun !== run || !this.alive) return;
+        if (!page) continue;
+        let from = 0, k;
+        while ((k = page.letters.indexOf(needle, from)) >= 0 && this.found.hits.length < 1000) {
+          // Where it stands in the text as written, from its first letter to just after its last.
+          const start = page.at[k], end = page.at[k + needle.length - 1] + 1;
+          this.found.hits.push({
+            page: p, doc: d, at: start, end,
+            before: page.text.slice(Math.max(0, start - 40), start),
+            match: page.text.slice(start, end),
+            after: page.text.slice(end, end + 60),
+          });
+          from = k + needle.length;
+        }
+      }
+      if (p % 20 === 0 || p === pages) {
+        const st = $("#rd-find-status");
+        if (st) st.textContent = p === pages ? RS.found(this.found.hits.length) : RS.searching(p, pages);
+        this.drawHits();
+        await new Promise((r) => setTimeout(r));
+      }
+    }
+    for (const p of this.drawnRows) this.highlight(p);
+    if (this.found.hits.length && this.found.at < 0) this.nextHit(1);
+  }
+
+  drawHits() {
+    const box = $("#rd-hits");
+    if (!box || !this.found) return;
+    const side = (d) => (this.docs.length > 1 ? (d === 0 ? RS.original : langName(this.view.lang)) : "");
+    box.innerHTML = this.found.hits.slice(0, 300).map((h, i) => {
+      const text = `${esc(h.before)}<mark>${esc(h.match)}</mark>${esc(h.after)}`;
+      return `<button data-hit="${i}" class="${i === this.found.at ? "here" : ""}"><small>${RS.pageN(h.page)}${side(h.doc) ? ` · ${esc(side(h.doc))}` : ""}</small><span>${text}</span></button>`;
+    }).join("");
+    for (const b of $$("[data-hit]", box)) b.onclick = () => this.showHit(Number(b.dataset.hit));
+  }
+
+  nextHit(step) {
+    const f = this.found;
+    if (!f?.hits.length) return;
+    this.showHit((f.at + step + f.hits.length) % f.hits.length);
+  }
+
+  showHit(i) {
+    const f = this.found;
+    f.at = i;
+    for (const b of $$("[data-hit]")) b.classList.toggle("here", Number(b.dataset.hit) === i);
+    $(`[data-hit="${i}"]`)?.scrollIntoView({ block: "nearest" });
+    this.goTo(f.hits[i].page, false);
+    this.highlight(f.hits[i].page);
+  }
+
+  clearHighlights() {
+    for (const el of $$(".rd-hit", this.pagesBox)) el.remove();
+  }
+
+  /** Mark where the words looked for stand on page `p`, in each document shown. */
+  async highlight(p) {
+    const f = this.found;
+    const row = this.rows[p - 1];
+    if (!row) return;
+    for (const el of $$(".rd-hit", row.el)) el.remove();
+    if (!f?.query) return;
+    for (let d = 0; d < this.docs.length; d++) {
+      const hits = f.hits.filter((h) => h.page === p && h.doc === d);
+      if (!hits.length) continue;
+      const { pieces } = await this.pageText(d, p);
+      const doc = this.docs[d];
+      const page = await doc.getPage(Math.min(p, doc.numPages));
+      const slot = row.slots[d];
+      const vp = page.getViewport({ scale: this.pageWidth(p) / page.getViewport({ scale: 1 }).width });
+      for (const h of hits) {
+        const end = h.end;
+        for (const { start, item } of pieces) {
+          const stop = start + item.str.length;
+          if (stop <= h.at || start >= end || !item.str.length) continue;
+          // The part of this piece that is looked for, by the share of its letters.
+          const a = Math.max(h.at, start) - start, b = Math.min(end, stop) - start;
+          const [, , c, dd, e, y] = item.transform;
+          const tall = Math.hypot(c, dd) || item.height || 10;
+          const x0 = e + (item.width * a) / item.str.length, x1 = e + (item.width * b) / item.str.length;
+          const [l, t, r, bt] = vp.convertToViewportRectangle([x0, y - tall * 0.22, x1, y + tall * 0.8]);
+          const mark = document.createElement("div");
+          mark.className = "rd-hit" + (f.hits[f.at] === h ? " here" : "");
+          Object.assign(mark.style, { left: `${Math.min(l, r)}px`, top: `${Math.min(t, bt)}px`, width: `${Math.abs(r - l)}px`, height: `${Math.abs(bt - t)}px` });
+          slot.el.appendChild(mark);
+        }
+      }
+    }
   }
 
   async loadTranslated() {
@@ -261,6 +565,10 @@ class Reader {
   bindBar() {
     const v = this.view;
     $("#rd-back").onclick = () => go("library");
+    $("#rd-contents").onclick = () => (!$("#rd-side").hidden && this.sideTab === "contents" ? this.closeSide() : this.openSide("contents"));
+    $("#rd-find").onclick = () => (!$("#rd-side").hidden && this.sideTab === "find" ? this.closeSide() : this.openSide("find"));
+    $("#rd-side-close").onclick = () => this.closeSide();
+    for (const b of $$("#rd-side-tabs button")) b.onclick = () => this.openSide(b.dataset.side);
     for (const b of $$("#rd-lang button")) {
       b.setAttribute("aria-pressed", String(b.dataset.lang === v.lang));
       b.onclick = () => go("reader", { id: this.book.id, lang: b.dataset.lang, page: this.page });
@@ -288,7 +596,9 @@ class Reader {
     $("#rd-prev").onclick = () => this.goTo(this.page - 1, true);
     $("#rd-next").onclick = () => this.goTo(this.page + 1, true);
     $("#rd-translate").onclick = (e) => { e.stopPropagation(); this.togglePop(); };
-    $("#rd-more").onclick = (e) => { e.stopPropagation(); $("#rd-menu").hidden = !$("#rd-menu").hidden; };
+    $("#rd-more").onclick = (e) => { e.stopPropagation(); $("#rd-light-menu").hidden = true; $("#rd-menu").hidden = !$("#rd-menu").hidden; };
+    $("#rd-light").onclick = (e) => { e.stopPropagation(); $("#rd-menu").hidden = true; $("#rd-light-menu").hidden = !$("#rd-light-menu").hidden; };
+    this.bindLight();
     for (const b of $$("#rd-menu button")) b.onclick = async () => {
       $("#rd-menu").hidden = true;
       if (b.dataset.act === "details") go("book", { id: this.book.id });
@@ -300,6 +610,7 @@ class Reader {
     $(".rd").onclick = (e) => {
       if (!e.target.closest(".rd-pop, #rd-translate")) $("#rd-pop").hidden = true;
       if (!e.target.closest(".rd-menu-wrap")) $("#rd-menu").hidden = true;
+      if (!e.target.closest("#rd-light-wrap")) $("#rd-light-menu").hidden = true;
     };
     this.scroller.addEventListener("scroll", () => this.onScroll(), { passive: true });
     this.scroller.addEventListener("wheel", (e) => {
@@ -313,6 +624,27 @@ class Reader {
         this.goTo(this.page + (e.deltaY > 0 ? 1 : -1), true);
       }
     }, { passive: false });
+  }
+
+  /** The reading light's panel: what it shows follows the light chosen, and each change is seen at once. */
+  bindLight() {
+    const show = () => {
+      const l = readingLight();
+      for (const b of $$("#rd-light-mode button")) b.setAttribute("aria-pressed", String(b.dataset.light === l.mode));
+      $("#rd-warmth").value = Math.round(l.warmth * 100);
+      $("#rd-brightness").value = Math.round(l.brightness * 100);
+      $("#rd-warmth-row").hidden = l.mode === "paper";
+      $("#rd-light-note").textContent = l.mode === "dark" ? RS.lightDarkNote : l.mode === "night" ? RS.lightNightNote : "";
+      $("#rd-light-note").hidden = l.mode === "paper";
+      $("#rd-light").setAttribute("aria-pressed", String(l.mode !== "paper" || l.brightness < 1));
+      applyReadingLight($(".rd"), l);
+    };
+    const set = (change) => { saveViewPrefs({ light: { ...readingLight(), ...change } }); show(); };
+    for (const b of $$("#rd-light-mode button")) b.onclick = () => set({ mode: b.dataset.light });
+    $("#rd-warmth").oninput = (e) => set({ warmth: Number(e.target.value) / 100 });
+    $("#rd-brightness").oninput = (e) => set({ brightness: Number(e.target.value) / 100 });
+    this.toggleLight = () => set({ mode: readingLight().mode === "night" ? "paper" : "night" });
+    show();
   }
 
   /* ----- layout ----- */
@@ -444,6 +776,8 @@ class Reader {
     slot.canvas = canvas;
     slot.drawn = width;
     slot.stale = false;
+    // The marks of a search are placed for the page's size: place them again.
+    if (this.found?.hits.some((h) => h.page === p)) this.highlight(p);
   }
 
   /** Free a page that scrolled far away. */
@@ -471,6 +805,7 @@ class Reader {
     this.page = p;
     $("#rd-page").value = p;
     saveReadingPrefs(this.book.id, { page: p });
+    this.markContents(false);
     if (this.view.mode === "paged") {
       if (changed || !this.rows[p - 1].el.offsetParent) {
         this.rows.forEach((row, i) => (row.el.hidden = i + 1 !== p));
@@ -508,6 +843,7 @@ class Reader {
       if (p !== this.page) {
         this.page = p;
         $("#rd-page").value = p;
+        this.markContents(false);
         clearTimeout(this.saveTimer);
         this.saveTimer = setTimeout(() => saveReadingPrefs(this.book.id, { page: p }), 300);
       }
@@ -515,7 +851,11 @@ class Reader {
   }
 
   key(e) {
-    if (state.route.view !== "reader" || e.target.matches?.("input, textarea, select")) return;
+    if (state.route.view !== "reader") return;
+    // Ctrl+F looks in the book; F3 goes to the next place found, Shift+F3 to the one before.
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") { e.preventDefault(); this.openSide("find"); return; }
+    if (e.key === "F3" && this.found?.hits.length) { e.preventDefault(); this.nextHit(e.shiftKey ? -1 : 1); return; }
+    if (e.target.matches?.("input, textarea, select")) return;
     const paged = this.view.mode === "paged";
     if ((e.ctrlKey || e.metaKey) && (e.key === "+" || e.key === "=")) { e.preventDefault(); this.setZoom(this.view.zoom * 1.15); return; }
     if ((e.ctrlKey || e.metaKey) && e.key === "-") { e.preventDefault(); this.setZoom(this.view.zoom / 1.15); return; }
@@ -525,7 +865,9 @@ class Reader {
     if (!paged && (e.key === "ArrowRight" || e.key === "ArrowLeft")) { e.preventDefault(); this.goTo(this.page + (e.key === "ArrowRight" ? 1 : -1), true); return; }
     if (e.key === "Home") { e.preventDefault(); this.goTo(1, false); }
     if (e.key === "End") { e.preventDefault(); this.goTo(this.book.pages, false); }
-    if (e.key === "Escape") { $("#rd-pop").hidden = true; $("#rd-menu").hidden = true; }
+    if (e.key === "Escape") { $("#rd-pop").hidden = true; $("#rd-menu").hidden = true; $("#rd-light-menu").hidden = true; }
+    // N turns the night light on and off.
+    if (e.key.toLowerCase() === "n" && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); this.toggleLight?.(); }
   }
 
   /* ----- translating from the reader ----- */
@@ -615,6 +957,7 @@ class Reader {
       old?.doc.then((d) => d.destroy()).catch(() => {});
       if (!docs || !this.alive) return;
       this.docs = docs;
+      this.texts = null;
       await this.loadTranslated();
       for (const row of this.rows) {
         if (this.translated.has(Number(row.el.dataset.page))) row.el.querySelector(".rd-untranslated")?.remove();
@@ -642,6 +985,8 @@ class Reader {
     const page = this.page;
     for (const row of this.rows) for (const s of row.slots) s.task?.cancel();
     this.docs = await Promise.all(this.sources().map(openPdf));
+    this.texts = null;
+    this.outlineItems = null;
     await this.loadTranslated();
     this.build();
     this.goTo(page, false);

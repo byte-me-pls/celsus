@@ -2,6 +2,49 @@
 
 Versions are 0.YYMM.N: year and month of the release, then a counter for further releases in that month.
 
+## Unreleased
+
+- **A night light for reading.** The reader has a reading light beside its zoom: pages can stay as printed, take a warm evening light, or be shown light on dark. Warmth and brightness are set with two sliders, and N turns the night light on and off. The choice is kept for every book.
+- **Colours of your own.** Settings has a page for colours: whole palettes to start from (four for each theme),
+  the accent at a click, and every colour of the interface on its own: background, sidebar, surfaces, fields,
+  lines, text, and the colours of success, errors, warnings and notes. Each theme keeps its own, and colours that
+  must be read are made to read on the background chosen.
+- **Contents and search in the reader.** A panel beside the pages lists the contents the PDF carries, as a
+  browser shows them, with the titles in the language being read where the book's translation has them; the part
+  being read is marked, and a click goes there. The same panel searches the book (Ctrl+F): every place is listed
+  with its page and the words around it, and marked on the page; F3 goes to the next one. A word is found in
+  capitals or small, in small capitals, with or without its accents, and broken over two lines.
+- **Closing the window keeps Celsus at work.** Celsus stays beside the clock (in the menu bar on a Mac) and goes on
+  with the translations in its queue; a click on its icon opens the window again, and its menu quits. A setting in
+  General turns this off. On a system with no place for such icons, closing quits as before.
+- **A job that fails for a passing reason goes on by itself.** A model that stays silent, a connection that
+  drops or a rate limit that is used up used to end the job, and it waited for someone to press Continue. Now it
+  goes back to the queue and is tried again after two, five and fifteen minutes, and for as long as each try gets
+  some pages further. The list says when. A key that is refused, a model that is gone or answers that cannot be
+  used still end the job, since waiting does not help there.
+- **Which model translates.** Each job in the list says the model it uses, marked while it is at work. The version
+  of the app stands at the top of the window.
+- **What a new version brings is shown.** After an update Celsus says once, in short, what the new version
+  brought, with a link to all its notes. The notice that a newer version is out lists it too.
+- **The brand at the head of the sidebar.** The facade of the Library of Celsus and its name now stand large at
+  the top of the sidebar; a click on it goes to the library. On the web too.
+- **A few translated pages do not make a translated book.** A book counted as translated, and showed the badge of
+  the language, as soon as one of its pages was. Now only a book translated from its first page to its last does;
+  one that is partly translated has a dashed badge with how far it got (TR %9), and a filter of its own.
+- **Jobs can be taken off the list.** Every job that has ended has a Remove button, and the list one to remove all
+  that have ended. Their translated pages stay, and what they used still counts in the totals. A stopped or failed
+  job whose pages have all been translated since, by a later job, leaves the list by itself.
+- **One Celsus at a time.** Starting Celsus while it is open brings its window forward instead of opening a second
+  app on the same library. And the queue of a library is worked by one app only, even when an older copy is left
+  open: two copies used to run the same job side by side.
+- **Translations no longer run over one another.** Two blocks whose boxes overlapped were never checked against
+  each other, though their lines did not: a paragraph cut in two by a small picture in one of its lines, an index
+  entry that began on the line of the one before. When the first came out longer, the two were written over one
+  another. Now the second begins on the next line, and where nothing else helps one of them keeps its original.
+- **A speech bubble drawn over a drawing is read as one.** Lines drawn under the white of a bubble or of another
+  round shape no longer cut the text in it in two.
+- **Long author names no longer push a book's card over the next one** in the library.
+
 ## 0.2611.6 (2026-11-13)
 
 - **Titles set flush right stay flush right.** A title or subtitle of two lines, set against the right edge as on

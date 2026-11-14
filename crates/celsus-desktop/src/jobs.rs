@@ -76,6 +76,9 @@ pub fn start(app: AppHandle, db_path: PathBuf, library: PathBuf) -> Runner {
 }
 
 fn worker(app: AppHandle, db_path: &Path, library: &Path, wake: Receiver<()>, current: Current) {
+    // The queue of a library is worked by one app at a time. Another copy left open (an older one, or one
+    // installed somewhere else) holds it, and this one waits until that one is closed.
+    let _lock = queue_lock(db_path);
     let conn = match db::open(db_path) {
         Ok(c) => c,
         Err(e) => {
@@ -86,29 +89,89 @@ fn worker(app: AppHandle, db_path: &Path, library: &Path, wake: Receiver<()>, cu
     let _ = db::requeue_interrupted(&conn);
     loop {
         match db::next_queued(&conn) {
+            // Taken from the queue only if nobody took it in the meantime.
+            Ok(Some(id)) if !db::claim_job(&conn, id).unwrap_or(false) => continue,
             Ok(Some(id)) => {
                 let cancel = Arc::new(AtomicBool::new(false));
                 let book = db::job(&conn, id).map(|j| j.book_id).unwrap_or(-1);
                 *current.lock().unwrap() = Some((id, book, cancel.clone()));
+                let before = translated(&conn, id);
                 let outcome = run(&app, &conn, library, id, &cancel);
                 *current.lock().unwrap() = None;
-                let (status, error) = match outcome {
-                    Ok(true) => ("cancelled", None),
-                    Ok(false) => ("done", None),
-                    Err(e) => ("failed", Some(e)),
-                };
-                let _ = db::set_status(&conn, id, status, error.as_deref());
+                let fresh = translated(&conn, id) > before;
+                match outcome {
+                    Ok(cancelled) => {
+                        let status = if cancelled { "cancelled" } else { "done" };
+                        let _ = db::set_status(&conn, id, status, None);
+                    }
+                    // A model that stayed silent, a connection that dropped, a limit that was reached: these pass.
+                    // The job is tried again on its own after a while, as long as the tries get it further.
+                    Err(e) => match retry_after(&e, db::retries(&conn, id).unwrap_or(0), fresh) {
+                        Some(wait) => {
+                            let at = db::now() + wait;
+                            let _ = db::schedule_retry(&conn, id, &e, at, fresh);
+                        }
+                        None => {
+                            let _ = db::set_status(&conn, id, "failed", Some(&e));
+                        }
+                    },
+                }
                 if let Ok(job) = db::job(&conn, id) {
+                    // Stopped and failed jobs of the book that have nothing left to go on with leave the list.
+                    if let Ok(n) = db::hide_superseded(&conn, job.book_id, &job.target_lang)
+                        && n > 0
+                    {
+                        let _ = app.emit("jobs-changed", ());
+                    }
                     let _ = app.emit("job-updated", job);
                 }
                 let _ = app.emit("library-changed", ());
             }
             _ => {
-                // Wait for a new job (or check again now and then).
+                // Wait for a new job, or for a job's time to be tried again (looked for now and then).
                 let _ = wake.recv_timeout(Duration::from_secs(30));
             }
         }
     }
+}
+
+/// The lock on the queue of the library beside `db_path`, held for as long as the returned file is open: the
+/// system lets it go when the app ends, however it ends.
+fn queue_lock(db_path: &Path) -> std::fs::File {
+    let path = db_path.with_file_name("jobs.lock");
+    loop {
+        if let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            && file.try_lock().is_ok()
+        {
+            return file;
+        }
+        std::thread::sleep(Duration::from_secs(30));
+    }
+}
+
+/// How many pages of the job's book are translated into its language.
+fn translated(conn: &rusqlite::Connection, id: i64) -> usize {
+    db::job(conn, id)
+        .and_then(|job| db::translated_pages(conn, job.book_id, &job.target_lang))
+        .map_or(0, |pages| pages.len())
+}
+
+/// How long to wait before a failed job is tried again, if it is to be: when it failed for a reason that
+/// passes, and it has not been tried this many times already without getting further. `tries` is that count so
+/// far, and `fresh` says the run that failed got some pages done, which starts the count again.
+fn retry_after(error: &str, tries: i64, fresh: bool) -> Option<i64> {
+    const WAITS: [i64; 3] = [2 * 60, 5 * 60, 15 * 60];
+    let passing = error == "no_answer"
+        || error.contains("provider error")
+        || error.contains("kept refusing requests");
+    let tries = if fresh { 0 } else { tries };
+    passing
+        .then(|| WAITS.get(tries as usize).copied())
+        .flatten()
 }
 
 /// Write the translated book. It is written beside the old file and swapped in, so a crash cannot leave half
@@ -134,7 +197,6 @@ fn run(
 ) -> Result<bool, String> {
     let job = db::job(conn, id)?;
     let book = db::book(conn, job.book_id)?;
-    db::set_status(conn, id, "running", None)?;
     let _ = app.emit("job-updated", db::job(conn, id)?);
 
     let (provider, model) = db::model_for(conn, "translate")?.ok_or("no_model")?;
@@ -335,4 +397,28 @@ fn run(
         ));
     }
     Ok(outcome.cancelled)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::retry_after;
+
+    #[test]
+    fn what_passes_is_tried_again_as_long_as_it_gets_further() {
+        assert_eq!(retry_after("no_answer", 0, false), Some(120));
+        assert_eq!(
+            retry_after("page 3: provider error: timed out", 1, false),
+            Some(300)
+        );
+        assert_eq!(retry_after("no_answer", 2, false), Some(900));
+        assert_eq!(retry_after("no_answer", 3, false), None);
+        // A run that translated pages before it failed starts the count again.
+        assert_eq!(retry_after("no_answer", 3, true), Some(120));
+        // What will not pass by waiting is not tried again.
+        assert_eq!(
+            retry_after("page 1: provider refused: HTTP 401", 0, true),
+            None
+        );
+        assert_eq!(retry_after("no_model", 0, false), None);
+    }
 }
