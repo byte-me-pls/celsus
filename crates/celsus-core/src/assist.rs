@@ -19,15 +19,16 @@ use crate::{BlockId, Language};
 /// What the assistant is told with every batch.
 pub fn instructions(to: &Language) -> String {
     let to = language_name(to);
+    let terms = crate::translate::terms_rule(&to);
     format!(
         "Translate every block into {to}. Keep the author's meaning, negation, register and tone; write natural, \
          grammatical {to}. Translate short labels from figures and tables too. Keep numbers, formulas, code, \
-         identifiers, URLs and proper names exactly as written. Words printed in another style come with tags around \
-         them, such as <i>...</i>, <b>...</b>, <code>...</code> or <c>...</c>: keep every tag exactly as written, \
+         identifiers, URLs and proper names exactly as written. {terms} Words printed in another style come with \
+         tags around them, such as <i>...</i>, <b>...</b>, <code>...</code> or <c>...</c>: keep every tag exactly as written, \
          around the words that say the same in the translation, closed and never one inside another, and add no \
          tags of your own. Do not add notes, explanations, glosses in \
          parentheses or ellipses that are not in the source. Use the book's subject to choose the right sense of a \
-         word, and translate recurring terms the same way every time. Send every block back with \
+         word. Send every block back with \
          submit_translations, keeping its page and id. Blocks are independent pieces of the page: translate each \
          one on its own, even when a sentence continues in the next block."
     )

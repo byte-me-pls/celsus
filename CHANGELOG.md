@@ -2,6 +2,10 @@
 
 Versions are 0.YYMM.N: year and month of the release, then a counter for further releases in that month.
 
+## Unreleased
+
+- **Terms of the field stay as people of the field write them.** A book on software no longer turns an Abstract Factory into a "soyut fabrika": names of patterns, principles, algorithms, protocols, libraries and tools, and the terms practitioners use in the original language, are kept as written, with the grammar of the translation attached to them. A term is translated only where the language has an equivalent its practitioners really use. A list of such names (a pattern catalogue, a part's contents) may now come back as it was, instead of being sent back to be translated word for word.
+
 ## 0.2611.7 (2026-11-14)
 
 - **A night light for reading.** The reader has a reading light beside its zoom: pages can stay as printed, take a warm evening light, or be shown light on dark. Warmth and brightness are set with two sliders, and N turns the night light on and off. The choice is kept for every book.
