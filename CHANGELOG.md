@@ -2,7 +2,7 @@
 
 Versions are 0.YYMM.N: year and month of the release, then a counter for further releases in that month.
 
-## Unreleased
+## 0.2611.8 (2026-11-15)
 
 - **Terms of the field stay as people of the field write them.** A book on software no longer turns an Abstract Factory into a "soyut fabrika": names of patterns, principles, algorithms, protocols, libraries and tools, and the terms practitioners use in the original language, are kept as written, with the grammar of the translation attached to them. A term is translated only where the language has an equivalent its practitioners really use. A list of such names (a pattern catalogue, a part's contents) may now come back as it was, instead of being sent back to be translated word for word.
 
