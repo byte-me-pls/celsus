@@ -129,18 +129,34 @@ pub async fn pending(
     };
     drop(db);
     let done = done_pages(state, book_id, &code(to)).await?;
-    let (st, id, to) = (state.clone(), book_id.to_owned(), to.clone());
+    let (st, id, lang) = (state.clone(), book_id.to_owned(), to.clone());
     let handle = Handle::current();
-    blocking(move || {
+    let mut p = blocking(move || {
         let doc = open(&st, &id)?;
         let mut cache = PgCache {
             state: st,
             handle,
             book_id: id,
         };
-        assist::pending(&doc, &info, &done, &mut cache, &to, &pages, max_chars)
+        assist::pending(
+            &doc,
+            &info,
+            &done,
+            &mut cache,
+            &lang,
+            &pages,
+            max_chars,
+            assist::Fresh::none(),
+        )
     })
-    .await
+    .await?;
+    // Pages whose text was all translated before (the same book added again, a repeated page) are written
+    // now: nothing is left to ask for them, and they would otherwise never be finished.
+    if !p.ready.is_empty() {
+        write_output(state, book_id, to, &p.ready).await?;
+        p.count_ready(&Default::default());
+    }
+    Ok(p)
 }
 
 /// Check and store an assistant's translations; finished pages go into the translated PDF.
@@ -153,14 +169,25 @@ pub async fn submit(
 ) -> ApiResult<SubmitResult> {
     let (st, id, lang) = (state.clone(), book_id.to_owned(), to.clone());
     let handle = Handle::current();
-    let (mut result, complete) = blocking(move || {
+    let assist::Accepted {
+        mut result,
+        complete,
+        ..
+    } = blocking(move || {
         let doc = open(&st, &id)?;
         let mut cache = PgCache {
             state: st,
             handle,
             book_id: id,
         };
-        assist::accept(&doc, &mut cache, &lang, &items, accept_anyway)
+        assist::accept(
+            &doc,
+            &mut cache,
+            &lang,
+            &items,
+            accept_anyway,
+            assist::Fresh::none(),
+        )
     })
     .await?;
     if !complete.is_empty() {

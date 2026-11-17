@@ -62,6 +62,75 @@ pub struct Pending {
     /// Pages in the requested range that are not finished yet (including the ones in this batch).
     pub pages_left: usize,
     pub pages_done: usize,
+    /// Pages looked at whose every block already has a translation that counts: nothing is asked for them,
+    /// and they only have to be written. Whoever keeps the book writes them and counts them as done.
+    #[serde(skip)]
+    pub ready: Vec<usize>,
+    /// The pages among `ready` that have no text to translate at all.
+    #[serde(skip)]
+    pub empty: Vec<usize>,
+    /// How many pages of this answer were finished from earlier translations instead of being asked for.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub finished_from_earlier_translations: usize,
+    /// Said to the assistant when pages were finished that way, so that it can tell whoever asked for them.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub note: String,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+impl Pending {
+    /// Count the ready pages as done once they are written, and say how many came from earlier translations.
+    /// Pages being translated again that are ready have nothing on them to translate: no note for those.
+    pub fn count_ready(&mut self, again: &BTreeSet<usize>) {
+        self.pages_left -= self.ready.len();
+        self.pages_done += self.ready.len();
+        let earlier = self
+            .ready
+            .iter()
+            .filter(|n| !self.empty.contains(n) && !again.contains(n))
+            .count();
+        if earlier == 0 {
+            return;
+        }
+        self.finished_from_earlier_translations += earlier;
+        self.note = format!(
+            "{} page(s) were finished from translations Celsus already had of the same text and were not handed \
+             out. If they should be translated anew, call translate_again for them first.",
+            self.finished_from_earlier_translations
+        );
+    }
+}
+
+/// Which translations count as done. Any translation of the same text counts, from whichever book it was
+/// made for, except on pages being translated again: there only the translations given since count.
+#[derive(Debug, Clone, Copy)]
+pub struct Fresh<'a> {
+    pub pages: &'a BTreeSet<usize>,
+    pub keys: &'a std::collections::HashSet<String>,
+}
+
+impl Fresh<'_> {
+    /// Nothing is being translated again.
+    pub fn none() -> Fresh<'static> {
+        static PAGES: BTreeSet<usize> = BTreeSet::new();
+        static KEYS: std::sync::LazyLock<std::collections::HashSet<String>> =
+            std::sync::LazyLock::new(std::collections::HashSet::new);
+        Fresh {
+            pages: &PAGES,
+            keys: &KEYS,
+        }
+    }
+
+    fn known(&self, cache: &mut dyn Cache, page: usize, key: &str) -> bool {
+        if self.pages.contains(&page) {
+            self.keys.contains(key)
+        } else {
+            cache.get(key).is_some()
+        }
+    }
 }
 
 fn pages_in(book_pages: usize, pages: &[usize]) -> Vec<usize> {
@@ -100,9 +169,11 @@ pub fn pending(
     to: &Language,
     pages: &[usize],
     max_chars: usize,
+    fresh: Fresh,
 ) -> Result<Pending, String> {
     let all = doc.pages().map_err(|e| e.to_string())?;
     let wanted = pages_in(all.len(), pages);
+    let open = |p: &usize| !done.contains(p) || fresh.pages.contains(p);
     let mut out = Pending {
         title: book.title.clone(),
         subject: book.subject.clone(),
@@ -112,19 +183,27 @@ pub fn pending(
         context_before: String::new(),
         context_after: String::new(),
         blocks: Vec::new(),
-        pages_left: wanted.iter().filter(|p| !done.contains(p)).count(),
-        pages_done: wanted.iter().filter(|p| done.contains(p)).count(),
+        pages_left: wanted.iter().filter(|p| open(p)).count(),
+        pages_done: wanted.iter().filter(|p| !open(p)).count(),
+        ready: Vec::new(),
+        empty: Vec::new(),
+        finished_from_earlier_translations: 0,
+        note: String::new(),
     };
     let mut size = 0;
     let mut last_page = 0;
-    for &n in wanted.iter().filter(|p| !done.contains(p)) {
+    for &n in wanted.iter().filter(|p| open(p)) {
         let extracted = extract_page(doc, &all[n - 1], n as u32).map_err(|e| e.to_string())?;
         adopt_earlier(cache, to, &extracted.layout.blocks);
+        let mut asked = false;
+        let mut any = false;
         for b in extracted.layout.blocks.iter().filter(|b| !b.protected) {
+            any = true;
             let source = b.source();
-            if cache.get(&cache_key(to, &source)).is_some() {
+            if fresh.known(cache, n, &cache_key(to, &source)) {
                 continue;
             }
+            asked = true;
             if size > 0 && size + source.len() > max_chars {
                 break;
             }
@@ -143,6 +222,12 @@ pub fn pending(
                 // Rows of leader dots are handed out cut short, as they are to a model.
                 text: crate::layout::short_leaders(&source),
             });
+        }
+        if !asked {
+            out.ready.push(n);
+            if !any {
+                out.empty.push(n);
+            }
         }
         if size >= max_chars {
             break;
@@ -191,7 +276,8 @@ pub fn accept(
     to: &Language,
     items: &[Submitted],
     accept_anyway: bool,
-) -> Result<(SubmitResult, Vec<usize>), String> {
+    fresh: Fresh,
+) -> Result<Accepted, String> {
     let all = doc.pages().map_err(|e| e.to_string())?;
     let mut by_page: BTreeMap<usize, Vec<&Submitted>> = BTreeMap::new();
     for it in items {
@@ -199,6 +285,8 @@ pub fn accept(
     }
     let mut result = SubmitResult::default();
     let mut complete = Vec::new();
+    let mut given = Vec::new();
+    let mut keys = fresh.keys.clone();
     for (&n, list) in &by_page {
         let Some(page) = all.get(n.wrapping_sub(1)) else {
             for it in list {
@@ -239,20 +327,42 @@ pub fn accept(
                 });
                 continue;
             }
-            cache.put(&cache_key(to, &source), &text);
+            let key = cache_key(to, &source);
+            cache.put(&key, &text);
+            if fresh.pages.contains(&n) {
+                keys.insert(key.clone());
+                given.push(key);
+            }
             result.accepted += 1;
         }
+        let now = Fresh {
+            pages: fresh.pages,
+            keys: &keys,
+        };
         let done = extracted
             .layout
             .blocks
             .iter()
             .filter(|b| !b.protected)
-            .all(|b| cache.get(&cache_key(to, &b.source())).is_some());
+            .all(|b| now.known(cache, n, &cache_key(to, &b.source())));
         if done {
             complete.push(n);
         }
     }
-    Ok((result, complete))
+    Ok(Accepted {
+        result,
+        complete,
+        fresh_keys: given,
+    })
+}
+
+/// What [`accept`] took in.
+pub struct Accepted {
+    pub result: SubmitResult,
+    /// Pages whose every block now has a translation that counts.
+    pub complete: Vec<usize>,
+    /// The keys of the translations given for pages being translated again.
+    pub fresh_keys: Vec<String>,
 }
 
 /// A translated book written out: the PDF, and for each page how many blocks kept the original text.

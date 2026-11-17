@@ -17,7 +17,8 @@ const PROTOCOL: &str = "2025-06-18";
 const SERVER_INSTRUCTIONS: &str = "Celsus is a local book translation library. To translate a book: find it with \
 list_books (or add a PDF with add_book), then repeat get_text_to_translate and submit_translations until no blocks \
 are left. Translate the blocks yourself; Celsus checks each translation, returns the ones it rejects with the reason, \
-and writes finished pages into the translated PDF. get_output gives the file.
+and writes finished pages into the translated PDF. get_output gives the file. Text Celsus has translated before (in \
+this book or another) is not handed out again; to translate pages anew all the same, call translate_again first.
 
 Covers and other pictures with text in them are redrawn, not typed over. To translate a cover: list_pictures finds \
 it, get_picture gives you the image. If you can generate images, draw it yourself: the same picture with every text \
@@ -58,8 +59,8 @@ fn tools() -> Value {
         },
         {
             "name": "get_text_to_translate",
-            "annotations": { "readOnlyHint": true },
-            "description": "The next blocks of text to translate from the unfinished pages, with instructions and surrounding context. Call again after submitting; an empty block list means the requested pages are done.",
+            "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true },
+            "description": "The next blocks of text to translate from the unfinished pages, with instructions and surrounding context. Call again after submitting; an empty block list means the requested pages are done. Pages whose text was all translated before are written into the PDF from those translations as they are met.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -67,6 +68,20 @@ fn tools() -> Value {
                     "target_language": { "type": "string", "description": "Language code of any major world language, e.g. tr, ar, hi, ja, zh-hans, pt-br." },
                     "pages": { "type": "string", "description": "Pages to work on, e.g. \"10-12,15\". Omit for the whole book." },
                     "max_characters": { "type": "integer", "description": "About how much text to return (default 4000)." }
+                },
+                "required": ["book_id", "target_language"]
+            }
+        },
+        {
+            "name": "translate_again",
+            "annotations": { "readOnlyHint": false, "destructiveHint": false },
+            "description": "Translate pages again from the start, as asked when a translation should be redone: earlier translations of their text stop counting, and get_text_to_translate hands their blocks out again. The pages stay in the translated PDF as they were until their new translation is finished.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "book_id": { "type": "integer" },
+                    "target_language": { "type": "string", "description": "Language code, e.g. tr." },
+                    "pages": { "type": "string", "description": "Pages to translate again, e.g. \"10-12,15\". Omit for the whole book." }
                 },
                 "required": ["book_id", "target_language"]
             }
@@ -455,6 +470,13 @@ fn call_text_tool(name: &str, args: &Value) -> Result<Value, String> {
             let mut v = serde_json::to_value(p).map_err(|e| e.to_string())?;
             v["book_id"] = json!(book);
             Ok(v)
+        }
+        "translate_again" => {
+            let book = arg_i64(args, "book_id")?;
+            let lang = arg_lang(args)?;
+            let pages = parse_pages(args.get("pages"))?;
+            let n = assistant::translate_again(&conn, &lib, book, &lang, &pages)?;
+            Ok(json!({ "book_id": book, "pages_to_translate_again": n }))
         }
         "submit_translations" => {
             let book = arg_i64(args, "book_id")?;

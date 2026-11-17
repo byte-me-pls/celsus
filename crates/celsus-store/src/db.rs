@@ -4,6 +4,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeSet, HashSet};
 
 pub type Result<T> = std::result::Result<T, String>;
 
@@ -60,6 +61,18 @@ CREATE TABLE IF NOT EXISTS translated_pages (
     PRIMARY KEY (book_id, lang, page)
 );
 CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, text TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS redo_pages (
+    book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    lang TEXT NOT NULL,
+    page INTEGER NOT NULL,
+    PRIMARY KEY (book_id, lang, page)
+);
+CREATE TABLE IF NOT EXISTS redo_keys (
+    book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    lang TEXT NOT NULL,
+    key TEXT NOT NULL,
+    PRIMARY KEY (book_id, lang, key)
+);
 CREATE TABLE IF NOT EXISTS providers (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
@@ -718,7 +731,111 @@ pub fn all_settings(conn: &Connection) -> Result<std::collections::BTreeMap<Stri
         .map_err(err)
 }
 
+// ---------- pages translated again ----------
+
+/// Pages of a book being translated again into a language: earlier translations of their text do not count.
+pub fn redo_pages(conn: &Connection, book: i64, lang: &str) -> Result<BTreeSet<usize>> {
+    let mut st = conn
+        .prepare("SELECT page FROM redo_pages WHERE book_id = ? AND lang = ?")
+        .map_err(err)?;
+    let rows = st
+        .query_map(params![book, lang_key(lang)], |r| r.get::<_, i64>(0))
+        .map_err(err)?;
+    rows.map(|r| r.map(|p| p as usize).map_err(err)).collect()
+}
+
+/// The translations given since the pages of a book began to be translated again.
+pub fn redo_keys(conn: &Connection, book: i64, lang: &str) -> Result<HashSet<String>> {
+    let mut st = conn
+        .prepare("SELECT key FROM redo_keys WHERE book_id = ? AND lang = ?")
+        .map_err(err)?;
+    let rows = st
+        .query_map(params![book, lang_key(lang)], |r| r.get::<_, String>(0))
+        .map_err(err)?;
+    rows.map(|r| r.map_err(err)).collect()
+}
+
+pub fn add_redo_pages(conn: &Connection, book: i64, lang: &str, pages: &[usize]) -> Result<()> {
+    for p in pages {
+        conn.execute(
+            "INSERT OR IGNORE INTO redo_pages (book_id, lang, page) VALUES (?, ?, ?)",
+            params![book, lang_key(lang), *p as i64],
+        )
+        .map_err(err)?;
+    }
+    Ok(())
+}
+
+pub fn add_redo_keys(conn: &Connection, book: i64, lang: &str, keys: &[String]) -> Result<()> {
+    for k in keys {
+        conn.execute(
+            "INSERT OR IGNORE INTO redo_keys (book_id, lang, key) VALUES (?, ?, ?)",
+            params![book, lang_key(lang), k],
+        )
+        .map_err(err)?;
+    }
+    Ok(())
+}
+
+/// Pages that were translated again to the end. When none is left, the record of what was given goes too.
+pub fn finish_redo(conn: &Connection, book: i64, lang: &str, pages: &[usize]) -> Result<()> {
+    let lang = lang_key(lang);
+    for p in pages {
+        conn.execute(
+            "DELETE FROM redo_pages WHERE book_id = ? AND lang = ? AND page = ?",
+            params![book, lang, *p as i64],
+        )
+        .map_err(err)?;
+    }
+    let left: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM redo_pages WHERE book_id = ? AND lang = ?",
+            params![book, lang],
+            |r| r.get(0),
+        )
+        .map_err(err)?;
+    if left == 0 {
+        conn.execute(
+            "DELETE FROM redo_keys WHERE book_id = ? AND lang = ?",
+            params![book, lang],
+        )
+        .map_err(err)?;
+    }
+    Ok(())
+}
+
 // ---------- translation cache ----------
+
+/// Every language a book was translated into, or is being translated into, in any way.
+pub fn book_langs(conn: &Connection, book: i64) -> Result<Vec<String>> {
+    let mut st = conn
+        .prepare(
+            "SELECT lang FROM translated_pages WHERE book_id = ?1
+             UNION SELECT lower(target_lang) FROM jobs WHERE book_id = ?1
+             UNION SELECT lang FROM redo_pages WHERE book_id = ?1",
+        )
+        .map_err(err)?;
+    let rows = st
+        .query_map([book], |r| r.get::<_, String>(0))
+        .map_err(err)?;
+    rows.map(|r| r.map_err(err)).collect()
+}
+
+/// Remove these kept translations. Returns how many were there.
+pub fn delete_cache_keys<'a>(
+    conn: &Connection,
+    keys: impl IntoIterator<Item = &'a String>,
+) -> Result<usize> {
+    let tx = conn.unchecked_transaction().map_err(err)?;
+    let mut gone = 0;
+    for key in keys {
+        gone += tx
+            .execute("DELETE FROM cache WHERE key = ?", [key])
+            .map_err(err)?;
+    }
+    tx.commit().map_err(err)?;
+    Ok(gone)
+}
 
 /// The translation cache kept in the database, used by the translation pipeline.
 pub struct DbCache<'c>(pub &'c Connection);

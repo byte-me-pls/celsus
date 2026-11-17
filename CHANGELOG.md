@@ -2,6 +2,12 @@
 
 Versions are 0.YYMM.N: year and month of the release, then a counter for further releases in that month.
 
+## Unreleased
+
+- **Deleting a book deletes what was translated for it.** Its translations leave the kept translations too, so the same file added again starts afresh instead of coming back as translated. Text that the translated pages of another book also hold stays, so those pages keep it.
+- **A book added again is not left waiting.** When every block of a page was translated before (the same PDF added to the library a second time, a page that repeats), an assistant asking for text got nothing and the page was never finished. Such pages are now written from those translations as they are met and counted as done, and the assistant is told how many were finished that way, so that it can say so and offer to translate them anew.
+- **Pages can be translated again.** Assistants have a new tool, translate_again: the pages it is given are handed out once more, earlier translations of their text no longer count for them, and the new translations replace the old. The old pages stay in the translated PDF until their new translation is finished.
+
 ## 0.2611.8 (2026-11-15)
 
 - **Terms of the field stay as people of the field write them.** A book on software no longer turns an Abstract Factory into a "soyut fabrika": names of patterns, principles, algorithms, protocols, libraries and tools, and the terms practitioners use in the original language, are kept as written, with the grammar of the translation attached to them. A term is translated only where the language has an equivalent its practitioners really use. A list of such names (a pattern catalogue, a part's contents) may now come back as it was, instead of being sent back to be translated word for word.

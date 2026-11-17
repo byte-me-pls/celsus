@@ -324,10 +324,13 @@ fn book_update(
 }
 
 #[tauri::command]
-fn book_delete(handle: AppHandle, app: State<App>, id: i64) -> Res<()> {
+async fn book_delete(handle: AppHandle, id: i64) -> Res<()> {
+    let app = handle.state::<App>();
     app.runner.cancel_book(id);
-    library::remove_book(&app.db.lock().unwrap(), &app.library, id)?;
-    let _ = handle.emit("library-changed", ());
+    // Its translations go with it: the same file added again starts afresh.
+    celsus_store::assistant::remove_book(&app.db, &app.library, id, || {
+        let _ = handle.emit("library-changed", ());
+    })?;
     Ok(())
 }
 
