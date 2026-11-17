@@ -2,7 +2,7 @@
 
 Versions are 0.YYMM.N: year and month of the release, then a counter for further releases in that month.
 
-## Unreleased
+## 0.2611.9 (2026-11-18)
 
 - **Deleting a book deletes what was translated for it.** Its translations leave the kept translations too, so the same file added again starts afresh instead of coming back as translated. Text that the translated pages of another book also hold stays, so those pages keep it.
 - **A book added again is not left waiting.** When every block of a page was translated before (the same PDF added to the library a second time, a page that repeats), an assistant asking for text got nothing and the page was never finished. Such pages are now written from those translations as they are met and counted as done, and the assistant is told how many were finished that way, so that it can say so and offer to translate them anew.
