@@ -22,7 +22,7 @@ addLocale("tr", {
     pagesDone: (a, b) => `${a}/${b} sayfa`, issues: (n) => `${n} sayfada sığmayan blok`, legendT: "Çevrildi", legendK: "Sorunlu", legendN: "Çevrilmedi",
     historyTitle: "Geçmiş", noHistory: "Henüz çeviri işi yok.",
     deleteTitle: "Kitabı sil", deleteText: "Kitap, çevirileri ve geçmişi bu bilgisayardan silinir.", deleteButton: "Sil",
-    confirmDelete: (t) => `"${t}" silinsin mi? Bu geri alınamaz.`, deleted: "Kitap silindi", savedTo: (p) => `Kaydedildi: ${p}`,
+    confirmDelete: (t) => `"${t}" silinsin mi? Bu geri alınamaz.`, deleted: "Kitap silindi", translationRemove: "Kaldır", translationRemoveHint: "Bu çeviriyi ve onun için saklanan her şeyi siler", confirmRemoveTranslation: (l, t) => `"${t}" kitabının ${l} çevirisi kaldırılsın mı? Sayfaları ve saklanan çevirileri silinir. Bu geri alınamaz.`, translationRemoved: (l) => `${l} çevirisi kaldırıldı`, savedTo: (p) => `Kaydedildi: ${p}`,
     // jobs
     jobsTitle: "Çeviriler", noJobs: "Henüz çeviri işi yok. Bir kitabı açıp çeviri başlatabilirsin.",
     st_queued: "Sırada", st_running: "Çevriliyor", st_done: "Bitti", st_failed: "Hata", st_cancelled: "Durduruldu", st_stopping: "Durduruluyor…",

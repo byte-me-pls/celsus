@@ -20,7 +20,7 @@ addLocale("en", {
     pagesDone: (a, b) => `${a}/${b} pages`, issues: (n) => `${n} pages with blocks that did not fit`, legendT: "Translated", legendK: "Issues", legendN: "Not translated",
     historyTitle: "History", noHistory: "No translation jobs yet.",
     deleteTitle: "Delete book", deleteText: "The book, its translations and history are removed from this computer.", deleteButton: "Delete",
-    confirmDelete: (t) => `Delete "${t}"? This cannot be undone.`, deleted: "Book deleted", savedTo: (p) => `Saved: ${p}`,
+    confirmDelete: (t) => `Delete "${t}"? This cannot be undone.`, deleted: "Book deleted", translationRemove: "Remove", translationRemoveHint: "Removes this translation and everything kept for it", confirmRemoveTranslation: (l, t) => `Remove the ${l} translation of "${t}"? Its pages and kept translations are deleted. This cannot be undone.`, translationRemoved: (l) => `${l} translation removed`, savedTo: (p) => `Saved: ${p}`,
     jobsTitle: "Translations", noJobs: "No translation jobs yet. Open a book to start one.",
     st_queued: "Queued", st_running: "Translating", st_done: "Done", st_failed: "Failed", st_cancelled: "Stopped", st_stopping: "Stopping…",
     cancel: "Stop", retry: "Continue", jobRemove: "Remove", jobRemoveHint: "Take this job off the list. Its translated pages stay.", jobsClear: (n) => `Remove ${n} ended`, retryAt: (t) => `Stopped for now; it will be tried again on its own at ${t}.`, openBook: "Open book", tokens: (n) => `${n.toLocaleString("en")} tokens`, waitingS: (s) => `Rate limited: waiting ${s}s`,

@@ -20,7 +20,7 @@ addLocale("ar", {
     pagesDone: (a, b) => `الصفحات ${a}/${b}`, issues: (n) => `صفحات فيها كتل لم تتّسع: ${n}`, legendT: "مترجمة", legendK: "مشكلات", legendN: "غير مترجمة",
     historyTitle: "السجل", noHistory: "لا توجد ترجمات بعد.",
     deleteTitle: "حذف الكتاب", deleteText: "سيُحذف الكتاب وترجماته وسجله من هذا الحاسوب.", deleteButton: "حذف",
-    confirmDelete: (t) => `هل تريد حذف «${t}»؟ لا يمكن التراجع عن ذلك.`, deleted: "حُذف الكتاب", savedTo: (p) => `تم الحفظ: ${p}`,
+    confirmDelete: (t) => `هل تريد حذف «${t}»؟ لا يمكن التراجع عن ذلك.`, deleted: "حُذف الكتاب", translationRemove: "إزالة", translationRemoveHint: "يزيل هذه الترجمة وكل ما حُفظ لها", confirmRemoveTranslation: (l, t) => `إزالة ترجمة (${l}) لكتاب «${t}»؟ ستُحذف صفحاتها والترجمات المحفوظة. لا يمكن التراجع عن ذلك.`, translationRemoved: (l) => `أُزيلت ترجمة (${l})`, savedTo: (p) => `تم الحفظ: ${p}`,
     jobsTitle: "الترجمات", noJobs: "لا توجد ترجمات بعد. افتح كتابًا لبدء ترجمة.",
     st_queued: "في قائمة الانتظار", st_running: "جارٍ الترجمة", st_done: "اكتملت", st_failed: "فشلت", st_cancelled: "أُوقفت", st_stopping: "جارٍ الإيقاف…",
     cancel: "إيقاف", retry: "متابعة", jobRemove: "إزالة", jobRemoveHint: "إزالة هذه المهمة من القائمة. تبقى صفحاتها المترجمة.", jobsClear: (n) => `إزالة المنتهية (${n})`, retryAt: (t) => `توقفت مؤقتًا؛ ستُعاد المحاولة تلقائيًا نحو ${t}.`, openBook: "فتح الكتاب", tokens: (n) => (n === 1 ? "رمز واحد" : n === 2 ? "رمزان" : `${n.toLocaleString("ar")} ${n % 100 >= 3 && n % 100 <= 10 ? "رموز" : n % 100 >= 11 ? "رمزًا" : "رمز"}`), waitingS: (s) => `تم بلوغ حد الطلبات: الانتظار ${s} ث`,

@@ -20,7 +20,7 @@ addLocale("ko", {
     pagesDone: (a, b) => `${a}/${b}페이지`, issues: (n) => `${n}페이지에 들어가지 않는 블록이 있습니다`, legendT: "번역됨", legendK: "문제 있음", legendN: "번역 안 됨",
     historyTitle: "기록", noHistory: "아직 번역 작업이 없습니다.",
     deleteTitle: "책 삭제", deleteText: "책과 번역본, 기록이 이 컴퓨터에서 삭제됩니다.", deleteButton: "삭제",
-    confirmDelete: (t) => `“${t}”을(를) 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.`, deleted: "책을 삭제했습니다", savedTo: (p) => `저장됨: ${p}`,
+    confirmDelete: (t) => `“${t}”을(를) 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.`, deleted: "책을 삭제했습니다", translationRemove: "삭제", translationRemoveHint: "이 번역과 이를 위해 저장된 모든 것을 삭제합니다", confirmRemoveTranslation: (l, t) => `"${t}"의 번역(${l})을 삭제할까요? 페이지와 저장된 번역이 지워집니다. 되돌릴 수 없습니다.`, translationRemoved: (l) => `번역(${l})을 삭제했습니다`, savedTo: (p) => `저장됨: ${p}`,
     jobsTitle: "번역 작업", noJobs: "아직 번역 작업이 없습니다. 책을 열어 시작하세요.",
     st_queued: "대기 중", st_running: "번역 중", st_done: "완료", st_failed: "실패", st_cancelled: "중지됨", st_stopping: "중지하는 중…",
     cancel: "중지", retry: "계속", jobRemove: "제거", jobRemoveHint: "이 작업을 목록에서 뺍니다. 번역된 페이지는 남습니다.", jobsClear: (n) => `끝난 작업 제거 (${n})`, retryAt: (t) => `잠시 멈췄습니다. ${t}쯤 자동으로 다시 시도합니다.`, openBook: "책 열기", tokens: (n) => `${n.toLocaleString("ko")}토큰`, waitingS: (s) => `요청 한도 초과: ${s}초 대기 중`,

@@ -20,7 +20,7 @@ addLocale("es", {
     pagesDone: (a, b) => `${a}/${b} ${b === 1 ? "página" : "páginas"}`, issues: (n) => `${n} ${n === 1 ? "página" : "páginas"} con bloques que no caben`, legendT: "Traducida", legendK: "Problemas", legendN: "Sin traducir",
     historyTitle: "Historial", noHistory: "Aún no hay tareas de traducción.",
     deleteTitle: "Eliminar libro", deleteText: "El libro, sus traducciones y su historial se eliminan de este equipo.", deleteButton: "Eliminar",
-    confirmDelete: (t) => `¿Eliminar «${t}»? Esta acción no se puede deshacer.`, deleted: "Libro eliminado", savedTo: (p) => `Guardado: ${p}`,
+    confirmDelete: (t) => `¿Eliminar «${t}»? Esta acción no se puede deshacer.`, deleted: "Libro eliminado", translationRemove: "Quitar", translationRemoveHint: "Quita esta traducción y todo lo guardado para ella", confirmRemoveTranslation: (l, t) => `¿Quitar la traducción (${l}) de «${t}»? Se borran sus páginas y las traducciones guardadas. No se puede deshacer.`, translationRemoved: (l) => `Traducción (${l}) quitada`, savedTo: (p) => `Guardado: ${p}`,
     jobsTitle: "Traducciones", noJobs: "Aún no hay tareas de traducción. Abre un libro para iniciar una.",
     st_queued: "En cola", st_running: "Traduciendo", st_done: "Completada", st_failed: "Error", st_cancelled: "Detenida", st_stopping: "Deteniendo…",
     cancel: "Detener", retry: "Continuar", jobRemove: "Quitar", jobRemoveHint: "Quitar este trabajo de la lista. Sus páginas traducidas se quedan.", jobsClear: (n) => `Quitar los terminados (${n})`, retryAt: (t) => `Detenido por ahora; se volverá a intentar solo hacia las ${t}.`, openBook: "Abrir libro", tokens: (n) => `${n.toLocaleString("es")} ${n === 1 ? "token" : "tokens"}`, waitingS: (s) => `Límite de solicitudes: esperando ${s} s`,

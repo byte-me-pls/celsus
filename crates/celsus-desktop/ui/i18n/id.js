@@ -20,7 +20,7 @@ addLocale("id", {
     pagesDone: (a, b) => `${a}/${b} halaman`, issues: (n) => `${n} halaman berisi blok yang tidak muat`, legendT: "Diterjemahkan", legendK: "Bermasalah", legendN: "Belum diterjemahkan",
     historyTitle: "Riwayat", noHistory: "Belum ada terjemahan.",
     deleteTitle: "Hapus buku", deleteText: "Buku beserta terjemahan dan riwayatnya akan dihapus dari komputer ini.", deleteButton: "Hapus",
-    confirmDelete: (t) => `Hapus "${t}"? Tindakan ini tidak dapat dibatalkan.`, deleted: "Buku dihapus", savedTo: (p) => `Disimpan: ${p}`,
+    confirmDelete: (t) => `Hapus "${t}"? Tindakan ini tidak dapat dibatalkan.`, deleted: "Buku dihapus", translationRemove: "Hapus", translationRemoveHint: "Menghapus terjemahan ini dan semua yang disimpan untuknya", confirmRemoveTranslation: (l, t) => `Hapus terjemahan (${l}) dari "${t}"? Halaman dan terjemahan yang disimpan akan dihapus. Ini tidak dapat dibatalkan.`, translationRemoved: (l) => `Terjemahan (${l}) dihapus`, savedTo: (p) => `Disimpan: ${p}`,
     jobsTitle: "Terjemahan", noJobs: "Belum ada terjemahan. Buka buku untuk memulainya.",
     st_queued: "Dalam antrean", st_running: "Menerjemahkan", st_done: "Selesai", st_failed: "Gagal", st_cancelled: "Dihentikan", st_stopping: "Menghentikan…",
     cancel: "Hentikan", retry: "Lanjutkan", jobRemove: "Hapus", jobRemoveHint: "Hapus pekerjaan ini dari daftar. Halaman yang sudah diterjemahkan tetap ada.", jobsClear: (n) => `Hapus yang selesai (${n})`, retryAt: (t) => `Berhenti sementara; akan dicoba lagi sendiri sekitar ${t}.`, openBook: "Buka buku", tokens: (n) => `${n.toLocaleString("id")} token`, waitingS: (s) => `Batas permintaan tercapai: menunggu ${s} dtk`,

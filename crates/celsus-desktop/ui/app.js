@@ -525,7 +525,8 @@ async function renderBookStatus(book) {
         <span class="lang-meta">${T.pagesDone(pages.length, fresh.pages)}${issues ? ` · ${T.issues(issues)}` : ""}
           <div class="meter"><span style="width:${(100 * pages.length) / fresh.pages}%"></span></div></span>
         <span class="lang-actions"><button class="quiet-button" data-read="${esc(lang)}">${T.read}</button>
-          <button class="quiet-button" data-save="${esc(lang)}">${T.savePdf}</button></span></div>`);
+          <button class="quiet-button" data-save="${esc(lang)}">${T.savePdf}</button>
+          <button class="quiet-button danger" data-untranslate="${esc(lang)}" title="${T.translationRemoveHint}">${T.translationRemove}</button></span></div>`);
     }
     const map = await invoke("book_pages", { id: book.id, lang: selected });
     const status = new Map(map.map(([p, k]) => [p, k > 0 ? "k" : "t"]));
@@ -542,6 +543,20 @@ async function renderBookStatus(book) {
       <div class="legend"><span class="t">${T.legendT}</span><span class="k">${T.legendK}</span><span>${T.legendN}</span></div>`;
     for (const b of $$("[data-read]", box)) b.onclick = () => go("reader", { id: book.id, lang: b.dataset.read, page: readingPrefs(book.id).page || 1 });
     for (const b of $$("[data-save]", box)) b.onclick = async () => { const p = await call("save_output", { id: book.id, lang: b.dataset.save }); if (p) toast(T.savedTo(p)); };
+    for (const b of $$("[data-untranslate]", box)) b.onclick = async () => {
+      const lang = b.dataset.untranslate;
+      // In the app the question is answered later than it is asked: nothing is done before the answer.
+      if (!(await confirm(T.confirmRemoveTranslation(langName(lang), book.title)))) return;
+      b.disabled = true;
+      try {
+        await call("translation_remove", { id: book.id, lang });
+        toast(T.translationRemoved(langName(lang)));
+      } finally {
+        b.disabled = false;
+      }
+      await refreshCounts();
+      renderBookStatus(book);
+    };
     for (const c of $$("#page-map i", box)) c.onclick = () => go("reader", { id: book.id, lang: selected, page: Number(c.dataset.page) });
   }
   const hist = $("#b-history");

@@ -614,6 +614,44 @@ fn job_cancel(handle: AppHandle, app: State<App>, id: i64) -> Res<()> {
     Ok(())
 }
 
+/// Remove a book's translation into one language, and everything kept for it. A job on it is stopped first,
+/// and waited for, so that it cannot write its pages back once they are gone.
+#[tauri::command]
+async fn translation_remove(handle: AppHandle, id: i64, lang: String) -> Res<()> {
+    let app = handle.state::<App>();
+    let to = parse_lang(&lang)?;
+    let lang = db::lang_key(&lang);
+    let running = {
+        let conn = app.db.lock().unwrap();
+        let mut running = None;
+        for j in db::jobs(&conn, Some(id))? {
+            if db::lang_key(&j.target_lang) != lang {
+                continue;
+            }
+            match j.status.as_str() {
+                "queued" => db::set_status(&conn, j.id, "cancelled", None)?,
+                "running" => running = Some(j.id),
+                _ => {}
+            }
+        }
+        running
+    };
+    if let Some(job) = running
+        && app.runner.cancel_running(job)
+    {
+        for _ in 0..200 {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            if db::job(&app.db.lock().unwrap(), job)?.status != "running" {
+                break;
+            }
+        }
+    }
+    celsus_store::assistant::remove_translation(&app.db, &app.library, id, &to)?;
+    let _ = handle.emit("jobs-changed", ());
+    let _ = handle.emit("library-changed", ());
+    Ok(())
+}
+
 /// The translations the cache holds for `texts` in `lang`, where it holds one: the titles of a book's outline
 /// are the headings of its pages, and those were translated with the pages.
 #[tauri::command]
@@ -1203,6 +1241,7 @@ fn main() {
             pick_pdfs,
             books_add,
             book_update,
+            translation_remove,
             book_delete,
             book_files,
             cover_save,

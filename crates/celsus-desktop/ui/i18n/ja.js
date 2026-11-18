@@ -20,7 +20,7 @@ addLocale("ja", {
     pagesDone: (a, b) => `${a}/${b} ページ`, issues: (n) => `${n} ページに収まらないブロックがあります`, legendT: "翻訳済み", legendK: "問題あり", legendN: "未翻訳",
     historyTitle: "履歴", noHistory: "翻訳ジョブはまだありません。",
     deleteTitle: "本を削除", deleteText: "本とその翻訳、履歴がこのコンピューターから削除されます。", deleteButton: "削除",
-    confirmDelete: (t) => `「${t}」を削除しますか？この操作は元に戻せません。`, deleted: "本を削除しました", savedTo: (p) => `保存しました：${p}`,
+    confirmDelete: (t) => `「${t}」を削除しますか？この操作は元に戻せません。`, deleted: "本を削除しました", translationRemove: "削除", translationRemoveHint: "この翻訳と、そのために保存されたものをすべて削除します", confirmRemoveTranslation: (l, t) => `「${t}」の翻訳（${l}）を削除しますか？ページと保存された翻訳が消去されます。元に戻せません。`, translationRemoved: (l) => `翻訳（${l}）を削除しました`, savedTo: (p) => `保存しました：${p}`,
     jobsTitle: "翻訳ジョブ", noJobs: "翻訳ジョブはまだありません。本を開いて開始してください。",
     st_queued: "待機中", st_running: "翻訳中", st_done: "完了", st_failed: "失敗", st_cancelled: "停止", st_stopping: "停止中…",
     cancel: "停止", retry: "続ける", jobRemove: "削除", jobRemoveHint: "このジョブを一覧から外します。翻訳済みのページは残ります。", jobsClear: (n) => `終了したものを削除 (${n})`, retryAt: (t) => `いったん止まりました。${t} ごろに自動で再試行します。`, openBook: "本を開く", tokens: (n) => `${n.toLocaleString("ja")} トークン`, waitingS: (s) => `レート制限中：${s} 秒待機しています`,

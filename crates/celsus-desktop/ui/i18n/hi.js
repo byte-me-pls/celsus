@@ -20,7 +20,7 @@ addLocale("hi", {
     pagesDone: (a, b) => `${a}/${b} पेज`, issues: (n) => `${n} पेजों पर ऐसे ब्लॉक हैं जो फ़िट नहीं हुए`, legendT: "अनुवादित", legendK: "समस्याएँ", legendN: "अनुवाद नहीं हुआ",
     historyTitle: "इतिहास", noHistory: "अभी कोई अनुवाद नहीं।",
     deleteTitle: "किताब हटाएँ", deleteText: "किताब, उसके अनुवाद और इतिहास इस कंप्यूटर से हटा दिए जाएँगे।", deleteButton: "हटाएँ",
-    confirmDelete: (t) => `"${t}" हटाएँ? इसे पहले जैसा नहीं किया जा सकता।`, deleted: "किताब हटा दी गई", savedTo: (p) => `सहेजा गया: ${p}`,
+    confirmDelete: (t) => `"${t}" हटाएँ? इसे पहले जैसा नहीं किया जा सकता।`, deleted: "किताब हटा दी गई", translationRemove: "हटाएँ", translationRemoveHint: "यह अनुवाद और इसके लिए सहेजा गया सब कुछ हटा देता है", confirmRemoveTranslation: (l, t) => `"${t}" का (${l}) अनुवाद हटाएँ? इसके पन्ने और सहेजे गए अनुवाद मिटा दिए जाएँगे। इसे वापस नहीं किया जा सकता।`, translationRemoved: (l) => `(${l}) अनुवाद हटाया गया`, savedTo: (p) => `सहेजा गया: ${p}`,
     jobsTitle: "अनुवाद", noJobs: "अभी कोई अनुवाद नहीं। शुरू करने के लिए कोई किताब खोलें।",
     st_queued: "कतार में", st_running: "अनुवाद हो रहा है", st_done: "पूरा हुआ", st_failed: "विफल", st_cancelled: "रोका गया", st_stopping: "रोका जा रहा है…",
     cancel: "रोकें", retry: "जारी रखें", jobRemove: "हटाएँ", jobRemoveHint: "इस काम को सूची से हटाएँ। इसके अनुवादित पन्ने बने रहेंगे।", jobsClear: (n) => `पूरे हुए हटाएँ (${n})`, retryAt: (t) => `अभी रुका है; ${t} के आसपास अपने आप फिर कोशिश होगी।`, openBook: "किताब खोलें", tokens: (n) => `${n.toLocaleString("hi")} टोकन`, waitingS: (s) => `अनुरोध सीमा पूरी: ${s} सेकंड इंतज़ार`,

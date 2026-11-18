@@ -93,3 +93,66 @@ fn a_deleted_book_takes_its_translations_and_leaves_those_of_other_books() {
     assert!(!library::source_file(&lib, ids[0]).exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn removing_a_translation_leaves_the_book_its_other_languages_and_other_books() {
+    let dir = std::env::temp_dir().join(format!("celsus-untranslate-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let lib = dir.join("library");
+    let conn = db::open(&dir.join("celsus.db")).unwrap();
+    let mut ids = Vec::new();
+    for (name, own) in [
+        ("a.pdf", "Only in the first book"),
+        ("b.pdf", "Only in the second book"),
+    ] {
+        let file = dir.join(name);
+        std::fs::write(&file, book(&["A heading both books share", own])).unwrap();
+        let b = library::add_book(&conn, &lib, &file).unwrap();
+        let doc = celsus_pdf::Document::open(library::source_file(&lib, b.id)).unwrap();
+        // The first book in Turkish and German, the second in Turkish.
+        let langs: &[&str] = if ids.is_empty() {
+            &["tr", "de"]
+        } else {
+            &["tr"]
+        };
+        for lang in langs {
+            let to: Language = lang.parse().unwrap();
+            for key in keys_of(&doc, &to, &[1, 2]) {
+                db::DbCache(&conn).put(&key, "çeviri");
+            }
+            for p in [1, 2] {
+                db::mark_page(&conn, b.id, lang, p, 0).unwrap();
+            }
+            std::fs::write(library::output_file(&lib, b.id, lang), b"%PDF").unwrap();
+        }
+        ids.push(b.id);
+    }
+    let known = |c: &rusqlite::Connection, lang: &str, text: &str| {
+        let to: Language = lang.parse().unwrap();
+        db::DbCache(c)
+            .get(&celsus_core::pipeline::cache_key(&to, text))
+            .is_some()
+    };
+
+    let db = Mutex::new(conn);
+    let tr: Language = "tr".parse().unwrap();
+    let gone = assistant::remove_translation(&db, &lib, ids[0], &tr).unwrap();
+    let conn = db.into_inner().unwrap();
+    assert_eq!(gone, 1);
+    assert!(
+        db::translated_pages(&conn, ids[0], "tr")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!library::output_file(&lib, ids[0], "tr").exists());
+    assert!(!known(&conn, "tr", "Only in the first book"));
+    // The shared heading is still on the second book's Turkish pages.
+    assert!(known(&conn, "tr", "A heading both books share"));
+    // The book, its German, and the other book are as they were.
+    assert!(library::source_file(&lib, ids[0]).exists());
+    assert_eq!(db::translated_pages(&conn, ids[0], "de").unwrap().len(), 2);
+    assert!(known(&conn, "de", "Only in the first book"));
+    assert_eq!(db::translated_pages(&conn, ids[1], "tr").unwrap().len(), 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}

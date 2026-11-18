@@ -20,7 +20,7 @@ addLocale("zh", {
     pagesDone: (a, b) => `${a}/${b} 页`, issues: (n) => `${n} 页有放不下的文本块`, legendT: "已翻译", legendK: "有问题", legendN: "未翻译",
     historyTitle: "历史记录", noHistory: "还没有翻译任务。",
     deleteTitle: "删除图书", deleteText: "图书及其译本和历史记录将从这台电脑上移除。", deleteButton: "删除",
-    confirmDelete: (t) => `删除“${t}”？此操作无法撤销。`, deleted: "图书已删除", savedTo: (p) => `已保存：${p}`,
+    confirmDelete: (t) => `删除“${t}”？此操作无法撤销。`, deleted: "图书已删除", translationRemove: "移除", translationRemoveHint: "移除此译本及为其保存的一切", confirmRemoveTranslation: (l, t) => `移除《${t}》的（${l}）译本？其页面和保存的译文将被删除，且无法撤销。`, translationRemoved: (l) => `已移除（${l}）译本`, savedTo: (p) => `已保存：${p}`,
     jobsTitle: "翻译任务", noJobs: "还没有翻译任务。打开一本书即可开始。",
     st_queued: "排队中", st_running: "正在翻译", st_done: "已完成", st_failed: "失败", st_cancelled: "已停止", st_stopping: "正在停止…",
     cancel: "停止", retry: "继续", jobRemove: "移除", jobRemoveHint: "从列表中移除此任务。已翻译的页面保留。", jobsClear: (n) => `移除已结束的 (${n})`, retryAt: (t) => `暂时停止；将在 ${t} 左右自动重试。`, openBook: "打开图书", tokens: (n) => `${n.toLocaleString("zh")} 个 token`, waitingS: (s) => `已达速率限制：等待 ${s} 秒`,

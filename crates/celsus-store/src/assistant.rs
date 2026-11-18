@@ -195,6 +195,35 @@ pub fn remove_book(
     db::delete_cache_keys(&db.lock().unwrap(), mine.difference(&keep))
 }
 
+/// Remove a book's translation into one language: the translated PDF, its pages, the pictures redrawn for it,
+/// its jobs, and the kept translations of the book's text in that language, except those that the translated
+/// pages of another book (or of this one in another language) still hold. Returns how many kept translations
+/// went. A job translating the book into the language must be stopped before.
+pub fn remove_translation(
+    db: &std::sync::Mutex<Connection>,
+    library_dir: &Path,
+    book_id: i64,
+    to: &Language,
+) -> Result<usize> {
+    let mut mine = std::collections::HashSet::new();
+    if let Ok(doc) = open(library_dir, book_id) {
+        let pages: Vec<usize> = (1..=doc.pages().map(|p| p.len()).unwrap_or(0)).collect();
+        mine.extend(celsus_core::pipeline::keys_of(&doc, to, &pages));
+    }
+    db::delete_translation(&db.lock().unwrap(), book_id, to.as_str())?;
+    let file = library::output_file(library_dir, book_id, to.as_str());
+    if file.exists() {
+        std::fs::remove_file(&file).map_err(|e| e.to_string())?;
+    }
+    let _ = std::fs::remove_dir_all(library::redrawn_dir(library_dir, book_id, to.as_str()));
+    if mine.is_empty() {
+        return Ok(0);
+    }
+    let translated = db::all_translated_pages(&db.lock().unwrap())?;
+    let keep = keys_in_use(library_dir, &translated);
+    db::delete_cache_keys(&db.lock().unwrap(), mine.difference(&keep))
+}
+
 /// The cache keys that the translated pages of the library are written from. Books that cannot be opened or
 /// languages that cannot be read give none: nothing can be written from them either.
 pub fn keys_in_use(

@@ -821,6 +821,26 @@ pub fn book_langs(conn: &Connection, book: i64) -> Result<Vec<String>> {
     rows.map(|r| r.map_err(err)).collect()
 }
 
+/// Forget a book's translation into one language: its pages, the pages being translated again, and the jobs
+/// for it that are not running. A job that is running is stopped first by whoever calls this.
+pub fn delete_translation(conn: &Connection, book: i64, lang: &str) -> Result<()> {
+    let lang = lang_key(lang);
+    let tx = conn.unchecked_transaction().map_err(err)?;
+    for table in ["translated_pages", "redo_pages", "redo_keys"] {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE book_id = ? AND lang = ?"),
+            params![book, lang],
+        )
+        .map_err(err)?;
+    }
+    tx.execute(
+        "DELETE FROM jobs WHERE book_id = ? AND lower(target_lang) = ? AND status <> 'running'",
+        params![book, lang],
+    )
+    .map_err(err)?;
+    tx.commit().map_err(err)
+}
+
 /// Remove these kept translations. Returns how many were there.
 pub fn delete_cache_keys<'a>(
     conn: &Connection,
