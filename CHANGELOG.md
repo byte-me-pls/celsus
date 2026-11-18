@@ -2,7 +2,7 @@
 
 Versions are 0.YYMM.N: year and month of the release, then a counter for further releases in that month.
 
-## Unreleased
+## 0.2611.10 (2026-11-18)
 
 - **A translation can be removed.** Each language on a book's page has a Remove button: the translated PDF, its pages, the pictures redrawn for it, its jobs and the kept translations of the book's text in that language are deleted, and the book with its other languages stays. A job translating into that language is stopped first and waited for. Text that the translated pages of another book also hold is kept.
 
