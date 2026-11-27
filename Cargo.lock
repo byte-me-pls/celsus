@@ -760,7 +760,7 @@ dependencies = [
 
 [[package]]
 name = "celsus-core"
-version = "0.2611.10"
+version = "0.2611.11"
 dependencies = [
  "celsus-pdf",
  "hayro",
@@ -778,7 +778,7 @@ dependencies = [
 
 [[package]]
 name = "celsus-desktop"
-version = "0.2611.10"
+version = "0.2611.11"
 dependencies = [
  "celsus-core",
  "celsus-ocr",
@@ -796,7 +796,7 @@ dependencies = [
 
 [[package]]
 name = "celsus-mcp"
-version = "0.2611.10"
+version = "0.2611.11"
 dependencies = [
  "celsus-core",
  "celsus-ocr",
@@ -808,7 +808,7 @@ dependencies = [
 
 [[package]]
 name = "celsus-ocr"
-version = "0.2611.10"
+version = "0.2611.11"
 dependencies = [
  "celsus-core",
  "celsus-pdf",
@@ -821,7 +821,7 @@ dependencies = [
 
 [[package]]
 name = "celsus-pdf"
-version = "0.2611.10"
+version = "0.2611.11"
 dependencies = [
  "aes",
  "md-5",
@@ -831,7 +831,7 @@ dependencies = [
 
 [[package]]
 name = "celsus-server"
-version = "0.2611.10"
+version = "0.2611.11"
 dependencies = [
  "argon2",
  "axum",
@@ -858,7 +858,7 @@ dependencies = [
 
 [[package]]
 name = "celsus-store"
-version = "0.2611.10"
+version = "0.2611.11"
 dependencies = [
  "celsus-core",
  "celsus-pdf",
