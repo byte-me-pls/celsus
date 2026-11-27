@@ -34,6 +34,8 @@ pub fn decode(dict: &Dict, data: &[u8]) -> Result<Vec<u8>> {
             b"ASCIIHexDecode" | b"AHx" => ascii_hex(&out),
             b"ASCII85Decode" | b"A85" => ascii85(&out)?,
             b"RunLengthDecode" | b"RL" => run_length(&out)?,
+            // Decryption happens when the stream is read; what is left here is already plain.
+            b"Crypt" => out,
             other => {
                 return Err(Error::Unsupported(
                     String::from_utf8_lossy(other).into_owned(),

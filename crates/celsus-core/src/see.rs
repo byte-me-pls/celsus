@@ -330,10 +330,16 @@ impl Picture {
                 if t.y0 - pad > my {
                     break;
                 }
+                // A tall, narrow sign standing in the middle of the line (an integral, a large bracket) is
+                // part of it too, though reading may have missed it and left it out of the line's box.
+                let tall_sign = my >= t.y0
+                    && my <= t.y1
+                    && r.height() <= t.height() * 3.0
+                    && r.width() <= t.height();
                 if my <= t.y1 + pad
                     && mx >= t.x0 - pad
                     && mx <= t.x1 + pad
-                    && r.height() <= t.height() * 2.0
+                    && (r.height() <= t.height() * 2.0 || tall_sign)
                     && r.width() <= t.width() + t.height() * 2.0
                 {
                     of[k] = Some(i);
@@ -685,6 +691,22 @@ impl Picture {
     /// The colour around `r`, if the paper there is of one colour: what the place of a body is to be painted
     /// with once the body has been moved away.
     pub fn paper_around(&self, r: &Rect) -> Option<[u8; 3]> {
+        let (middle, ring) = self.ring(r)?;
+        let same = ring
+            .iter()
+            .filter(|p| apart(**p, middle) <= self.apart)
+            .count();
+        (same * 100 >= ring.len() * 97).then_some(middle)
+    }
+
+    /// The colour of the paper next to `r`, even where it is not of one colour: what covers words on paper that
+    /// has a grain, a stain or a shadow.
+    pub fn paper_near(&self, r: &Rect) -> [u8; 3] {
+        self.ring(r).map_or(self.paper, |(middle, _)| middle)
+    }
+
+    /// The pixels in a ring around `r`, and their middle colour. None where the ring is empty, past the picture.
+    fn ring(&self, r: &Rect) -> Option<([u8; 3], Vec<[u8; 3]>)> {
         let (x0, y0, x1, y1) = self.pixels(r);
         let (a0, b0) = (x0.saturating_sub(3), y0.saturating_sub(3));
         let (a1, b1) = ((x1 + 3).min(self.width), (y1 + 3).min(self.height));
@@ -700,18 +722,14 @@ impl Picture {
             }
         }
         if ring.is_empty() {
-            return Some(self.paper);
+            return Some((self.paper, vec![self.paper]));
         }
         let middle = [0, 1, 2].map(|c| {
             let mut v: Vec<u8> = ring.iter().map(|p| p[c]).collect();
             v.sort_unstable();
             v[v.len() / 2]
         });
-        let same = ring
-            .iter()
-            .filter(|p| apart(**p, middle) <= self.apart)
-            .count();
-        (same * 100 >= ring.len() * 97).then_some(middle)
+        Some((middle, ring))
     }
 }
 
@@ -775,6 +793,17 @@ mod tests {
         let line = rect(10.0, 10.0, 17.0, 15.0);
         assert_eq!(p.ink_of(&[line]), [Some(rect(10.0, 10.0, 25.0, 15.0))]);
         assert_eq!(p.bodies(&[line], &[]), [rect(35.0, 10.0, 38.0, 15.0)]);
+    }
+
+    #[test]
+    fn a_tall_sign_in_a_line_is_of_the_line() {
+        // Two letters and an integral sign more than twice as tall as the line, standing in its middle.
+        let p = picture(&[(20, 20, 26, 30), (28, 20, 34, 30), (40, 12, 44, 38)]);
+        let line = rect(10.0, 10.0, 40.0, 15.0);
+        assert_eq!(p.ink_of(&[line]), [Some(rect(10.0, 6.0, 22.0, 19.0))]);
+        // Not a rule that runs down through it.
+        let p = picture(&[(20, 20, 26, 30), (28, 20, 34, 30), (40, 0, 44, 90)]);
+        assert_eq!(p.ink_of(&[line]), [Some(rect(10.0, 10.0, 17.0, 15.0))]);
     }
 
     #[test]

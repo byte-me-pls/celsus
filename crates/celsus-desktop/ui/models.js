@@ -70,13 +70,44 @@ function modelPicker(input, list, models, connection, onPick) {
     };
     list.innerHTML = [...groups].map(([maker, names]) =>
       `${maker ? `<h4>${esc(maker)}</h4>` : ""}${names.map((m) =>
-        `<button type="button" data-m="${esc(m)}" class="${m === input.value.trim() ? "on" : ""}"><span>${esc(maker ? m.slice(maker.length + 1) : m)}</span>${mark(m)}</button>`).join("")}`).join("")
+        `<button type="button" role="option" tabindex="-1" data-m="${esc(m)}" class="${m === input.value.trim() ? "on" : ""}"><span>${esc(maker ? m.slice(maker.length + 1) : m)}</span>${mark(m)}</button>`).join("")}`).join("")
       + (!all && every.length > usual.length ? `<button type="button" class="more" data-all>${esc(T.modelsAll(every.length))}</button>` : "");
+    list.setAttribute("role", "listbox");
     list.hidden = !list.innerHTML;
+    active = -1;
+  };
+  // The arrow keys walk the list and Enter takes the model marked, so that no one has to type a name out of
+  // hundreds.
+  let active = -1;
+  const highlight = (i) => {
+    const options = [...list.querySelectorAll("button[data-m]")];
+    if (!options.length) return;
+    active = (i + options.length) % options.length;
+    options.forEach((o, k) => {
+      o.classList.toggle("active", k === active);
+      o.setAttribute("aria-selected", String(k === active));
+    });
+    options[active].scrollIntoView({ block: "nearest" });
   };
   input.onfocus = input.oninput = draw;
   input.onblur = () => { list.hidden = true; all = false; };
-  input.onkeydown = (e) => { if (e.key === "Escape") list.hidden = true; };
+  input.onkeydown = (e) => {
+    if (e.key === "Escape") { list.hidden = true; return; }
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (list.hidden) draw();
+      highlight(active + (e.key === "ArrowDown" ? 1 : -1));
+      return;
+    }
+    if (e.key === "Enter" && !list.hidden && active >= 0) {
+      e.preventDefault();
+      const chosen = list.querySelectorAll("button[data-m]")[active];
+      if (!chosen) return;
+      input.value = chosen.dataset.m;
+      list.hidden = true;
+      onPick();
+    }
+  };
   // Keep the field focused while the list is clicked, so the click lands before the list goes away.
   list.onmousedown = (e) => e.preventDefault();
   list.onclick = (e) => {
@@ -116,6 +147,8 @@ function modelField({ input, list, button, out, connection, models, ask, canTry 
   button.onclick = async () => {
     const id = connection(), all = models()[0];
     if (trying || !id || all.length < 2) return;
+    // Each model is sent a short request, and a service that charges for answers charges for these too.
+    if (T.modelsTryAsk && !(await confirm(T.modelsTryAsk(all.length)))) return;
     trying = true;
     refresh();
     const say = (text, ok) => (out.innerHTML = `<div class="test-result ${ok ? "ok" : ""}">${ok ? `<b>${esc(text)}</b>` : esc(text)}</div>`);

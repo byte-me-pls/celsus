@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::auth::Auth;
-use crate::routes::books::visible;
+use crate::routes::books::{LIMIT_BOOKS, LIMIT_QUEUED_PAGES, member_limit, visible};
 use crate::routes::oauth::origin;
 use crate::web::{ApiError, ApiResult};
 use crate::{AppState, assist, audit, library, now, worker};
@@ -333,12 +333,21 @@ pub async fn settings(State(state): State<AppState>, auth: Auth) -> ApiResult<Js
         "batch_chars": batch.and_then(|b| b.parse::<i64>().ok()).unwrap_or(5000),
         "cached_translations": cache.get::<_, i64>(0),
         "cached_chars": cache.get::<_, i64>(1),
+        "max_books": member_limit(&**db, LIMIT_BOOKS).await?,
+        "max_queued_pages": member_limit(&**db, LIMIT_QUEUED_PAGES).await?,
     })))
 }
 
+/// The largest limit an admin may set; more is the same as none.
+const MOST_LIMIT: i64 = 1_000_000;
+
+/// Each setting is changed only when sent. The limits hold for members (0 is no limit); admins are not held to
+/// them.
 #[derive(Deserialize)]
 pub struct SettingsBody {
-    batch_chars: i64,
+    batch_chars: Option<i64>,
+    max_books: Option<i64>,
+    max_queued_pages: Option<i64>,
 }
 
 pub async fn set_settings(
@@ -347,24 +356,38 @@ pub async fn set_settings(
     Json(b): Json<SettingsBody>,
 ) -> ApiResult<Json<Value>> {
     auth.require("admin")?;
-    if !(500..=50_000).contains(&b.batch_chars) {
+    if b.batch_chars.is_some_and(|n| !(500..=50_000).contains(&n)) {
         return Err(ApiError::bad(
             "Text per request must be between 500 and 50000 characters.",
         ));
     }
+    for n in [b.max_books, b.max_queued_pages].into_iter().flatten() {
+        if !(0..=MOST_LIMIT).contains(&n) {
+            return Err(ApiError::bad(format!(
+                "A limit must be between 0 (no limit) and {MOST_LIMIT}."
+            )));
+        }
+    }
     let db = state.pool.get().await?;
-    db.execute(
-        "INSERT INTO settings (key, value) VALUES ('batch_chars', $1) ON CONFLICT (key) DO UPDATE SET value = $1",
-        &[&b.batch_chars.to_string()],
-    )
-    .await?;
+    for (key, value) in [
+        ("batch_chars", b.batch_chars),
+        (LIMIT_BOOKS, b.max_books),
+        (LIMIT_QUEUED_PAGES, b.max_queued_pages),
+    ] {
+        let Some(value) = value else { continue };
+        db.execute(
+            "INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2",
+            &[&key, &value.to_string()],
+        )
+        .await?;
+    }
     audit::record(
         &**db,
         Some(auth.user.id),
         &auth.client,
         "settings_changed",
         None,
-        json!({ "batch_chars": b.batch_chars }),
+        json!({ "batch_chars": b.batch_chars, "max_books": b.max_books, "max_queued_pages": b.max_queued_pages }),
     )
     .await?;
     Ok(Json(json!({ "ok": true })))

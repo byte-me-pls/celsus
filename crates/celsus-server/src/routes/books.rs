@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_postgres::GenericClient;
 
-use crate::auth::Auth;
+use crate::auth::{Auth, Role};
 use crate::library::{self, clean, valid_id, valid_lang};
 use crate::web::{ApiError, ApiResult};
 use crate::{AppState, audit, now};
@@ -31,6 +31,20 @@ impl Book {
         self.owner_id == auth.user.id || (auth.user.role.is_admin() && self.visibility == "shared")
     }
 }
+
+/// A limit an admin set for members (see the server settings): the most books one member may have, or the most
+/// pages they may have waiting to be translated. 0, or no setting, is no limit.
+pub async fn member_limit(db: &impl GenericClient, key: &str) -> ApiResult<i64> {
+    Ok(db
+        .query_opt("SELECT value FROM settings WHERE key = $1", &[&key])
+        .await?
+        .and_then(|r| r.get::<_, String>(0).parse::<i64>().ok())
+        .unwrap_or(0)
+        .max(0))
+}
+
+pub const LIMIT_BOOKS: &str = "limit.books";
+pub const LIMIT_QUEUED_PAGES: &str = "limit.queued_pages";
 
 /// The book if the caller may see it; "not found" otherwise.
 pub async fn visible(db: &impl GenericClient, auth: &Auth, id: &str) -> ApiResult<Book> {
@@ -133,6 +147,29 @@ pub async fn add_book(
     name: String,
     visibility: String,
 ) -> ApiResult<Value> {
+    // Admins set the limits; they and the owner are not held to them.
+    if auth.user.role == Role::Member {
+        let db = state.pool.get().await?;
+        let most = member_limit(&**db, LIMIT_BOOKS).await?;
+        if most > 0 {
+            let have: i64 = db
+                .query_one(
+                    "SELECT COUNT(*) FROM books WHERE owner_id = $1",
+                    &[&auth.user.id],
+                )
+                .await?
+                .get(0);
+            if have >= most {
+                return Err(ApiError::new(
+                    StatusCode::FORBIDDEN,
+                    "book_limit",
+                    format!(
+                        "You have {have} books, the most this library allows each member. Remove one to add another."
+                    ),
+                ));
+            }
+        }
+    }
     let bytes = body.to_vec();
     let size = bytes.len() as i64;
     let parse_name = name.clone();
@@ -177,7 +214,12 @@ pub async fn add_book(
     let r = db
         .query_one(&format!("SELECT {BOOK_FIELDS} FROM books b JOIN users u ON u.id = b.owner_id WHERE b.id = $1"), &[&id])
         .await?;
-    Ok(book_json(&r, auth))
+    let mut book = book_json(&r, auth);
+    if parsed.repaired {
+        book["repaired"] = json!(true);
+        book["note"] = json!(library::REPAIRED);
+    }
+    Ok(book)
 }
 
 /// Books the caller may see, newest first, as the API shows them.
@@ -303,19 +345,7 @@ pub async fn remove(
     if !book.editable_by(&auth) {
         return Err(ApiError::forbidden());
     }
-    // Stop a running job on it first.
-    for r in db
-        .query(
-            "SELECT id FROM jobs WHERE book_id = $1 AND status = 'running'",
-            &[&id],
-        )
-        .await?
-    {
-        state.jobs.cancel(&r.get::<_, String>(0));
-    }
-    db.execute("DELETE FROM books WHERE id = $1", &[&id])
-        .await?;
-    let _ = tokio::fs::remove_dir_all(library::book_dir(&state.config, &id)).await;
+    delete_books(&state, &**db, std::slice::from_ref(&id)).await?;
     audit::record(
         &**db,
         Some(auth.user.id),
@@ -326,6 +356,67 @@ pub async fn remove(
     )
     .await?;
     Ok(Json(json!({ "ok": true })))
+}
+
+/// Delete books with everything kept for them (pages, jobs, cached translations, files). Running jobs on them are
+/// asked to stop first.
+pub async fn delete_books(
+    state: &AppState,
+    db: &impl GenericClient,
+    ids: &[String],
+) -> ApiResult<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    for r in db
+        .query(
+            "SELECT id FROM jobs WHERE book_id = ANY($1) AND status = 'running'",
+            &[&ids],
+        )
+        .await?
+    {
+        state.jobs.cancel(&r.get::<_, String>(0));
+    }
+    db.execute("DELETE FROM books WHERE id = ANY($1)", &[&ids])
+        .await?;
+    for id in ids.iter().filter(|id| valid_id(id)) {
+        let _ = tokio::fs::remove_dir_all(library::book_dir(&state.config, id)).await;
+    }
+    Ok(())
+}
+
+/// Remove a book's translation into one language (see [`crate::assist::remove_translation`]). For those who
+/// may edit the book.
+pub async fn remove_translation(
+    State(state): State<AppState>,
+    auth: Auth,
+    Path((id, lang)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    auth.require("translate")?;
+    if !valid_lang(&lang) {
+        return Err(ApiError::not_found());
+    }
+    let to: celsus_core::Language = lang.parse().map_err(|_| ApiError::not_found())?;
+    let db = state.pool.get().await?;
+    let book = visible(&**db, &auth, &id).await?;
+    if !book.editable_by(&auth) {
+        return Err(ApiError::forbidden());
+    }
+    drop(db);
+    let gone = crate::assist::remove_translation(&state, &book.id, &to).await?;
+    let db = state.pool.get().await?;
+    audit::record(
+        &**db,
+        Some(auth.user.id),
+        &auth.client,
+        "translation_removed",
+        Some(&book.id),
+        json!({ "lang": lang, "cached_translations": gone }),
+    )
+    .await?;
+    Ok(Json(
+        json!({ "ok": true, "cached_translations_removed": gone }),
+    ))
 }
 
 fn file_response(bytes: Vec<u8>, content_type: &'static str, filename: Option<&str>) -> Response {
@@ -453,6 +544,10 @@ pub async fn pages(
 pub struct NewJob {
     lang: String,
     pages: Vec<i32>,
+    /// Translate the pages that are translated already anew. Their earlier translation stays in the file until
+    /// the new one is done.
+    #[serde(default)]
+    again: bool,
 }
 
 pub async fn create_job(
@@ -515,6 +610,41 @@ pub async fn create_job(
     {
         return Ok(Json(json!({ "id": same.get::<_, String>(0) })));
     }
+    if auth.user.role == Role::Member {
+        let most = member_limit(&**db, LIMIT_QUEUED_PAGES).await?;
+        if most > 0 {
+            let waiting: i64 = db
+                .query_one(
+                    "SELECT COALESCE(SUM(GREATEST(cardinality(pages) - done_pages, 0)), 0)::BIGINT FROM jobs
+                     WHERE created_by = $1 AND status IN ('queued', 'running')",
+                    &[&auth.user.id],
+                )
+                .await?
+                .get(0);
+            if waiting + pages.len() as i64 > most {
+                return Err(ApiError::new(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "page_limit",
+                    format!(
+                        "This library lets each member have at most {most} pages waiting to be translated; you \
+                         have {waiting}, and this would add {}. Wait for your jobs to finish, or choose fewer pages.",
+                        pages.len()
+                    ),
+                ));
+            }
+        }
+    }
+    // Pages to be translated anew: those translated already are asked for again, and keep their earlier
+    // translation in the file until the new one is done.
+    if body.again {
+        let done = crate::assist::done_pages(&state, &book.id, &lang).await?;
+        let redo: Vec<usize> = pages
+            .iter()
+            .map(|&p| p as usize)
+            .filter(|p| done.contains(p))
+            .collect();
+        crate::assist::add_redo_pages(&state, &book.id, &lang, &redo).await?;
+    }
     let job_id = library::new_id();
     db.execute(
         "INSERT INTO jobs (id, book_id, created_by, lang, pages, status, created_at) VALUES ($1, $2, $3, $4, $5, 'queued', $6)",
@@ -527,7 +657,7 @@ pub async fn create_job(
         &auth.client,
         "job_created",
         Some(&book.id),
-        json!({ "lang": lang, "pages": pages.len() }),
+        json!({ "lang": lang, "pages": pages.len(), "again": body.again }),
     )
     .await?;
     state.jobs.wake();

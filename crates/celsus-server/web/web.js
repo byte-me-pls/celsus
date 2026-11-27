@@ -5,6 +5,33 @@
 // The desktop app's texts (pictures, estimates, usage, settings) are shared; the web's own come on top.
 const T = { ...uiStrings("app"), ...uiStrings("web") };
 
+/* Texts newer than some language files: English until those have them. */
+const EN = {
+  againLabel: "Translate pages that are translated already again",
+  againHint: "Their current translation stays in the PDF until the new one is finished.",
+  removeTranslation: "Remove",
+  confirmRemoveTranslation: (lang, title) => `Remove the ${lang} translation of "${title}"? The translated PDF, its pages, the pictures redrawn for it and its jobs are deleted. This cannot be undone.`,
+  translationRemoved: (lang) => `The ${lang} translation was removed.`,
+  deleteUser: "Delete",
+  confirmDeleteUser: (name, priv, shared) => `Delete ${name}'s account? Their ${priv} private book(s) are deleted, and their ${shared} shared book(s) become yours. This cannot be undone.`,
+  userDeleted: (name) => `${name}'s account was deleted.`,
+  removeUserBooks: (n) => `Remove private books (${n})`,
+  confirmRemoveUserBooks: (name, n) => `Remove the ${n} private book(s) of ${name}? Nobody else can see them. This cannot be undone.`,
+  userBooksRemoved: (n) => `${n} book(s) removed.`,
+  limitsTitle: "Limits for members",
+  limitsHint: "0 is no limit. Admins and the owner are not held to them.",
+  maxBooks: "Most books per member",
+  maxQueuedPages: "Most pages waiting to be translated, per member",
+  repaired: (name) => `${name}: the file was damaged and had to be repaired to be read. Some pages may be missing.`,
+};
+for (const [k, v] of Object.entries(EN)) if (T[k] === undefined) T[k] = v;
+const EN_ERRORS = {
+  out_of_credit: "The model's service says the account has no credit left. Add credit there, or an admin can choose another model under Connections and models.",
+  book_limit: "You have as many books as this library allows each member. Remove one to add another.",
+  page_limit: "You have as many pages waiting to be translated as this library allows each member. Wait for your jobs to finish, or choose fewer pages.",
+};
+T.errors = { ...EN_ERRORS, ...(T.errors || {}) };
+
 // The full list (about 130 languages) comes from the backend; these are shown until it arrives.
 let LANGUAGES = [
   ["tr", "Türkçe"], ["en", "English"], ["de", "Deutsch"], ["fr", "Français"], ["es", "Español"], ["ru", "Русский"],
@@ -119,7 +146,7 @@ async function invoke(cmd, a = {}) {
     case "book_pages":
       return (await api("GET", `/api/books/${encodeURIComponent(a.id)}/pages/${encodeURIComponent(a.lang)}`)).pages;
     case "job_create":
-      return api("POST", `/api/books/${encodeURIComponent(a.bookId)}/jobs`, { lang: a.lang, pages: a.pages });
+      return api("POST", `/api/books/${encodeURIComponent(a.bookId)}/jobs`, { lang: a.lang, pages: a.pages, again: !!a.again });
     case "save_output": {
       const link = document.createElement("a");
       link.href = bookUrl(a.id, a.lang);
@@ -133,6 +160,12 @@ async function invoke(cmd, a = {}) {
       throw new Error(`unknown command ${cmd}`);
   }
 }
+/** The reader asks which of the chosen pages to queue; the desktop app leaves out scans it cannot read yet. The
+    server has no text recognition: a scanned page is reported by its job, so every page chosen is queued. */
+async function pagesToQueue(_bookId, pages, _button) {
+  return pages && pages.length ? pages : null;
+}
+
 /** The reader (shared with the desktop app) calls commands by name and expects failures to be shown. */
 async function call(cmd, args) {
   try { return await invoke(cmd, args); } catch (e) { toast(e.message, true); throw e; }
@@ -458,21 +491,26 @@ async function uploadFiles(files) {
   if (!pdfs.length) return;
   const bar = $("#upload-progress");
   let added = [];
+  const repaired = [];
   for (const f of pdfs) {
     if (bar) {
       bar.hidden = false;
       $("#upload-text").textContent = T.uploading(f.name, 0);
     }
     try {
-      added.push(await uploadOne(f, (p) => {
+      const book = await uploadOne(f, (p) => {
         if ($("#upload-text")) $("#upload-text").textContent = T.uploading(f.name, p);
         if ($("#upload-meter")) $("#upload-meter").style.width = `${p}%`;
-      }));
+      });
+      if (book?.repaired) repaired.push(f.name);
+      added.push(book);
     } catch (e) {
       toast(`${f.name}: ${e.message}`, true);
     }
   }
   if (added.length) toast(T.added(added.length));
+  // Said last, so that it stays on screen.
+  if (repaired.length) toast(repaired.map((n) => T.repaired(n)).join(" "), true);
   if (added.length === 1 && pdfs.length === 1) openReader(added[0]);
   else go("library");
 }
@@ -506,6 +544,8 @@ async function renderBook(id) {
             <label>${esc(T.firstPage)}<input id="b-first" type="number" min="1" max="${book.pages}" value="${bookForm.first}"></label>
             <label>${esc(T.lastPage)}<input id="b-last" type="number" min="1" max="${book.pages}" value="${bookForm.last}"></label>
           </div>
+          <label class="check"><input id="b-again" type="checkbox">${esc(T.againLabel)}</label>
+          <p class="hint">${esc(T.againHint)}</p>
           <div class="estimate" id="b-estimate"><div><b>–</b><small>${esc(T.estChars)}</small></div><div><b>–</b><small>${esc(T.estTokens)}</small></div><div><b>–</b><small>${esc(T.estTime)}</small></div></div>
           <button class="primary-button wide" id="b-enqueue">${esc(T.enqueue)}</button>
         </section>
@@ -584,7 +624,7 @@ async function renderBook(id) {
       pages = all.slice(a - 1, b);
     }
     if (!pages.length) return toast(T.nothingToDo);
-    await apiCall("POST", `/api/books/${book.id}/jobs`, { lang, pages });
+    await apiCall("POST", `/api/books/${book.id}/jobs`, { lang, pages, again: $("#b-again").checked });
     toast(T.enqueued);
     poll(true);
     renderBookStatus(book);
@@ -736,10 +776,22 @@ async function renderBookStatus(book) {
   box.innerHTML = `<div class="section-heading"><h2>${esc(T.translationsTitle)}</h2></div>` + (langs.length
     ? langs.map((l) => `<div class="lang-row"><span class="lang-name">${esc(langName(l))}</span>
         <span class="lang-meta">${esc(T.pagesDone(fresh.translated[l], fresh.pages))}<div class="meter"><span class="w" data-w="${(100 * fresh.translated[l]) / fresh.pages}"></span></div></span>
-        <span class="lang-actions"><button class="quiet-button" data-read="${esc(l)}">${esc(T.read)}</button><a class="quiet-button" href="${esc(bookUrl(book.id, l))}" download>${esc(T.download)}</a></span></div>`).join("")
+        <span class="lang-actions"><button class="quiet-button" data-read="${esc(l)}">${esc(T.read)}</button><a class="quiet-button" href="${esc(bookUrl(book.id, l))}" download>${esc(T.download)}</a>${fresh.editable ? `<button class="text-button danger" data-unlang="${esc(l)}">${esc(T.removeTranslation)}</button>` : ""}</span></div>`).join("")
     : `<p class="caption">${esc(T.noTranslations)}</p>`);
   applyWidths(box);
   for (const b of $$("[data-read]", box)) b.onclick = () => go("reader", { id: book.id, lang: b.dataset.read, page: readingPrefs(book.id).page || 1 });
+  for (const b of $$("[data-unlang]", box)) b.onclick = async () => {
+    const lang = b.dataset.unlang;
+    if (!confirm(T.confirmRemoveTranslation(langName(lang), fresh.title))) return;
+    b.disabled = true;
+    try {
+      await apiCall("DELETE", `/api/books/${encodeURIComponent(book.id)}/translations/${encodeURIComponent(lang)}`);
+      toast(T.translationRemoved(langName(lang)));
+    } catch {} finally {
+      await refreshCounts().catch(() => {});
+      renderBookStatus(book);
+    }
+  };
   const jobs = state.jobs.filter((j) => j.book_id === book.id).slice(0, 8);
   const hist = $("#b-history");
   hist.innerHTML = `<div class="section-heading"><h2>${esc(T.historyTitle)}</h2></div>` +
@@ -992,7 +1044,9 @@ async function adminMembers(box) {
           <small>${esc(u.email)} · ${esc(T.roles[u.role])}${u.two_step ? ` · ${esc(T.twoStepShort)}` : ""}${u.disabled ? ` · ${esc(T.disabled)}` : ""} · ${esc(T.lastSeen)} ${esc(u.last_seen ? fmtDate(u.last_seen) : T.never)}</small></div>
           ${canTouch ? `<span class="row-actions">
             ${owner ? `<button class="quiet-button" data-role="${u.id}" data-to="${u.role === "admin" ? "member" : "admin"}">${esc(u.role === "admin" ? T.makeMember : T.makeAdmin)}</button>` : ""}
-            <button class="quiet-button ${u.disabled ? "" : "danger"}" data-disable="${u.id}" data-to="${u.disabled ? "false" : "true"}">${esc(u.disabled ? T.enable : T.disable)}</button></span>` : ""}</div>`;
+            <button class="quiet-button ${u.disabled ? "" : "danger"}" data-disable="${u.id}" data-to="${u.disabled ? "false" : "true"}">${esc(u.disabled ? T.enable : T.disable)}</button>
+            ${u.disabled && u.private_books ? `<button class="quiet-button danger" data-unbooks="${u.id}">${esc(T.removeUserBooks(u.private_books))}</button>` : ""}
+            <button class="text-button danger" data-delete-user="${u.id}">${esc(T.deleteUser)}</button></span>` : ""}</div>`;
       }).join("")}</div>
     </section>
     <section class="card stack">
@@ -1003,6 +1057,20 @@ async function adminMembers(box) {
     </section>`;
   for (const b of $$("[data-role]", box)) b.onclick = async () => { await apiCall("PATCH", `/api/admin/users/${b.dataset.role}`, { role: b.dataset.to }); adminMembers(box); };
   for (const b of $$("[data-disable]", box)) b.onclick = async () => { await apiCall("PATCH", `/api/admin/users/${b.dataset.disable}`, { disabled: b.dataset.to === "true" }); adminMembers(box); };
+  for (const b of $$("[data-unbooks]", box)) b.onclick = async () => {
+    const u = users.find((x) => x.id === Number(b.dataset.unbooks));
+    if (!confirm(T.confirmRemoveUserBooks(u.name, u.private_books))) return;
+    const r = await apiCall("DELETE", `/api/admin/users/${u.id}/books`);
+    toast(T.userBooksRemoved(r.books_removed));
+    adminMembers(box);
+  };
+  for (const b of $$("[data-delete-user]", box)) b.onclick = async () => {
+    const u = users.find((x) => x.id === Number(b.dataset.deleteUser));
+    if (!confirm(T.confirmDeleteUser(u.name, u.private_books, u.shared_books))) return;
+    await apiCall("DELETE", `/api/admin/users/${u.id}`);
+    toast(T.userDeleted(u.name));
+    adminMembers(box);
+  };
   $("#inv-make").onclick = async () => {
     const r = await apiCall("POST", "/api/admin/invites", { role: $("#inv-role")?.value || "member" });
     const link = `${location.origin}/#/invite/${encodeURIComponent(r.token)}`;
@@ -1127,11 +1195,22 @@ async function adminSettings(box) {
       <div class="setting-row"><div><h3>${esc(T.readable)}</h3><p>${esc(T.readableHint)}</p></div><span class="caption">70% · 6 pt</span></div>
     </section>
     <section class="card stack">
+      <div class="section-heading"><h2>${esc(T.limitsTitle)}</h2></div>
+      <p class="hint">${esc(T.limitsHint)}</p>
+      <div class="setting-row"><div><h3>${esc(T.maxBooks)}</h3></div><input id="s-max-books" type="number" min="0" max="1000000" value="${s.max_books}"></div>
+      <div class="setting-row"><div><h3>${esc(T.maxQueuedPages)}</h3></div><input id="s-max-pages" type="number" min="0" max="1000000" value="${s.max_queued_pages}"></div>
+      <div class="form-actions"><button class="primary-button" id="s-limits">${esc(T.save)}</button></div>
+    </section>
+    <section class="card stack">
       <div class="setting-row"><div><h3>${esc(T.cache)}</h3><p>${esc(T.cacheText(s.cached_translations, s.cached_chars))}</p></div>
         <button class="quiet-button danger" id="s-clear">${esc(T.clearCache)}</button></div>
     </section>`;
   $("#s-save").onclick = async () => {
     await apiCall("PUT", "/api/admin/settings", { batch_chars: Number($("#s-batch").value) });
+    toast(T.saved);
+  };
+  $("#s-limits").onclick = async () => {
+    await apiCall("PUT", "/api/admin/settings", { max_books: Number($("#s-max-books").value) || 0, max_queued_pages: Number($("#s-max-pages").value) || 0 });
     toast(T.saved);
   };
   $("#s-clear").onclick = async () => {

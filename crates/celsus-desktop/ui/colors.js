@@ -84,6 +84,17 @@ const celsusColors = (() => {
       "--soft", "--mute", "--on-fill", "--ember", "--ember-soft", "--bad", "--good-ink", "--warn", "--info-ink"];
     if (!changed(theme)) { for (const n of names) root.style.removeProperty(n); return; }
     const c = current(theme);
+    // Text must read on every ground it stands on: the background, panels, surfaces and fields. Text chosen
+    // too close to them is pushed towards black or white, whichever reads, so that no choice of colours can
+    // make the app, and the buttons that put the colours back, unreadable.
+    const grounds = [c.background, c.panel, c.surface, c.field];
+    const worst = (color) => Math.min(...grounds.map((g) => contrast(color, g)));
+    if (worst(c.text) < 4.5) {
+      const away = contrast("#0b0a09", c.background) >= contrast("#fbf8f3", c.background) ? "#0b0a09" : "#fbf8f3";
+      let text = c.text;
+      for (let i = 0; i < 20 && worst(text) < 4.5; i++) text = mix(text, away, 0.15);
+      c.text = worst(text) >= 4.5 ? text : away;
+    }
     // Colours that must read on the background are moved towards the text until they do.
     const readable = (color, need) => {
       let out = color;

@@ -14,8 +14,9 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use celsus_core::Language;
-use celsus_core::assist::Submitted;
+use celsus_core::assist::Sent;
 use serde_json::{Value, json};
+use tokio_postgres::GenericClient;
 
 use crate::auth::Auth;
 use crate::routes::books::{add_book, visible, visible_books};
@@ -27,7 +28,9 @@ const PROTOCOL: &str = "2025-06-18";
 const INSTRUCTIONS: &str = "Celsus is a book translation library on a server. To translate a book: find it with \
 list_books (or add a PDF with add_book), then repeat get_text_to_translate and submit_translations until no blocks \
 are left. Translate the blocks yourself; Celsus checks each translation, returns the ones it rejects with the reason, \
-and writes finished pages into the translated PDF. get_output gives its address.
+and writes finished pages into the translated PDF. get_output gives its address. Text Celsus has translated before \
+in this book is not handed out again; to translate pages anew all the same, call translate_again first. Scanned \
+pages without a text layer cannot be read on the server; the Celsus desktop app can read them.
 
 Covers and other pictures with text in them are redrawn, not typed over. To translate a cover: list_pictures finds \
 it, get_picture gives you the image. If you can generate images, draw it yourself: the same picture with every text \
@@ -65,14 +68,21 @@ fn tools() -> Value {
               "pages": { "type": "string", "description": "Pages to work on, e.g. \"10-12,15\". Omit for the whole book." },
               "max_characters": { "type": "integer", "description": "About how much text to return (default 4000)." } },
             "required": ["book_id", "target_language"] } },
+        { "name": "translate_again", "annotations": { "readOnlyHint": false, "destructiveHint": false },
+          "description": "Translate pages again from the start, as asked when a translation should be redone: earlier translations of their text stop counting, and get_text_to_translate hands their blocks out again. The pages stay in the translated PDF as they were until their new translation is finished.",
+          "inputSchema": { "type": "object", "properties": {
+              "book_id": book, "target_language": lang,
+              "pages": { "type": "string", "description": "Pages to translate again, e.g. \"10-12,15\". Omit for the whole book." } },
+            "required": ["book_id", "target_language"] } },
         { "name": "submit_translations",
-          "description": "Send translations back. Each item needs the page and id from get_text_to_translate. Translations that fail Celsus's checks are returned with the problem; fix and send them again, or set accept_anyway if the source really calls for it.",
+          "description": "Send translations back. Each item needs the page and id from get_text_to_translate. Translations that fail Celsus's checks are returned with the problem; fix and send them again, or set accept_anyway on an item if the source really calls for it. kept_original names the blocks (page:id) that were written with their original text, and why.",
           "inputSchema": { "type": "object", "properties": {
               "book_id": book, "target_language": lang,
               "translations": { "type": "array", "items": { "type": "object", "properties": {
-                  "page": { "type": "integer" }, "id": { "type": "string" }, "text": { "type": "string" } },
+                  "page": { "type": "integer" }, "id": { "type": "string" }, "text": { "type": "string" },
+                  "accept_anyway": { "type": "boolean", "description": "Store this translation even if a check flags it, when the source really calls for it." } },
                   "required": ["page", "id", "text"] } },
-              "accept_anyway": { "type": "boolean" } },
+              "accept_anyway": { "type": "boolean", "description": "Store every translation of this call even if a check flags it. Prefer accept_anyway on the items that need it. An empty translation is never stored." } },
             "required": ["book_id", "target_language", "translations"] } },
         { "name": "get_output", "annotations": read,
           "description": "Where the translated PDF of a book can be downloaded (with the same credentials), and how many pages it has translated.",
@@ -129,24 +139,58 @@ fn arg_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
 fn arg_lang(args: &Value) -> ApiResult<Language> {
     let code = arg_str(args, "target_language")
         .ok_or_else(|| ApiError::bad("target_language is required"))?;
-    let lang: Language = code
-        .parse()
-        .map_err(|e: celsus_core::language::InvalidLanguage| ApiError::bad(e.to_string()))?;
+    let lang = celsus_core::assist::parse_language(code).map_err(ApiError::bad)?;
     if !library::valid_lang(&assist::code(&lang)) {
-        return Err(ApiError::bad("Unknown language code."));
+        return Err(ApiError::bad(format!(
+            "{code} is not a language this server knows. Give target_language as a code, such as tr, de, ar, ja, \
+             zh-hans or pt-br."
+        )));
     }
     Ok(lang)
+}
+
+/// The book an assistant names. Book ids here are text (from list_books); a number cannot be one.
+fn arg_book(args: &Value) -> ApiResult<&str> {
+    match &args["book_id"] {
+        Value::Null => Err(ApiError::bad("book_id is required")),
+        Value::Number(_) => Err(ApiError::bad(
+            "book_id is the text id list_books gives for a book, not a number.",
+        )),
+        _ => arg_str(args, "book_id").ok_or_else(|| ApiError::bad("book_id is required")),
+    }
+}
+
+/// A number, also when it comes as text ("12").
+fn number(v: &Value) -> Option<u64> {
+    match v {
+        Value::Number(n) => n.as_u64(),
+        Value::String(s) => s.trim().parse().ok(),
+        _ => None,
+    }
 }
 
 fn arg_page(args: &Value) -> ApiResult<usize> {
     match &args["page"] {
         Value::Null => Ok(1),
-        v => v
-            .as_u64()
+        v => number(v)
             .filter(|&n| n >= 1)
             .map(|n| n as usize)
             .ok_or_else(|| ApiError::bad("page must be a page number")),
     }
+}
+
+/// Refuse to translate a book into the language it is written in.
+async fn other_language(db: &impl GenericClient, book_id: &str, lang: &Language) -> ApiResult<()> {
+    let source: String = db
+        .query_one("SELECT source_lang FROM books WHERE id = $1", &[&book_id])
+        .await?
+        .get(0);
+    if celsus_core::assist::same_language(&source, lang) {
+        return Err(ApiError::bad(celsus_core::assist::same_language_error(
+            &source, lang,
+        )));
+    }
+    Ok(())
 }
 
 /// Parse "10-12,15" (or a list of numbers) into page numbers.
@@ -161,7 +205,7 @@ fn parse_pages(v: Option<&Value>) -> ApiResult<Vec<usize>> {
         Some(Value::Array(a)) => a
             .iter()
             .map(|x| {
-                x.as_u64()
+                number(x)
                     .map(|n| n as usize)
                     .ok_or_else(|| ApiError::bad("pages must be numbers"))
             })
@@ -228,7 +272,7 @@ fn absolute(state: &AppState, path: &str) -> String {
 }
 
 async fn call_tool(state: &AppState, auth: &Auth, name: &str, args: &Value) -> ApiResult<Output> {
-    let book_arg = || arg_str(args, "book_id").ok_or_else(|| ApiError::bad("book_id is required"));
+    let book_arg = || arg_book(args);
     Ok(match name {
         "list_books" => {
             auth.require("read")?;
@@ -254,7 +298,11 @@ async fn call_tool(state: &AppState, auth: &Auth, name: &str, args: &Value) -> A
                 "private"
             };
             let b = add_book(state, auth, Bytes::from(pdf), name, visibility.to_owned()).await?;
-            json!({ "book_id": b["id"], "title": b["title"], "author": b["author"], "pages": b["pages"] }).into()
+            let mut out = json!({ "book_id": b["id"], "title": b["title"], "author": b["author"], "pages": b["pages"] });
+            if b["repaired"] == true {
+                out["note"] = b["note"].clone();
+            }
+            out.into()
         }
         "book_info" => {
             auth.require("read")?;
@@ -288,24 +336,48 @@ async fn call_tool(state: &AppState, auth: &Auth, name: &str, args: &Value) -> A
             let lang = arg_lang(args)?;
             let db = state.pool.get().await?;
             let book = visible(&**db, auth, book_arg()?).await?;
+            other_language(&**db, &book.id, &lang).await?;
             drop(db);
-            let max = args["max_characters"]
-                .as_u64()
+            let max = number(&args["max_characters"])
                 .unwrap_or(4000)
                 .clamp(500, 20000) as usize;
-            let p = assist::pending(state, &book.id, &lang, parse_pages(args.get("pages"))?, max)
-                .await?;
+            let (p, scans) =
+                assist::pending(state, &book.id, &lang, parse_pages(args.get("pages"))?, max)
+                    .await?;
             let mut v = serde_json::to_value(p).map_err(ApiError::internal)?;
             v["book_id"] = json!(book.id);
+            if !scans.is_empty() {
+                v["scanned_pages_without_text"] = json!(scans);
+            }
             v.into()
+        }
+        "translate_again" => {
+            auth.require("translate")?;
+            let lang = arg_lang(args)?;
+            let db = state.pool.get().await?;
+            let book = visible(&**db, auth, book_arg()?).await?;
+            other_language(&**db, &book.id, &lang).await?;
+            let pages = parse_pages(args.get("pages"))?;
+            let n = assist::translate_again(state, &book.id, &lang, &pages).await?;
+            audit::record(
+                &**db,
+                Some(auth.user.id),
+                &auth.client,
+                "translate_again",
+                Some(&book.id),
+                json!({ "lang": assist::code(&lang), "pages": n }),
+            )
+            .await?;
+            json!({ "book_id": book.id, "pages_to_translate_again": n }).into()
         }
         "submit_translations" => {
             auth.require("translate")?;
             let lang = arg_lang(args)?;
             let db = state.pool.get().await?;
             let book = visible(&**db, auth, book_arg()?).await?;
+            other_language(&**db, &book.id, &lang).await?;
             drop(db);
-            let items: Vec<Submitted> = serde_json::from_value(args["translations"].clone())
+            let items: Vec<Sent> = serde_json::from_value(args["translations"].clone())
                 .map_err(|e| ApiError::bad(format!("translations: {e}")))?;
             if items.len() > 2000 {
                 return Err(ApiError::bad("Send at most 2000 translations at a time."));

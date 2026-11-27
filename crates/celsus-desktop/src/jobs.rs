@@ -43,6 +43,11 @@ impl Runner {
         }
     }
 
+    /// Whether a job is being translated now.
+    pub fn busy(&self) -> bool {
+        self.current.lock().unwrap().is_some()
+    }
+
     /// Stop whatever is running on a book, so a book that is being removed is not translated (and paid for)
     /// any further.
     pub fn cancel_book(&self, book: i64) {
@@ -89,6 +94,11 @@ fn worker(app: AppHandle, db_path: &Path, library: &Path, wake: Receiver<()>, cu
     let _ = db::requeue_interrupted(&conn);
     loop {
         match db::next_queued(&conn) {
+            // Without a model to translate with, the queue waits for one to be chosen instead of failing every
+            // job in it (a connection that was removed, say).
+            Ok(Some(_)) if db::model_for(&conn, "translate").ok().flatten().is_none() => {
+                let _ = wake.recv_timeout(Duration::from_secs(30));
+            }
             // Taken from the queue only if nobody took it in the meantime.
             Ok(Some(id)) if !db::claim_job(&conn, id).unwrap_or(false) => continue,
             Ok(Some(id)) => {
@@ -174,17 +184,86 @@ fn retry_after(error: &str, tries: i64, fresh: bool) -> Option<i64> {
         .flatten()
 }
 
-/// Write the translated book. It is written beside the old file and swapped in, so a crash cannot leave half
-/// a PDF.
-fn write_output(output: &Path, bytes: &[u8]) -> Result<(), String> {
-    let part = output.with_extension("pdf.part");
-    std::fs::write(&part, bytes).map_err(|e| e.to_string())?;
-    if std::fs::rename(&part, output).is_err() {
-        // The old file is open somewhere; write over it instead.
-        std::fs::write(output, bytes).map_err(|e| e.to_string())?;
-        let _ = std::fs::remove_file(&part);
+/// The model of a job, counting what each answer cost as it comes: a run that is cut short, by a crash or by
+/// quitting, has still spent it.
+struct Counted<'a> {
+    inner: &'a OpenAiCompatible,
+    conn: &'a rusqlite::Connection,
+    job: i64,
+    book: i64,
+}
+
+impl celsus_core::Translator for Counted<'_> {
+    fn name(&self) -> String {
+        self.inner.name()
     }
-    Ok(())
+
+    fn translate(
+        &self,
+        request: &celsus_core::TranslationRequest,
+    ) -> Result<(Vec<String>, celsus_core::translate::Usage), celsus_core::translate::TranslateError>
+    {
+        let answer = self.inner.translate(request);
+        if let Ok((_, usage)) = &answer {
+            let _ = db::add_usage(
+                self.conn,
+                Some(self.job),
+                self.book,
+                0,
+                1,
+                usage.prompt_tokens as i64,
+                usage.completion_tokens as i64,
+            );
+        }
+        answer
+    }
+}
+
+/// The kept translations, for a job that translates some pages anew: the kept translations of those pages'
+/// text count as not there until they have been asked for again.
+struct Again<'a> {
+    inner: db::DbCache<'a>,
+    conn: &'a rusqlite::Connection,
+    book: i64,
+    lang: &'a str,
+    /// The keys of the text of the pages translated anew.
+    stale: std::collections::HashSet<String>,
+    /// Those of them translated anew already.
+    fresh: std::collections::HashSet<String>,
+}
+
+impl celsus_core::pipeline::Cache for Again<'_> {
+    fn get(&self, key: &str) -> Option<String> {
+        // The text of a page translated anew: only what was asked for again counts, and it waits apart (as an
+        // assistant's does) until the page is finished.
+        if self.stale.contains(key) {
+            let apart = celsus_core::assist::again_key(key);
+            return self
+                .fresh
+                .contains(&apart)
+                .then(|| self.inner.get(&apart))
+                .flatten();
+        }
+        self.inner.get(key)
+    }
+
+    fn put(&mut self, key: &str, translation: &str) {
+        if self.stale.contains(key) {
+            let apart = celsus_core::assist::again_key(key);
+            self.inner.put(&apart, translation);
+            if self.fresh.insert(apart.clone()) {
+                let _ = db::add_redo_keys(self.conn, self.book, self.lang, &[apart]);
+            }
+            return;
+        }
+        self.inner.put(key, translation);
+    }
+}
+
+/// Write the translated book, as an assistant would: one writer at a time, swapped in whole.
+fn write_output(library: &Path, book: i64, lang: &str, bytes: &[u8]) -> Result<(), String> {
+    let _lock = library::lock_output(library, book, lang)?;
+    library::write_output(&library::output_file(library, book, lang), bytes)
 }
 
 /// Run one job. `Ok(true)` means it was cancelled part way (what was done is kept).
@@ -200,29 +279,53 @@ fn run(
     let _ = app.emit("job-updated", db::job(conn, id)?);
 
     let (provider, model) = db::model_for(conn, "translate")?.ok_or("no_model")?;
-    let client = OpenAiCompatible::new(
-        provider.url.clone(),
-        secrets::get_key(provider.id),
-        model.clone(),
-    )
-    .stopped_by(cancel.clone())
-    .answers_within(
-        db::setting(conn, "answer_wait")?
-            .and_then(|v| v.parse::<u64>().ok())
-            .map(|v| {
-                v.clamp(
-                    *celsus_core::provider::ANSWER_WAIT_RANGE.start(),
-                    *celsus_core::provider::ANSWER_WAIT_RANGE.end(),
-                )
-            })
-            .unwrap_or(celsus_core::provider::ANSWER_WAIT),
-    );
+    // A key the system's store will not give is said to be so, rather than sent as no key and refused.
+    let key = secrets::read_key(provider.id).map_err(|e| {
+        eprintln!("the key store would not give the key: {e}");
+        "key_store_read".to_owned()
+    })?;
+    let client = OpenAiCompatible::new(provider.url.clone(), key, model.clone())
+        .stopped_by(cancel.clone())
+        .answers_within(
+            db::setting(conn, "answer_wait")?
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(|v| {
+                    v.clamp(
+                        *celsus_core::provider::ANSWER_WAIT_RANGE.start(),
+                        *celsus_core::provider::ANSWER_WAIT_RANGE.end(),
+                    )
+                })
+                .unwrap_or(celsus_core::provider::ANSWER_WAIT),
+        );
 
     let fonts_dir = db::setting(conn, "fonts_dir")?
         .filter(|d| !d.is_empty())
         .unwrap_or_else(crate::default_fonts_dir);
-    let doc = celsus_pdf::Document::open(library::source_file(library, book.id))
-        .map_err(|e| e.to_string())?;
+    // Scanned pages without a text layer are read first: the words read off them are what gets translated.
+    let job_pages: Vec<usize> = job.pages.iter().map(|&p| p as usize).collect();
+    let scans = celsus_ocr::unread_pages(library, book.id, &job_pages)?;
+    if !scans.is_empty() {
+        let reader = celsus_ocr::Reader::open(&celsus_ocr::models_dir(&celsus_store::data_dir()))?;
+        let done = translated(conn, id);
+        celsus_ocr::read_pages(library, book.id, &scans, &reader, |read, of| {
+            let _ = app.emit(
+                "job-progress",
+                JobProgress {
+                    job_id: id,
+                    book_id: book.id,
+                    page: 0,
+                    done,
+                    total: job.pages.len(),
+                    message: Some(format!("read:{read}/{of}")),
+                },
+            );
+            !cancel.load(Ordering::Relaxed)
+        })?;
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(true);
+        }
+    }
+    let doc = library::open_book(library, book.id)?;
     let mut options = Options::new(
         job.target_lang
             .parse()
@@ -247,21 +350,30 @@ fn run(
         .collect();
     let all: BTreeSet<i64> = wanted.union(&translated).copied().collect();
     options.pages = all.iter().map(|&p| p as usize).collect();
+    // Pages to be translated anew: their earlier translation stays in the file until the new one is done.
+    let again: BTreeSet<i64> = db::redo_pages(conn, book.id, &job.target_lang)?
+        .into_iter()
+        .map(|p| p as i64)
+        .filter(|p| wanted.contains(p))
+        .collect();
     // What is left to do. A job that was stopped goes on from where it was: its pages that are translated
-    // already count as done from the start.
-    let todo: BTreeSet<i64> = wanted.difference(&translated).copied().collect();
+    // already count as done from the start, unless they are to be translated anew.
+    let todo: BTreeSet<i64> = wanted
+        .iter()
+        .copied()
+        .filter(|p| !translated.contains(p) || again.contains(p))
+        .collect();
     // Pages translated before are only written again: nothing is asked, and so nothing is paid, for them.
     options.settled = all.difference(&todo).map(|&p| p as usize).collect();
     // The file is written every few seconds while the job runs, so that a page shown as translated is
     // translated in the reader too, long before the job ends.
     options.written_every = 5;
-    let output = library::output_file(library, book.id, &job.target_lang);
 
     let total = wanted.len();
     let mut done = wanted.len() - todo.len();
     // Pages translated by this run.
     let mut fresh = 0usize;
-    db::job_counters(conn, id, done as i64, total as i64, 0, 0, 0, 0, 0, &model)?;
+    db::job_progress(conn, id, done as i64, total as i64, 0, 0, &model)?;
     let _ = app.emit("job-updated", db::job(conn, id)?);
     // Earlier pages whose translation could not be written again.
     let mut lost = 0usize;
@@ -270,6 +382,7 @@ fn run(
     // Pages of this job where the model gave no usable answer for some of the text.
     let mut unfinished = 0usize;
     let (mut replaced, mut kept) = (0i64, 0i64);
+    let to = options.to.clone();
     let mut progress = |p: Progress| {
         let mut message = None;
         let mut page = 0;
@@ -289,6 +402,17 @@ fn run(
                 // A page with text left untranslated is not marked, so "missing pages" picks it up again.
                 if missing == 0 {
                     let _ = db::mark_page(conn, book.id, &job.target_lang, n64, k as i64);
+                    if again.contains(&n64) {
+                        // The page is finished: its new translations are put in use, in place of the old.
+                        use celsus_core::pipeline::Cache;
+                        let mut kept = db::DbCache(conn);
+                        for key in celsus_core::pipeline::keys_of(&doc, &to, &[n]) {
+                            if let Some(text) = kept.get(&celsus_core::assist::again_key(&key)) {
+                                kept.put(&key, &text);
+                            }
+                        }
+                        let _ = db::finish_redo(conn, book.id, &job.target_lang, &[n]);
+                    }
                 } else if !todo.contains(&n64) {
                     // It stays as the original in the new file, and is not called translated any more.
                     let _ = db::unmark_page(conn, book.id, &job.target_lang, n64);
@@ -301,27 +425,18 @@ fn run(
                     if missing == 0 {
                         done += 1;
                         fresh += 1;
+                        let _ = db::add_usage(conn, Some(id), book.id, 1, 0, 0, 0);
                     } else {
                         unfinished += 1;
                     }
                     replaced += r as i64;
                     kept += k as i64;
                 }
-                let _ = db::job_counters(
-                    conn,
-                    id,
-                    done as i64,
-                    total as i64,
-                    replaced,
-                    kept,
-                    0,
-                    0,
-                    0,
-                    &model,
-                );
+                let _ =
+                    db::job_progress(conn, id, done as i64, total as i64, replaced, kept, &model);
             }
             Progress::Written { bytes } => {
-                if write_output(&output, &bytes).is_ok() {
+                if write_output(library, book.id, &job.target_lang, &bytes).is_ok() {
                     let _ = app.emit("book-written", (book.id, &job.target_lang));
                 }
                 return;
@@ -343,33 +458,39 @@ fn run(
             },
         );
     };
-    let mut cache = db::DbCache(conn);
+    // The text of pages translated anew is asked for again, whatever is kept of it; what comes back is kept
+    // as their translation from then on, also when the job is stopped and goes on later.
+    let again_pages: Vec<usize> = again.iter().map(|&p| p as usize).collect();
+    let mut cache = Again {
+        inner: db::DbCache(conn),
+        conn,
+        book: book.id,
+        lang: &job.target_lang,
+        stale: celsus_core::pipeline::keys_of(&doc, &options.to, &again_pages)
+            .into_iter()
+            .collect(),
+        fresh: db::redo_keys(conn, book.id, &job.target_lang)?,
+    };
+    let counted = Counted {
+        inner: &client,
+        conn,
+        job: id,
+        book: book.id,
+    };
     let (bytes, outcome) = translate_document(
         &doc,
         &fonts,
-        &client,
+        &counted,
         &options,
         &mut cache,
         &mut progress,
         cancel,
     )
     .map_err(|e| e.to_string())?;
-    // The counters first: what a failed run used was still spent.
-    db::job_counters(
-        conn,
-        id,
-        done as i64,
-        total as i64,
-        replaced,
-        kept,
-        outcome.requests as i64,
-        outcome.usage.prompt_tokens as i64,
-        outcome.usage.completion_tokens as i64,
-        &model,
-    )?;
+    db::job_progress(conn, id, done as i64, total as i64, replaced, kept, &model)?;
     // A run that stopped early still has its finished pages; only one that wrote nothing leaves the file alone.
     if outcome.pages > 0 {
-        write_output(&output, &bytes)?;
+        write_output(library, book.id, &job.target_lang, &bytes)?;
     }
     // The interface has words of its own for a model that stayed silent.
     if outcome.no_answer {
@@ -379,9 +500,7 @@ fn run(
         return Err(why);
     }
     if unfinished > 0 && !outcome.cancelled {
-        return Err(format!(
-            "The model gave no usable answer for some text on {unfinished} page(s). Translate the missing pages again."
-        ));
+        return Err(format!("pages_unfinished:{unfinished}"));
     }
     // Pages that are only pictures (a scanned book) come through with nothing done to them. That is not a
     // translation: they are not called translated, and the job says why.
@@ -392,9 +511,7 @@ fn run(
         return Err("no_text".into());
     }
     if lost > 0 && !outcome.cancelled {
-        return Err(format!(
-            "The translation of {lost} earlier page(s) was no longer kept, so they are back to the original. Translate the missing pages again."
-        ));
+        return Err(format!("pages_lost:{lost}"));
     }
     Ok(outcome.cancelled)
 }

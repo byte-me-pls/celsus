@@ -9,6 +9,7 @@ license.workspace = true
 
 [dependencies]
 celsus-core.workspace = true
+celsus-ocr.workspace = true
 celsus-pdf.workspace = true
 celsus-store.workspace = true
 serde = { version = "1", features = ["derive"] }

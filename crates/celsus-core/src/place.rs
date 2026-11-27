@@ -279,6 +279,9 @@ impl Measure for Squeezed<'_> {
     fn width(&self, text: &str, size: f32) -> f32 {
         self.inner.width(text, size) * self.by
     }
+    fn keeps_together(&self, style: usize) -> bool {
+        self.inner.keeps_together(style)
+    }
     fn ascent(&self) -> f32 {
         self.inner.ascent()
     }

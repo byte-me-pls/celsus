@@ -7,6 +7,8 @@ In short: run one command, open the address it prints, enter the setup code, cre
 
 - [Install](#install): with a domain name, or on the home network only
 - [After installing](#after-installing): models, inviting people, two-step sign-in
+- [Members](#members): limits, deleting an account, a forgotten password
+- [Translations](#translations): translating pages again, removing a translation
 - [Backups](#backups)
 - [Settings](#settings)
 - [Languages](#languages)
@@ -60,6 +62,46 @@ the library until you allow the port from your network only, for example
    or malicious address cannot reach your router or other devices.
 3. **Invite people** (Admin → Members): each link works once and expires after 7 days.
 4. Turn on **two-step sign-in** for your own account (Account → Two-step sign-in).
+
+## Members
+
+Admin → Members lists everyone with their books. Admins manage members; only the owner manages admins.
+
+- **Disable** an account to stop it signing in at once (its sessions, keys and connected apps stop working). Its
+  books stay. A disabled member's private books can be removed with **Remove private books**: nobody else can see
+  them, so without this they would stay on the server.
+- **Delete** an account (after a confirmation) to remove it for good. Its private books are deleted with it. Its
+  shared books pass to the admin who deletes the account, so the members reading them keep them. Its sessions, API
+  keys, connected apps and the jobs it started go too. The audit log keeps what it did.
+- **Limits** (Admin → Translation → Limits for members): the most books one member may have, and the most pages
+  one member may have waiting to be translated at once. 0 is no limit. Uploads (also over MCP) and new jobs past
+  a limit are refused with a message saying why. Admins and the owner are not held to them.
+
+### A forgotten password
+
+The server has no email, so a password is reset on the server itself. Anyone who can run commands there can do
+it; nobody else can:
+
+```sh
+docker compose -f ~/celsus/compose.yml exec celsus celsus-server reset-password someone@example.com
+```
+
+It prints a new random password once and ends every session of the account; sign in with it and choose a new one
+under Account. For a lost phone, add `--reset-2fa` to turn off two-step sign-in for the account too (its backup
+codes go with it); turn it on again after signing in. A disabled account stays disabled. The reset is in the
+audit log, without the password.
+
+## Translations
+
+On a book's page, the translate card queues pages for the server's model. Pages translated already are written
+from the kept translations and cost nothing; tick **Translate pages that are translated already again** to have
+them translated anew. Each stays in the translated PDF as it was until its new translation is finished. The reader
+offers the same.
+
+Under **Translations**, **Remove** deletes one language's translation of a book (after a confirmation): the
+translated PDF, its pages, the pictures redrawn for that language, its jobs, and the translations kept for it.
+A job translating the book into that language is stopped first. Only those who may edit the book (its owner, or an
+admin for a shared book) can do this.
 
 ## Backups
 

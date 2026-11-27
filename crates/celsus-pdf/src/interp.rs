@@ -56,6 +56,102 @@ pub enum Source {
 /// A rectangle in default user space (PDF points, y up): `[x0, y0, x1, y1]`.
 pub type Bounds = [f32; 4];
 
+/// A line of text read off the picture of a page (by OCR), with its box in default user space.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScanLine {
+    pub text: String,
+    pub bounds: Bounds,
+}
+
+/// Lay lines read off a page's picture on its content as the invisible text a scan's text layer would be: the
+/// rest of the work treats them as such, covering the picture's words where a translation goes. They are drawn
+/// by no operation of the page, so nothing of the page's own content is ever rewritten for them.
+pub fn add_read_lines(content: &mut PageContent, lines: &[ScanLine]) {
+    let font = Rc::new(Font::read_off_picture());
+    // A line's box is as tall as the letters it happens to hold: brackets and descenders make it taller, and a
+    // tall sign that could not be read (an integral) taller still, while a heading in capitals has no descenders
+    // and stands hardly taller than the text. How wide its letters are says its size better. Lines with letters
+    // of about the usual width are of the page's usual size, so that the lines of one paragraph read as one
+    // paragraph; headings and notes are as much larger or smaller as their letters are.
+    let middle = |mut v: Vec<f32>| {
+        v.sort_by(f32::total_cmp);
+        v.get(v.len() / 2).copied()
+    };
+    let long: Vec<&ScanLine> = lines
+        .iter()
+        .filter(|l| l.text.chars().count() >= 8 && l.bounds[3] > l.bounds[1])
+        .collect();
+    let usual = middle(long.iter().map(|l| l.bounds[3] - l.bounds[1]).collect());
+    // The width of a line's letters, against that of an ordinary line: capitals are wider than letters mixed.
+    let letter = |l: &ScanLine| {
+        let letters = l.text.chars().filter(|c| c.is_alphabetic()).count();
+        let capitals = l.text.chars().filter(|c| c.is_uppercase()).count();
+        let width = (l.bounds[2] - l.bounds[0]) / l.text.chars().count().max(1) as f32;
+        if letters > 0 && capitals * 10 >= letters * 6 {
+            width / 1.35
+        } else {
+            width
+        }
+    };
+    let usual_letter = middle(long.iter().map(|l| letter(l)).collect());
+    for line in lines {
+        let [x0, y0, x1, y1] = line.bounds;
+        let chars: Vec<char> = line.text.chars().collect();
+        if chars.is_empty() || x1 <= x0 || y1 <= y0 {
+            continue;
+        }
+        let mut h = y1 - y0;
+        if let (Some(u), Some(w)) = (usual, usual_letter) {
+            let ratio = (chars.len() >= 8).then(|| letter(line) / w);
+            match ratio {
+                Some(r) if (0.8..=1.25).contains(&r) => h = u,
+                Some(r) => h = u * r.clamp(0.5, 3.0),
+                None if (0.75..=1.45).contains(&(h / u)) => h = u,
+                None => {}
+            }
+        }
+        // The box holds ascenders and descenders: an em is a little less than its height.
+        let size = h * 0.85;
+        let baseline = (y0 + y1) / 2.0 - h * 0.28;
+        let (y0, y1) = ((y0 + y1 - h) / 2.0, (y0 + y1 + h) / 2.0);
+        let step = (x1 - x0) / chars.len() as f32;
+        let glyphs = chars
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let x = x0 + step * i as f32;
+                PlacedGlyph {
+                    text: c.to_string(),
+                    bounds: [x, y0, x + step, y1],
+                    origin: (x, baseline),
+                    code: Vec::new(),
+                    advance: 0.0,
+                    kern_before: 0.0,
+                    visible: true,
+                }
+            })
+            .collect();
+        content.runs.push(TextRun {
+            source: Source::Page,
+            op: usize::MAX,
+            glyphs,
+            trailing_kern: 0.0,
+            font_size: size as f64,
+            h_scale: 1.0,
+            font: font.clone(),
+            font_resource: Vec::new(),
+            size,
+            color: [0, 0, 0],
+            render_mode: 3,
+            angle: 0.0,
+            ctm: IDENTITY,
+            clip: [f32::MIN, f32::MIN, f32::MAX, f32::MAX],
+        });
+        // What lies on it is the text of a scan.
+        content.bitonal.push(line.bounds);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PlacedGlyph {
     pub text: String,
@@ -119,6 +215,8 @@ pub struct PageContent {
     pub images: Vec<Bounds>,
     /// Those of the pictures that have one bit a pixel: scanned pages and line art.
     pub bitonal: Vec<Bounds>,
+    /// The pictures drawn from the page's resources, with the matrix each was drawn with.
+    pub pictures: Vec<(ObjRef, Matrix)>,
     pub ops: HashMap<Source, Vec<Op>>,
     /// The decoded content each source's operations were parsed from.
     pub data: HashMap<Source, Vec<u8>>,
@@ -598,6 +696,9 @@ impl Interpreter<'_> {
                     .collect();
                 let bounds = bounds_of(&corners);
                 self.out.images.push(bounds);
+                if let Some(id) = entry.as_ref() {
+                    self.out.pictures.push((id, gs.ctm));
+                }
                 let one_bit = self
                     .doc
                     .get_in(&stream.dict, "BitsPerComponent")
@@ -790,4 +891,67 @@ fn bounds_of(points: &[(f64, f64)]) -> Bounds {
         b[3] = b[3].max(y as f32);
     }
     b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line(text: &str, x0: f32, y0: f32, x1: f32, y1: f32) -> ScanLine {
+        ScanLine {
+            text: text.into(),
+            bounds: [x0, y0, x1, y1],
+        }
+    }
+
+    #[test]
+    fn lines_read_off_a_picture_are_text_of_a_scan() {
+        let lines = [
+            line("CHAPTER ONE", 100.0, 700.0, 250.0, 714.0),
+            line(
+                "the first line of a paragraph here",
+                50.0,
+                600.0,
+                230.0,
+                612.0,
+            ),
+            // A tall sign that was not read makes this box taller than the others.
+            line(
+                "the second line of the paragraph",
+                50.0,
+                580.0,
+                220.0,
+                598.0,
+            ),
+            line(
+                "and the last line of the paragraph",
+                50.0,
+                565.0,
+                228.0,
+                577.0,
+            ),
+        ];
+        let mut content = PageContent::default();
+        add_read_lines(&mut content, &lines);
+        assert_eq!(content.runs.len(), 4);
+        assert_eq!(
+            content.bitonal,
+            lines.iter().map(|l| l.bounds).collect::<Vec<_>>()
+        );
+        let sizes: Vec<f32> = content.runs.iter().map(|r| r.size).collect();
+        // The lines of the paragraph are of one size, the heading in capitals of a larger one.
+        assert_eq!(sizes[1], sizes[2]);
+        assert_eq!(sizes[1], sizes[3]);
+        assert!(sizes[0] > sizes[1] * 1.3, "{sizes:?}");
+        let run = &content.runs[1];
+        assert_eq!(run.render_mode, 3);
+        assert_eq!(run.glyphs.len(), lines[1].text.chars().count());
+        assert_eq!(
+            run.glyphs
+                .iter()
+                .map(|g| g.text.as_str())
+                .collect::<String>(),
+            lines[1].text
+        );
+    }
 }

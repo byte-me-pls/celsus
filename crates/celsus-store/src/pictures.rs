@@ -30,8 +30,7 @@ pub struct Picture {
 }
 
 fn open(library_dir: &Path, book_id: i64) -> Result<celsus_pdf::Document> {
-    celsus_pdf::Document::open(library::source_file(library_dir, book_id))
-        .map_err(|e| e.to_string())
+    library::open_book(library_dir, book_id)
 }
 
 /// The pictures on `pages` (all pages when empty), largest first within a page.
@@ -112,7 +111,13 @@ pub fn redraw(
         celsus_pdf::image::export(&doc, id).ok_or("This picture's format cannot be read.")?;
     let picture = client
         .edit_image(&bytes, mime, aspect, &instructions(&book, page, to, note))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            if celsus_core::provider::is_out_of_credit(&e) {
+                "out_of_credit".to_owned()
+            } else {
+                e.to_string()
+            }
+        })?;
     place(
         conn,
         library_dir,

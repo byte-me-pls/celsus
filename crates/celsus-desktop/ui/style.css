@@ -222,7 +222,11 @@ textarea { resize: vertical; }
 .legend span::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-inline-end: 6px; vertical-align: -1px; background: var(--raise-2); }
 .legend .t::before { background: var(--ember); }
 .legend .k::before { background: var(--warn); }
-.estimate { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+.estimate { display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); gap: 8px; }
+.estimate div[hidden] { display: none; }
+.check-row { display: flex; gap: 10px; align-items: flex-start; font-size: 13px; cursor: pointer; }
+.check-row input { margin-top: 3px; flex: none; }
+.check-row small { display: block; margin-top: 2px; }
 .estimate div { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
 .estimate b { display: block; font-size: 15px; font-weight: 500; font-variant-numeric: tabular-nums; }
 .estimate small { font-size: 10px; color: var(--soft); }
@@ -282,7 +286,7 @@ textarea { resize: vertical; }
 .model-list h4 { margin: 0; padding: 8px 8px 3px; font-size: 11px; font-weight: 500; color: var(--soft); }
 .model-list button { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; width: 100%; border: 0; border-radius: 5px; background: none; color: var(--ink); padding: 6px 8px; font-size: 12px; text-align: start; }
 .model-list button span { overflow-wrap: anywhere; }
-.model-list button:hover, .model-list button.on { background: color-mix(in srgb, var(--ember) 14%, transparent); }
+.model-list button:hover, .model-list button.on, .model-list button.active { background: color-mix(in srgb, var(--ember) 14%, transparent); }
 .model-list small { flex: none; font-size: 11px; color: var(--soft); }
 .model-list small.ok { color: var(--good-ink); }
 .model-list small.bad { color: var(--bad); }
@@ -366,6 +370,12 @@ pre.code { margin: 0; padding: 12px 14px; border: 1px solid var(--line-2); borde
 /* ---------- overlays ---------- */
 .toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%); background: var(--ember); color: var(--on-fill); padding: 10px 16px; border-radius: 6px; font-size: 12px; font-weight: 500; max-width: 70vw; z-index: 20; box-shadow: 0 8px 24px color-mix(in srgb, var(--shadow) 40%, transparent); }
 .toast.error { background: var(--bad); }
+.toast-action { margin-inline-start: 8px; background: transparent; border: 1px solid currentColor; color: inherit; border-radius: 4px; padding: 2px 8px; font: inherit; cursor: pointer; }
+.toast { cursor: pointer; white-space: pre-line; }
+.card-menu { position: fixed; z-index: 30; background: var(--panel); border: 1px solid var(--line-2); border-radius: 8px; padding: 4px; min-width: 180px; box-shadow: 0 12px 28px color-mix(in srgb, var(--shadow) 40%, transparent); }
+.card-menu button { display: block; width: 100%; text-align: start; border: 0; background: none; color: var(--ink); padding: 7px 10px; border-radius: 5px; font-size: 12px; cursor: pointer; }
+.card-menu button:hover, .card-menu button:focus { background: color-mix(in srgb, var(--ember) 14%, transparent); outline: none; }
+.card-menu button.danger { color: var(--bad); }
 .drop-overlay { position: fixed; inset: 12px; border: 2px dashed var(--ember); border-radius: 14px; background: color-mix(in srgb, var(--black) 80%, transparent); display: grid; place-items: center; z-index: 30; pointer-events: none; }
 .drop-overlay span { font: 400 32px var(--serif); color: var(--ember); }
 

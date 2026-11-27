@@ -6,6 +6,7 @@
 
 pub mod cmap;
 pub mod content;
+mod crypt;
 pub mod document;
 pub mod edit;
 pub mod embed;
@@ -30,7 +31,10 @@ pub enum Error {
     Syntax(&'static str, usize),
     Corrupt(String),
     Unsupported(String),
+    /// Encrypted in a way that cannot be opened here, such as with a public-key or DRM handler.
     Encrypted,
+    /// Encrypted with a password that is needed to open the file at all.
+    PasswordProtected,
 }
 
 impl std::fmt::Display for Error {
@@ -40,7 +44,14 @@ impl std::fmt::Display for Error {
             Error::Syntax(what, at) => write!(f, "syntax error: {what} at byte {at}"),
             Error::Corrupt(what) => write!(f, "damaged file: {what}"),
             Error::Unsupported(what) => write!(f, "unsupported: {what}"),
-            Error::Encrypted => write!(f, "the file is encrypted"),
+            Error::Encrypted => write!(
+                f,
+                "the PDF is encrypted with protection that cannot be removed here (such as DRM); add a copy without it"
+            ),
+            Error::PasswordProtected => write!(
+                f,
+                "the PDF needs a password to open; remove the password and add the book again"
+            ),
         }
     }
 }

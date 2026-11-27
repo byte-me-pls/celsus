@@ -2,6 +2,52 @@
    are let go again when far away, so a 900-page book scrolls as smoothly as a short one. */
 
 const RS = uiStrings("reader");
+// Strings newer than some of the translations: shown in English until the language has its own.
+const RS_NEWER = {
+  thisPageAgain: (p) => `This page again (${p})`,
+  nextTenAgain: (a, b) => `10 pages from here again (${a}–${b})`,
+  foundMany: (n) => `${n}+ found`,
+  printedAs: (l) => `(${l})`,
+  printedTitle: "The page number printed in the book",
+  pageBoxTitle: "A page number, or a page number as printed in the book (such as xii)",
+};
+for (const [k, v] of Object.entries(RS_NEWER)) RS[k] ??= v;
+
+/* ---------- the layers over a page ---------- */
+
+/** Rules for what is laid over each drawn page: its text, invisible but there to be selected and copied (the
+    text layer of pdf.js), and its links. They come with the reader, as a sheet of their own. */
+const LAYER_CSS = `
+.rd-page .textLayer { position: absolute; inset: 0; z-index: 0; overflow: clip; opacity: 1; line-height: 1; text-align: initial; -webkit-text-size-adjust: none; text-size-adjust: none; forced-color-adjust: none; transform-origin: 0 0; caret-color: CanvasText; }
+.rd-page .textLayer :is(span, br) { color: transparent; position: absolute; white-space: pre; cursor: text; transform-origin: 0% 0%; }
+.rd-page .textLayer > :not(.markedContent), .rd-page .textLayer .markedContent span:not(.markedContent) { z-index: 1; }
+.rd-page .textLayer span.markedContent { top: 0; height: 0; }
+.rd-page .textLayer span[role="img"] { -webkit-user-select: none; user-select: none; cursor: default; }
+.rd-page .textLayer ::selection { background: rgba(0, 90, 255, .28); }
+.rd-page .textLayer br::selection { background: transparent; }
+.rd-page .textLayer .endOfContent { display: block; position: absolute; inset: 100% 0 0; z-index: 0; cursor: default; -webkit-user-select: none; user-select: none; }
+.rd-page .textLayer.selecting .endOfContent { top: 0; }
+.rd-page .textLayer[data-main-rotation="90"] { transform: rotate(90deg) translateY(-100%); }
+.rd-page .textLayer[data-main-rotation="180"] { transform: rotate(180deg) translate(-100%, -100%); }
+.rd-page .textLayer[data-main-rotation="270"] { transform: rotate(270deg) translateX(-100%); }
+.rd-links { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
+.rd-link { position: absolute; pointer-events: auto; cursor: pointer; border-radius: 2px; }
+.rd-link:hover { background: color-mix(in srgb, #2b6cff 14%, transparent); }
+.rd-untranslated { z-index: 2; }
+.rd-label { font-variant-numeric: tabular-nums; white-space: nowrap; }
+`;
+(function addLayerStyles() {
+  // A constructed sheet is used where it can be, as a page that allows no inline styles still takes it.
+  try {
+    const sheet = new CSSStyleSheet();
+    sheet.replaceSync(LAYER_CSS);
+    document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+  } catch {
+    const style = document.createElement("style");
+    style.textContent = LAYER_CSS;
+    document.head.appendChild(style);
+  }
+})();
 
 /* ---------- pdf.js ---------- */
 
@@ -99,6 +145,10 @@ function readerFilesChanged() {
   clearTimeout(reloadTimer);
   reloadTimer = setTimeout(() => reader?.reloadTranslation(), 400);
 }
+
+/** Where the reader stood when it was built again for the same book (a language came or went), so that it
+    opens again on the same spot of the same page: { id, place, at }. */
+let keptPlace = null;
 
 /* ---------- reading positions ---------- */
 
@@ -214,7 +264,7 @@ async function renderReader(r) {
             <p class="rd-light-note" id="rd-light-note"></p>
           </div>
         </div>
-        <label class="rd-pageno"><input id="rd-page" type="number" min="1" max="${book.pages}" value="1"><span>${RS.pageOf(book.pages)}</span></label>
+        <label class="rd-pageno"><input id="rd-page" type="number" min="1" max="${book.pages}" value="1"><span>${RS.pageOf(book.pages)}</span><small class="rd-label" id="rd-label" title="${esc(RS.printedTitle)}" hidden></small></label>
         <span class="spacer"></span>
         <span class="rd-live" id="rd-live" hidden></span>
         <button class="primary-button" id="rd-translate">${ICON.translate}${RS.translate}</button>
@@ -263,10 +313,22 @@ class Reader {
     this.page = 1;
     this.translated = new Set();
     this.drawnRows = new Set();
+    this.labels = null; // the book's own page numbers (i, ii, 1, 2…), when it has some that differ
+    this.moves = 0; // counts each move of the view, so a search can tell whether the reader moved since
+    // Keeping up with a job that writes the translated file every few seconds: pages whose translation
+    // changed since the file was last read, pages a job reported done since the last write, and when the
+    // file was last read.
+    this.stale = new Set();
+    this.finished = new Set();
+    this.lastDone = new Map(); // job id -> pages done at its last report
+    this.lastRead = Date.now();
     this.alive = true;
     this.onKey = (e) => this.key(e);
     this.onResize = () => this.layout(true);
+    // A selection being drawn with the mouse ends wherever the button is let go.
+    this.onUp = () => { for (const el of $$(".textLayer.selecting", this.pagesBox)) el.classList.remove("selecting"); };
     document.addEventListener("keydown", this.onKey);
+    document.addEventListener("pointerup", this.onUp);
     window.addEventListener("resize", this.onResize);
   }
 
@@ -274,7 +336,11 @@ class Reader {
     this.alive = false;
     this.findRun = null;
     this.observer?.disconnect();
+    clearTimeout(this.writtenTimer);
+    clearTimeout(this.lateTimer);
+    clearTimeout(this.soonTimer);
     document.removeEventListener("keydown", this.onKey);
+    document.removeEventListener("pointerup", this.onUp);
     window.removeEventListener("resize", this.onResize);
     for (const row of this.rows) for (const s of row.slots) s.task?.cancel();
   }
@@ -302,17 +368,119 @@ class Reader {
     const vp = first.getViewport({ scale: 1 });
     this.defaultSize = [vp.width, vp.height];
     this.sizes.set(1, this.defaultSize);
-    await this.loadTranslated();
+    // The sizes of all pages come from the last visit; else those near the page opened are read now, so that
+    // the first view is right, and the others while the book is read.
+    const known = this.cachedSizes();
+    if (!known) await this.measure(page - 3, page + 3);
+    await Promise.all([this.loadTranslated(), this.loadLabels()]);
+    if (!this.alive) return;
     this.build();
-    this.goTo(page, false);
+    const kept = keptPlace?.id === this.book.id && Date.now() - keptPlace.at < 15000 ? keptPlace.place : null;
+    keptPlace = null;
+    if (kept) this.moveTo(kept.page, false, kept.frac);
+    else this.goTo(page, false);
     this.updateLive();
     const side = viewPrefs().side;
-    if (side) this.openSide(side);
+    if (side) this.openSide(side, false);
+    // The keys scroll the pages from the start, without a click on them first.
+    this.scroller.focus({ preventScroll: true });
+    if (!known) this.measureAll();
+  }
+
+  /* ----- page sizes and page numbers ----- */
+
+  /** Page sizes kept from an earlier visit, put in place; false when there are none for this book. */
+  cachedSizes() {
+    const n = Math.min(this.book.pages, this.docs[0].numPages);
+    try {
+      const c = JSON.parse(localStorage.getItem(`celsus-sizes-${this.book.id}`));
+      if (c?.n !== n || !Array.isArray(c.runs) || c.runs.reduce((a, r) => a + r[0], 0) !== n) return false;
+      let p = 1;
+      for (const [count, w, h] of c.runs) for (let i = 0; i < count; i++) this.sizes.set(p++, [w, h]);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Read the sizes of pages `from` to `to` that are not known yet. True when one of them differs from the
+      size the rows were given before it was known (the first page's). */
+  async measure(from, to) {
+    const doc = this.docs[0];
+    const n = Math.min(this.book.pages, doc.numPages);
+    const wanted = [];
+    for (let p = Math.max(1, from); p <= Math.min(n, to); p++) if (!this.sizes.has(p)) wanted.push(p);
+    const [w0, h0] = this.defaultSize;
+    let differs = false;
+    await Promise.all(wanted.map(async (p) => {
+      try {
+        const vp = (await doc.getPage(p)).getViewport({ scale: 1 });
+        this.sizes.set(p, [vp.width, vp.height]);
+        if (Math.abs(vp.width - w0) > 0.5 || Math.abs(vp.height - h0) > 0.5) differs = true;
+      } catch {}
+    }));
+    return differs;
+  }
+
+  /** Read every page's size, a few dozen pages at a time, and keep them for the next visit. Rows are sized
+      again when sizes that differ come in, with the spot being read kept where it is on screen. */
+  async measureAll() {
+    const n = Math.min(this.book.pages, this.docs[0].numPages);
+    for (let p = 1; p <= n; p += 48) {
+      const differs = await this.measure(p, p + 47);
+      if (!this.alive) return;
+      if (differs) this.layout(true);
+    }
+    // Kept as runs of equal sizes: a book whose pages are all one size takes a few bytes. Sizes are kept only
+    // when every page could be read.
+    const runs = [];
+    for (let p = 1; p <= n; p++) {
+      if (!this.sizes.has(p)) return;
+      const [w, h] = this.sizes.get(p).map((x) => Math.round(x * 100) / 100);
+      const last = runs[runs.length - 1];
+      if (last && last[1] === w && last[2] === h) last[0]++;
+      else runs.push([1, w, h]);
+    }
+    if (runs.length <= 500) {
+      try { localStorage.setItem(`celsus-sizes-${this.book.id}`, JSON.stringify({ n, runs })); } catch {}
+    }
+  }
+
+  /** The page numbers the book prints (i, ii, 1, 2…), kept only when some differ from the pages' places. */
+  async loadLabels() {
+    for (const doc of this.docs) {
+      const labels = await doc.getPageLabels().catch(() => null);
+      if (labels?.some((l, i) => l && l !== String(i + 1))) { this.labels = labels; break; }
+    }
+    if (!this.labels) return;
+    const box = $("#rd-page");
+    box.title = RS.pageBoxTitle;
+    // A number such as "xii" can only be typed into a box that takes letters.
+    if (this.labels.some((l) => l && !/^\d+$/.test(l.trim()))) box.type = "text";
+  }
+
+  /** Show page `p` in the page box, with the number the book prints on it when that is another. */
+  showPageNo(p) {
+    const box = $("#rd-page"), tag = $("#rd-label");
+    if (!box) return;
+    box.value = p;
+    const label = this.labels?.[p - 1];
+    tag.hidden = !label || label === String(p);
+    tag.textContent = tag.hidden ? "" : RS.printedAs(label);
+  }
+
+  /** The page meant by what was typed into the page box: a number is the page's place in the file, anything
+      else is looked for among the numbers the book prints. Null when it is neither. */
+  pageFromBox(text) {
+    const t = String(text).trim();
+    if (/^\d+$/.test(t)) return Number(t);
+    const i = this.labels ? this.labels.findIndex((l) => l && l.trim().toLowerCase() === t.toLowerCase()) : -1;
+    return i >= 0 ? i + 1 : null;
   }
 
   /* ----- the side panel: the book's contents, and search ----- */
 
-  openSide(tab) {
+  openSide(tab, focus = true) {
     const side = $("#rd-side");
     const wasOpen = !side.hidden;
     side.hidden = false;
@@ -322,7 +490,7 @@ class Reader {
     $("#rd-contents").setAttribute("aria-pressed", String(tab === "contents"));
     $("#rd-find").setAttribute("aria-pressed", String(tab === "find"));
     if (tab === "contents") this.showContents();
-    else this.showFind();
+    else this.showFind(focus);
     // The pages have less room beside the panel.
     if (!wasOpen) this.layout(true);
   }
@@ -395,7 +563,7 @@ class Reader {
     }
   }
 
-  showFind() {
+  showFind(focus = true) {
     const body = $("#rd-side-body");
     const f = this.found || { query: "", hits: [] };
     body.innerHTML = `<form class="rd-find" id="rd-find-form">
@@ -404,8 +572,11 @@ class Reader {
       <p class="rd-side-note" id="rd-find-status"></p>
       <div class="rd-hits" id="rd-hits"></div>`;
     const q = $("#rd-find-q");
-    q.focus();
-    q.select();
+    if (focus) {
+      q.focus();
+      q.select();
+    }
+    if (f.query && !this.findRun) $("#rd-find-status").textContent = this.foundText();
     $("#rd-find-form").onsubmit = (e) => {
       e.preventDefault();
       const query = q.value.trim();
@@ -451,23 +622,29 @@ class Reader {
     return entry;
   }
 
-  /** Look for `query` in the pages shown, page by page; each page is listed as soon as it is read. */
+  /** Look for `query` in the pages shown, page by page; each page is listed as soon as it is read. The first
+      place found is shown at once, unless the reader has moved since the search began. */
   async search(query) {
     const run = {};
     this.findRun = run;
-    this.found = { query, hits: [], at: -1 };
+    this.found = { query, hits: [], at: -1, capped: false };
     this.clearHighlights();
     const status = $("#rd-find-status");
-    if (!query) { this.drawHits(); if (status) status.textContent = ""; return; }
+    if (!query) { this.findRun = null; this.drawHits(); if (status) status.textContent = ""; return; }
     const needle = [...query.replace(/\s+/g, "")].map(fold).join("");
     const pages = this.book.pages;
-    for (let p = 1; p <= pages; p++) {
-      for (let d = 0; d < this.docs.length; d++) {
+    const LIMIT = 1000;
+    const moves = this.moves;
+    let shown = false;
+    for (let p = 1; p <= pages && !this.found.capped; p++) {
+      for (let d = 0; d < this.docs.length && !this.found.capped; d++) {
         const page = await this.pageText(d, p).catch(() => null);
         if (this.findRun !== run || !this.alive) return;
         if (!page) continue;
         let from = 0, k;
-        while ((k = page.letters.indexOf(needle, from)) >= 0 && this.found.hits.length < 1000) {
+        while ((k = page.letters.indexOf(needle, from)) >= 0) {
+          // One more than are listed: the count says so, and the rest of the book is not read.
+          if (this.found.hits.length >= LIMIT) { this.found.capped = true; break; }
           // Where it stands in the text as written, from its first letter to just after its last.
           const start = page.at[k], end = page.at[k + needle.length - 1] + 1;
           this.found.hits.push({
@@ -479,15 +656,27 @@ class Reader {
           from = k + needle.length;
         }
       }
-      if (p % 20 === 0 || p === pages) {
+      if (!shown && this.found.hits.length) {
+        shown = true;
+        this.drawHits();
+        if (this.found.at < 0 && this.moves === moves) this.showHit(0);
+      }
+      if (p % 20 === 0 || p === pages || this.found.capped) {
         const st = $("#rd-find-status");
-        if (st) st.textContent = p === pages ? RS.found(this.found.hits.length) : RS.searching(p, pages);
+        if (st) st.textContent = p === pages || this.found.capped ? this.foundText() : RS.searching(p, pages);
         this.drawHits();
         await new Promise((r) => setTimeout(r));
+        if (this.findRun !== run || !this.alive) return;
       }
     }
+    this.findRun = null;
     for (const p of this.drawnRows) this.highlight(p);
-    if (this.found.hits.length && this.found.at < 0) this.nextHit(1);
+  }
+
+  /** How many places were found, said as "1000+" when the search stopped at its limit. */
+  foundText() {
+    const n = this.found?.hits.length || 0;
+    return this.found?.capped ? RS.foundMany(n) : RS.found(n);
   }
 
   drawHits() {
@@ -556,10 +745,10 @@ class Reader {
   }
 
   async loadTranslated() {
-    this.translated = new Set();
-    if (this.view.lang === "orig") return;
-    const pages = await invoke("book_pages", { id: this.book.id, lang: this.view.lang }).catch(() => []);
-    this.translated = new Set(pages.map(([p]) => p));
+    if (this.view.lang === "orig") { this.translated = new Set(); return; }
+    // The pages known before stay known while the list is asked for, and when it cannot be had.
+    const pages = await invoke("book_pages", { id: this.book.id, lang: this.view.lang }).catch(() => null);
+    if (pages) this.translated = new Set(pages.map(([p]) => p));
   }
 
   bindBar() {
@@ -569,14 +758,20 @@ class Reader {
     $("#rd-find").onclick = () => (!$("#rd-side").hidden && this.sideTab === "find" ? this.closeSide() : this.openSide("find"));
     $("#rd-side-close").onclick = () => this.closeSide();
     for (const b of $$("#rd-side-tabs button")) b.onclick = () => this.openSide(b.dataset.side);
+    // A view chosen here is remembered for the book, so that a translation coming in later does not take
+    // the place of the original someone chose to read.
     for (const b of $$("#rd-lang button")) {
       b.setAttribute("aria-pressed", String(b.dataset.lang === v.lang));
-      b.onclick = () => go("reader", { id: this.book.id, lang: b.dataset.lang, page: this.page });
+      b.onclick = () => {
+        saveReadingPrefs(this.book.id, { chose: true });
+        go("reader", { id: this.book.id, lang: b.dataset.lang, page: this.page });
+      };
     }
     const split = $("#rd-split");
     split.setAttribute("aria-pressed", String(v.split));
     split.onclick = () => {
       saveViewPrefs({ split: !v.split });
+      saveReadingPrefs(this.book.id, { chose: true });
       go("reader", { id: this.book.id, lang: v.lang === "orig" ? Object.keys(this.files.outputs)[0] : v.lang, page: this.page });
     };
     for (const b of $$("#rd-mode button")) {
@@ -586,13 +781,18 @@ class Reader {
         v.mode = b.dataset.mode;
         saveViewPrefs({ mode: v.mode });
         for (const x of $$("#rd-mode button")) x.setAttribute("aria-pressed", String(x === b));
-        this.layout(true);
+        this.layout(false);
+        this.goTo(this.page, false);
       };
     }
     $("#rd-zoom-in").onclick = () => this.setZoom(v.zoom * 1.15);
     $("#rd-zoom-out").onclick = () => this.setZoom(v.zoom / 1.15);
     $("#rd-zoom-val").onclick = () => this.setZoom(1);
-    $("#rd-page").onchange = (e) => this.goTo(Number(e.target.value), true);
+    $("#rd-page").onchange = (e) => {
+      const p = this.pageFromBox(e.target.value);
+      if (p) this.goTo(p, true);
+      else this.showPageNo(this.page);
+    };
     $("#rd-prev").onclick = () => this.goTo(this.page - 1, true);
     $("#rd-next").onclick = () => this.goTo(this.page + 1, true);
     $("#rd-translate").onclick = (e) => { e.stopPropagation(); this.togglePop(); };
@@ -612,17 +812,43 @@ class Reader {
       if (!e.target.closest(".rd-menu-wrap")) $("#rd-menu").hidden = true;
       if (!e.target.closest("#rd-light-wrap")) $("#rd-light-menu").hidden = true;
     };
+    // A button pressed with the mouse hands the keys back to the pages: they scroll them again, and Space
+    // does not press the button a second time. A button reached with Tab keeps the keys (detail is 0 for a
+    // click made from the keyboard), and so does a field the button has just opened. This is looked at
+    // once the click is over, as some buttons keep their clicks to themselves.
+    $(".rd").addEventListener("click", (e) => {
+      const button = e.target.closest("button");
+      if (!button || e.detail === 0) return;
+      setTimeout(() => {
+        const at = document.activeElement;
+        if (this.alive && (at === button || at === document.body || !at)) this.scroller.focus({ preventScroll: true });
+      });
+    }, true);
     this.scroller.addEventListener("scroll", () => this.onScroll(), { passive: true });
+    this.scroller.addEventListener("pointerdown", () => this.moves++, { passive: true });
     this.scroller.addEventListener("wheel", (e) => {
       if (e.ctrlKey) {
         e.preventDefault();
         this.setZoom(v.zoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1));
-      } else if (v.mode === "paged" && Math.abs(e.deltaY) > 30 && !this.wheelLock) {
-        // In page mode a wheel step turns the page.
-        this.wheelLock = true;
-        setTimeout(() => (this.wheelLock = false), 250);
-        this.goTo(this.page + (e.deltaY > 0 ? 1 : -1), true);
+        return;
       }
+      this.moves++;
+      if (v.mode !== "paged" || !e.deltaY) return;
+      // In page mode the wheel turns the page. Zoomed in, it first moves over the page as usual, and turns it
+      // only from the page's bottom (or, going back, its top), and not while a scroll over the page goes on.
+      const s = this.scroller;
+      const down = e.deltaY > 0;
+      const atEdge = down ? s.scrollTop + s.clientHeight >= s.scrollHeight - 2 : s.scrollTop <= 1;
+      if (!atEdge) { this.wheelOver = performance.now(); return; }
+      e.preventDefault();
+      // The wheel still turning from a scroll that reached the edge waits for a pause first.
+      if (performance.now() - (this.wheelOver || 0) < 300) { this.wheelOver = performance.now(); return; }
+      if (Math.abs(e.deltaY) <= 30 || this.wheelLock) return;
+      this.wheelLock = true;
+      setTimeout(() => (this.wheelLock = false), 250);
+      // Going back, the page before is shown from its bottom, where reading left it.
+      if (down) this.goTo(this.page + 1, true);
+      else this.goTo(this.page - 1, true, 1);
     }, { passive: false });
   }
 
@@ -680,14 +906,10 @@ class Reader {
         s.className = "rd-page";
         if (this.docs.length > 1) s.dataset.side = i === 0 ? RS.original : langName(this.view.lang);
         el.appendChild(s);
-        return { el: s, canvas: null, task: null, drawn: 0 };
+        // drawnFrom: the file the picture was drawn from; text, links, layersOf: what is laid over it.
+        return { el: s, canvas: null, task: null, drawn: 0, drawnFrom: null, text: null, links: null, layersOf: null };
       });
-      if (this.view.lang !== "orig" && !this.translated.has(p)) {
-        const badge = document.createElement("div");
-        badge.className = "rd-untranslated";
-        badge.innerHTML = `<span>${RS.notTranslated}</span><button class="text-button" data-from="${p}">${RS.fromHere}</button>`;
-        slots[slots.length - 1].el.appendChild(badge);
-      }
+      if (this.view.lang !== "orig" && !this.translated.has(p)) slots[slots.length - 1].el.appendChild(this.badge(p));
       frag.appendChild(el);
       this.rows.push({ el, slots });
     }
@@ -707,9 +929,20 @@ class Reader {
     this.layout(false);
   }
 
+  /** The note on a page not translated yet, with a button to translate from there. */
+  badge(p) {
+    const badge = document.createElement("div");
+    badge.className = "rd-untranslated";
+    badge.innerHTML = `<span>${RS.notTranslated}</span><button class="text-button" data-from="${p}">${RS.fromHere}</button>`;
+    return badge;
+  }
+
+  /** Size the rows. With `keepPlace`, the spot at the top of the view stays where it is on screen, however
+      the rows above it changed. */
   layout(keepPlace) {
     if (!this.rows.length) return;
     const v = this.view;
+    const place = keepPlace ? this.place() : null;
     $(".rd").classList.toggle("paged", v.mode === "paged");
     $("#rd-prev").hidden = $("#rd-next").hidden = v.mode !== "paged";
     $("#rd-zoom-val").textContent = `${Math.round(v.zoom * 100)}%`;
@@ -721,13 +954,34 @@ class Reader {
       for (const s of row.slots) {
         s.el.style.width = `${width}px`;
         s.el.style.height = `${(width * h) / w}px`;
-        // Redraw at the new size when the page is next seen.
+        // The text and links laid over the page follow its size at once; the picture of the page is drawn
+        // again at the new size when the page is next seen.
+        this.scaleLayers(s, width);
         if (s.drawn && Math.abs(s.drawn - width) > 1) s.stale = true;
       }
       row.el.hidden = v.mode === "paged" && p !== page;
     });
-    if (keepPlace) this.goTo(page, false);
+    if (place) this.moveTo(place.page, false, place.frac, true);
     for (const p of [...this.drawnRows]) if (this.rows[p - 1].slots.some((s) => s.stale)) this.draw(p);
+  }
+
+  /** The row under the line `y` (in the scrolled box's own height), found by halving. */
+  rowAt(y) {
+    let lo = 0, hi = this.rows.length - 1;
+    while (lo < hi) {
+      const m = (lo + hi + 1) >> 1;
+      if (this.rows[m].el.offsetTop <= y) lo = m; else hi = m - 1;
+    }
+    return lo;
+  }
+
+  /** Where the view stands: the page at its top, and how far down that page (0 to 1) the top is. */
+  place() {
+    if (!this.rows.length) return { page: this.page, frac: 0 };
+    const top = this.scroller.scrollTop + 16;
+    const i = this.view.mode === "paged" ? this.page - 1 : this.rowAt(top);
+    const el = this.rows[i].el;
+    return { page: i + 1, frac: el.offsetHeight ? (top - el.offsetTop) / el.offsetHeight : 0 };
   }
 
   setZoom(z) {
@@ -742,24 +996,35 @@ class Reader {
     const row = this.rows[p - 1];
     if (!row || !this.alive) return;
     this.drawnRows.add(p);
-    // Learn the page's real size first; books mix page sizes now and then.
+    // The translation of this page changed since the translated file was read: read it again first.
+    if (this.stale.has(p)) this.refreshSoon();
+    // A page whose size could not be read with the others is measured now.
     if (!this.sizes.has(p)) {
-      const pg = await this.docs[0].getPage(p);
+      const pg = await this.docs[0].getPage(Math.min(p, this.docs[0].numPages));
       const vp = pg.getViewport({ scale: 1 });
       this.sizes.set(p, [vp.width, vp.height]);
-      if (Math.abs(vp.width / vp.height - this.defaultSize[0] / this.defaultSize[1]) > 0.01) this.layout(false);
+      if (Math.abs(vp.width / vp.height - this.defaultSize[0] / this.defaultSize[1]) > 0.01) this.layout(true);
     }
-    await Promise.all(row.slots.map((s, i) => this.drawSlot(s, this.docs[i], p)));
+    const docs = this.docs;
+    await Promise.all(row.slots.map((s, i) => this.drawSlot(s, docs[i], p)));
   }
 
   async drawSlot(slot, doc, p) {
     const width = this.pageWidth(p);
-    if (slot.canvas && !slot.stale && Math.abs(slot.drawn - width) <= 1) return;
+    if (slot.canvas && !slot.stale && Math.abs(slot.drawn - width) <= 1 && slot.drawnFrom === doc) {
+      // Drawn already. Only its text and links can be missing, when they could not be read before.
+      if (slot.layersOf !== doc) {
+        const page = await doc.getPage(Math.min(p, doc.numPages)).catch(() => null);
+        if (page && this.alive && slot.canvas) this.addLayers(slot, doc, page, page.getViewport({ scale: 1 }));
+      }
+      return;
+    }
     slot.task?.cancel();
     const page = await doc.getPage(Math.min(p, doc.numPages));
     if (!this.alive) return;
+    const base = page.getViewport({ scale: 1 });
     const ratio = window.devicePixelRatio || 1;
-    const vp = page.getViewport({ scale: (width / page.getViewport({ scale: 1 }).width) * ratio });
+    const vp = page.getViewport({ scale: (width / base.width) * ratio });
     const canvas = document.createElement("canvas");
     canvas.width = Math.floor(vp.width);
     canvas.height = Math.floor(vp.height);
@@ -775,9 +1040,110 @@ class Reader {
     slot.el.prepend(canvas);
     slot.canvas = canvas;
     slot.drawn = width;
+    slot.drawnFrom = doc;
     slot.stale = false;
+    // The page's text and links are laid over it once for each file it is drawn from; a new size only
+    // scales them.
+    if (slot.layersOf !== doc) this.addLayers(slot, doc, page, base);
     // The marks of a search are placed for the page's size: place them again.
     if (this.found?.hits.some((h) => h.page === p)) this.highlight(p);
+  }
+
+  /** Lay over a drawn page its text, invisible but there to be selected and copied, and its links. Both are
+      placed in the page's own measures, so that a new zoom only has to change `--scale-factor`. */
+  async addLayers(slot, doc, page, base) {
+    slot.layersOf = doc;
+    const text = document.createElement("div");
+    text.className = "textLayer";
+    text.style.setProperty("--scale-factor", String(slot.drawn / base.width));
+    const textLayer = new pdfjsLib.TextLayer({
+      textContentSource: page.streamTextContent({ includeMarkedContent: true, disableNormalization: true }),
+      container: text,
+      viewport: page.getViewport({ scale: slot.drawn / base.width }),
+    });
+    let annotations;
+    try {
+      [, annotations] = await Promise.all([textLayer.render(), page.getAnnotations({ intent: "display" })]);
+    } catch {
+      if (slot.layersOf === doc) slot.layersOf = null; // tried again when the page is next drawn
+      return;
+    }
+    // The page was let go, or drawn from a newer file, while its text was being read.
+    if (!this.alive || slot.layersOf !== doc || !slot.canvas) return;
+    // What pdf.js puts after the text: while a selection is drawn it covers the page, so that the selection
+    // does not jump when the mouse passes between lines.
+    const end = document.createElement("div");
+    end.className = "endOfContent";
+    text.append(end);
+    text.addEventListener("pointerdown", () => text.classList.add("selecting"));
+    const links = document.createElement("div");
+    links.className = "rd-links";
+    for (const a of annotations || []) {
+      if (a.subtype !== "Link" || !a.rect) continue;
+      // Only a web address pdf.js found sound is opened; a link to another file is left alone.
+      const link = a.url ? { url: a.url } : a.dest ? { dest: a.dest } : a.action ? { action: a.action } : null;
+      if (!link) continue;
+      const [x1, y1, x2, y2] = base.convertToViewportRectangle(a.rect);
+      const el = document.createElement("div");
+      el.className = "rd-link";
+      el.setAttribute("role", "link");
+      if (link.url) el.title = link.url;
+      Object.assign(el.style, {
+        left: `${(100 * Math.min(x1, x2)) / base.width}%`,
+        top: `${(100 * Math.min(y1, y2)) / base.height}%`,
+        width: `${(100 * Math.abs(x2 - x1)) / base.width}%`,
+        height: `${(100 * Math.abs(y2 - y1)) / base.height}%`,
+      });
+      el.onclick = (e) => { e.preventDefault(); this.follow(doc, link); };
+      links.append(el);
+    }
+    slot.text?.remove();
+    slot.links?.remove();
+    slot.canvas.after(text, links);
+    slot.text = text;
+    slot.links = links;
+    slot.pageWidth = base.width;
+    // The zoom may have changed while the text was being read.
+    this.scaleLayers(slot, parseFloat(slot.el.style.width) || slot.drawn);
+  }
+
+  /** Fit the text laid over a page to the page's width on screen. The links are placed in shares of the page
+      and need nothing. */
+  scaleLayers(slot, width) {
+    if (slot.text && slot.pageWidth) slot.text.style.setProperty("--scale-factor", String(width / slot.pageWidth));
+  }
+
+  /** Follow a link of the book: to a place in it, a page turn, or a web page, opened in the browser. */
+  async follow(doc, link) {
+    if (link.url) { this.openLink(link.url); return; }
+    if (link.action) {
+      const p = { NextPage: this.page + 1, PrevPage: this.page - 1, FirstPage: 1, LastPage: this.book.pages }[link.action];
+      if (p) this.goTo(p, true);
+      return;
+    }
+    try {
+      let dest = link.dest;
+      if (typeof dest === "string") dest = await doc.getDestination(dest);
+      if (!Array.isArray(dest)) return;
+      const ref = dest[0];
+      const p = (typeof ref === "number" ? ref : await doc.getPageIndex(ref)) + 1;
+      // How far down the page the link points, when it says.
+      const kind = dest[1]?.name;
+      const y = kind === "XYZ" ? dest[3] : kind === "FitH" || kind === "FitBH" ? dest[2] : kind === "FitR" ? dest[5] : null;
+      let at = null;
+      if (typeof y === "number") {
+        const vp = (await doc.getPage(p)).getViewport({ scale: 1 });
+        const x = kind === "XYZ" && typeof dest[2] === "number" ? dest[2] : 0;
+        at = Math.max(0, Math.min(1, vp.convertToViewportPoint(x, y)[1] / vp.height));
+      }
+      if (this.alive) this.goTo(p, true, at);
+    } catch {}
+  }
+
+  /** Open a web address in the user's browser, never in the app's own window. */
+  openLink(url) {
+    if (window.__TAURI__) call("open_url", { url }).catch(() => {});
+    else window.open(url, "_blank", "noopener,noreferrer");
   }
 
   /** Free a page that scrolled far away. */
@@ -794,55 +1160,69 @@ class Reader {
         s.canvas = null;
         s.drawn = 0;
       }
+      s.text?.remove();
+      s.links?.remove();
+      s.text = s.links = s.layersOf = s.drawnFrom = null;
     }
   }
 
   /* ----- moving around ----- */
 
-  goTo(p, smooth) {
+  /** Go to page `p` because the reader asked to; `at` (0 to 1) says how far down the page, else its top. */
+  goTo(p, smooth, at = null) {
+    this.moves++;
+    this.moveTo(p, smooth, at);
+  }
+
+  /** Bring page `p` into view, `at` down it. The scroll is smooth only to a page close by: a smooth scroll
+      over a long way would draw every page on the way. `quiet` leaves the page being read to be found from
+      the scroll, as when the rows are only sized again. */
+  moveTo(p, smooth, at = null, quiet = false) {
     p = Math.max(1, Math.min(this.book.pages, p || 1));
     const changed = p !== this.page;
-    this.page = p;
-    $("#rd-page").value = p;
-    saveReadingPrefs(this.book.id, { page: p });
-    this.markContents(false);
-    if (this.view.mode === "paged") {
-      if (changed || !this.rows[p - 1].el.offsetParent) {
-        this.rows.forEach((row, i) => (row.el.hidden = i + 1 !== p));
+    smooth = smooth && Math.abs(p - this.page) <= 3;
+    const paged = this.view.mode === "paged";
+    if (!quiet || paged) {
+      this.page = p;
+      this.showPageNo(p);
+      saveReadingPrefs(this.book.id, { page: p });
+      this.markContents(false);
+    }
+    const row = this.rows[p - 1];
+    if (!row) return;
+    if (paged) {
+      if (changed || !row.el.offsetParent) {
+        this.rows.forEach((r, i) => (r.el.hidden = i + 1 !== p));
       }
-      this.scroller.scrollTop = 0;
+      this.scroller.scrollTop = at == null ? 0 : Math.max(0, row.el.offsetTop + at * row.el.offsetHeight - 16);
       this.draw(p);
       // Draw the next page ahead of time so turning is instant.
       if (p < this.book.pages) setTimeout(() => this.drawAhead(p + 1), 60);
       return;
     }
-    const top = this.rows[p - 1].el.offsetTop - 16;
+    const top = row.el.offsetTop - 16 + (at == null ? 0 : at * row.el.offsetHeight);
     this.scroller.scrollTo({ top, behavior: smooth ? "smooth" : "auto" });
   }
 
   async drawAhead(p) {
     const row = this.rows[p - 1];
-    if (!row) return;
+    if (!row || !this.alive) return;
     // A hidden row has no size; draw it with the current page's size.
     this.drawnRows.add(p);
-    await Promise.all(row.slots.map((s, i) => this.drawSlot(s, this.docs[i], p)));
+    const docs = this.docs;
+    await Promise.all(row.slots.map((s, i) => this.drawSlot(s, docs[i], p)));
   }
 
   onScroll() {
     if (this.view.mode === "paged" || this.scrollFrame) return;
     this.scrollFrame = requestAnimationFrame(() => {
       this.scrollFrame = null;
-      const mid = this.scroller.scrollTop + this.scroller.clientHeight * 0.35;
-      // Binary search for the row under the reading line.
-      let lo = 0, hi = this.rows.length - 1;
-      while (lo < hi) {
-        const m = (lo + hi + 1) >> 1;
-        if (this.rows[m].el.offsetTop <= mid) lo = m; else hi = m - 1;
-      }
-      const p = lo + 1;
+      if (!this.alive) return;
+      // The row under the reading line.
+      const p = this.rowAt(this.scroller.scrollTop + this.scroller.clientHeight * 0.35) + 1;
       if (p !== this.page) {
         this.page = p;
-        $("#rd-page").value = p;
+        this.showPageNo(p);
         this.markContents(false);
         clearTimeout(this.saveTimer);
         this.saveTimer = setTimeout(() => saveReadingPrefs(this.book.id, { page: p }), 300);
@@ -850,24 +1230,47 @@ class Reader {
     });
   }
 
+  /** Scroll the pages by `dy` pixels for a key. Presses that follow one another quickly add up, though the
+      smooth scroll of the one before has not ended yet. */
+  scrollByKey(dy, instant) {
+    const s = this.scroller;
+    this.moves++;
+    const now = performance.now();
+    const from = !instant && this.keyScroll && now - this.keyScroll.at < 500 ? this.keyScroll.top : s.scrollTop;
+    const top = Math.max(0, Math.min(s.scrollHeight - s.clientHeight, from + dy));
+    this.keyScroll = instant ? null : { top, at: now };
+    s.scrollTo({ top, behavior: instant ? "auto" : "smooth" });
+  }
+
   key(e) {
     if (state.route.view !== "reader") return;
     // Ctrl+F looks in the book; F3 goes to the next place found, Shift+F3 to the one before.
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") { e.preventDefault(); this.openSide("find"); return; }
     if (e.key === "F3" && this.found?.hits.length) { e.preventDefault(); this.nextHit(e.shiftKey ? -1 : 1); return; }
-    if (e.target.matches?.("input, textarea, select")) return;
+    if (e.target.matches?.("input, textarea, select, [contenteditable]")) return;
+    // A button reached with Tab is pressed with Space or Enter, as anywhere else.
+    if ((e.key === " " || e.key === "Enter") && e.target.closest?.("button, [role=button]")) return;
     const paged = this.view.mode === "paged";
+    const plain = !e.ctrlKey && !e.metaKey && !e.altKey;
     if ((e.ctrlKey || e.metaKey) && (e.key === "+" || e.key === "=")) { e.preventDefault(); this.setZoom(this.view.zoom * 1.15); return; }
     if ((e.ctrlKey || e.metaKey) && e.key === "-") { e.preventDefault(); this.setZoom(this.view.zoom / 1.15); return; }
     if ((e.ctrlKey || e.metaKey) && e.key === "0") { e.preventDefault(); this.setZoom(1); return; }
+    // Up and down move a little over the pages, in both modes (in page mode, over a page zoomed in).
+    if (plain && (e.key === "ArrowDown" || e.key === "ArrowUp")) { e.preventDefault(); this.scrollByKey(e.key === "ArrowDown" ? 56 : -56, true); return; }
     const step = { ArrowRight: 1, ArrowLeft: -1, PageDown: 1, PageUp: -1, " ": e.shiftKey ? -1 : 1 }[e.key];
-    if (paged && step) { e.preventDefault(); this.goTo(this.page + step, false); return; }
+    if (paged && step && plain) { e.preventDefault(); this.goTo(this.page + step, false); return; }
+    if (!paged && plain) {
+      // A screen at a time, keeping a strip of the one before in view.
+      const screen = Math.max(40, this.scroller.clientHeight - 48);
+      const by = { PageDown: screen, PageUp: -screen, " ": e.shiftKey ? -screen : screen }[e.key];
+      if (by) { e.preventDefault(); this.scrollByKey(by, false); return; }
+    }
     if (!paged && (e.key === "ArrowRight" || e.key === "ArrowLeft")) { e.preventDefault(); this.goTo(this.page + (e.key === "ArrowRight" ? 1 : -1), true); return; }
     if (e.key === "Home") { e.preventDefault(); this.goTo(1, false); }
     if (e.key === "End") { e.preventDefault(); this.goTo(this.book.pages, false); }
     if (e.key === "Escape") { $("#rd-pop").hidden = true; $("#rd-menu").hidden = true; $("#rd-light-menu").hidden = true; }
     // N turns the night light on and off.
-    if (e.key.toLowerCase() === "n" && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); this.toggleLight?.(); }
+    if (e.key.toLowerCase() === "n" && plain) { e.preventDefault(); this.toggleLight?.(); }
   }
 
   /* ----- translating from the reader ----- */
@@ -878,9 +1281,14 @@ class Reader {
     return out;
   }
 
-  async enqueue(lang, pages) {
+  /** Queue `pages` for translation into `lang`. With `again`, those of them translated already are
+      translated anew; their earlier translation stays in the file until the new one is done. */
+  async enqueue(lang, pages, again = false) {
     if (!pages.length) { toast(RS.nothing); return; }
-    await call("job_create", { bookId: this.book.id, lang, pages });
+    // Scanned pages want the models that read them; without them, the pages with text go on.
+    pages = await pagesToQueue(this.book.id, pages, null);
+    if (!pages) return;
+    await call("job_create", again ? { bookId: this.book.id, lang, pages, again: true } : { bookId: this.book.id, lang, pages });
     $("#rd-pop").hidden = true;
     toast(RS.queued);
     await refreshCounts();
@@ -897,30 +1305,39 @@ class Reader {
     const p = this.page;
     const ten = [];
     for (let i = p; i <= this.book.pages && ten.length < 10; i++) if (!done.has(i)) ten.push(i);
+    // The ten pages from here, translated or not, for translating again those that are.
+    const here = [];
+    for (let i = p; i <= this.book.pages && here.length < 10; i++) here.push(i);
+    // [what, label, pages, translated anew]
     const options = [
-      ["page", RS.thisPage(p), done.has(p) ? [] : [p]],
-      ["ten", RS.nextTen(ten[0] || p, ten[ten.length - 1] || p), ten],
-      ["all", RS.allMissing(missing.length), missing],
+      done.has(p) ? ["pageAgain", RS.thisPageAgain(p), [p], true] : ["page", RS.thisPage(p), [p], false],
+      ["ten", RS.nextTen(ten[0] || p, ten[ten.length - 1] || p), ten, false],
+      ...(here.some((q) => done.has(q)) ? [["tenAgain", RS.nextTenAgain(here[0], here[here.length - 1]), here, true]] : []),
+      ["all", RS.allMissing(missing.length), missing, false],
     ];
+    // Ticked at first: the next ten pages, else what else there is to do; never work that was done already.
+    const first = options.find((o) => o[0] === "ten" && o[2].length) || options.find((o) => !o[3] && o[2].length);
     pop.innerHTML = `<h3>${RS.popTitle}</h3>
       <label>${RS.popLang}<input id="pop-lang" list="languages" value="${esc(lang)}"></label>
-      <div class="rd-options">${options.map(([k, label, list], i) => `
-        <label class="rd-option ${list.length ? "" : "off"}"><input type="radio" name="pop-range" value="${k}" ${i === 1 && list.length ? "checked" : ""} ${list.length ? "" : "disabled"}>${esc(label)}</label>`).join("")}</div>
+      <div class="rd-options">${options.map((o) => `
+        <label class="rd-option ${o[2].length ? "" : "off"}"><input type="radio" name="pop-range" value="${o[0]}" ${o === first ? "checked" : ""} ${o[2].length ? "" : "disabled"}>${esc(o[1])}</label>`).join("")}</div>
       <div class="rd-pop-actions"><button class="text-button" id="pop-more">${RS.moreOptions}</button><button class="primary-button" id="pop-go">${RS.start}</button></div>`;
-    if (!$("input[name=pop-range]:checked", pop)) $("input[name=pop-range]:not(:disabled)", pop)?.setAttribute("checked", "");
     pop.hidden = false;
     $("#pop-more").onclick = () => go("book", { id: this.book.id });
     $("#pop-go").onclick = async () => {
       const chosenLang = $("#pop-lang").value.trim() || lang;
       const k = $("input[name=pop-range]:checked", pop)?.value;
-      let pages = options.find((o) => o[0] === k)?.[2] || [];
+      const option = options.find((o) => o[0] === k);
+      let pages = option?.[2] || [];
       if (chosenLang !== lang) {
-        // Another language: work the range out again for it.
+        // Another language: work the range out again for it. Pages asked for again stay the same pages.
         const d = new Set((await invoke("book_pages", { id: this.book.id, lang: chosenLang }).catch(() => [])).map(([q]) => q));
         const all = Array.from({ length: this.book.pages }, (_, i) => i + 1).filter((q) => !d.has(q));
-        pages = k === "page" ? (d.has(p) ? [] : [p]) : k === "ten" ? all.filter((q) => q >= p).slice(0, 10) : all;
+        if (k === "page") pages = d.has(p) ? [] : [p];
+        else if (k === "ten") pages = all.filter((q) => q >= p).slice(0, 10);
+        else if (k === "all") pages = all;
       }
-      this.enqueue(chosenLang, pages);
+      this.enqueue(chosenLang, pages, !!option?.[3]);
     };
   }
 
@@ -938,64 +1355,160 @@ class Reader {
       : `${langName(job.target_lang)} · ${RS.liveQueued}`;
   }
 
+  /** Note the pages a job of the language shown reports done: a page translated anew was translated before
+      too, so only this tells that its translation changed. A report is of a page done when the job's count
+      of done pages went up with it. */
+  noteProgress(progress) {
+    const last = this.lastDone.get(progress.job_id);
+    this.lastDone.set(progress.job_id, progress.done);
+    const job = state.jobs.find((j) => j.id === progress.job_id);
+    if (job && job.target_lang !== this.view.lang) return;
+    if (last != null && progress.done > last && progress.page) this.finished.add(progress.page);
+  }
+
   /**
-   * The translated file was written again while its job goes on. The pages on screen are drawn again from the
-   * new file where they stand, so that a page shows its translation as soon as it has one and nothing jumps
-   * under someone who is reading. Pages further away are drawn from the new file when they come into view.
+   * The translated file was written again while its job goes on, every few seconds. It is read again only
+   * when that changes what is in view: at once when a page near the screen got its translation (or a new
+   * one), when such a page comes into view later, and else half a minute after the file was last read; and
+   * at once when the job ends (see reloadTranslation). The pages are drawn again where they stand, so the
+   * place and the zoom stay as they are.
    */
   translationWritten(lang) {
     if (!this.alive) return;
-    // A first translation, or one in a language that is not the one shown, is for the full reload.
     const path = this.files.outputs[lang];
-    if (this.view.lang !== lang || !path) { readerFilesChanged(); return; }
+    // A first translation into a language: the reader is built again with it (see reloadTranslation).
+    if (!path) { readerFilesChanged(); return; }
+    // A language not shown: only the copy of its file read before is let go.
+    if (this.view.lang !== lang) { forgetPdf(path); return; }
     clearTimeout(this.writtenTimer);
-    this.writtenTimer = setTimeout(async () => {
-      // Only the translated file is read again; the original has not changed.
+    this.writtenTimer = setTimeout(() => this.checkWritten(), 300);
+  }
+
+  /** Work out which pages the last write changed, and whether that is worth reading the file again now. */
+  async checkWritten() {
+    const now = await invoke("book_pages", { id: this.book.id, lang: this.view.lang }).catch(() => null);
+    if (!this.alive) return;
+    if (now) {
+      const fresh = new Set(now.map(([p]) => p));
+      for (const p of fresh) if (!this.translated.has(p)) this.stale.add(p);
+      for (const p of this.translated) if (!fresh.has(p)) this.stale.add(p);
+    }
+    for (const p of this.finished) this.stale.add(p);
+    this.finished.clear();
+    if ([...this.stale].some((p) => this.drawnRows.has(p))) this.refreshSoon();
+    else if (this.stale.size || !now) this.refreshLate();
+  }
+
+  refreshSoon() {
+    clearTimeout(this.soonTimer);
+    this.soonTimer = setTimeout(() => this.refreshTranslation(), 300);
+  }
+
+  /** Read the file again half a minute after it was last read, if nothing calls for it sooner. */
+  refreshLate() {
+    if (this.lateTimer) return;
+    const wait = Math.max(0, 25000 - (Date.now() - this.lastRead));
+    this.lateTimer = setTimeout(() => { this.lateTimer = null; this.refreshTranslation(); }, wait);
+  }
+
+  /** Put the "not translated yet" note on the pages without a translation, and take it off the others. */
+  syncBadges() {
+    this.rows.forEach((row, i) => {
+      const want = this.view.lang !== "orig" && !this.translated.has(i + 1);
+      const has = row.el.querySelector(".rd-untranslated");
+      if (want && !has) row.slots[row.slots.length - 1].el.appendChild(this.badge(i + 1));
+      else if (!want && has) has.remove();
+    });
+  }
+
+  /**
+   * Read the translated file shown again, and draw the pages near the screen again from it where they stand;
+   * pages further away are drawn from it when they come near. Only the translated file is read: the
+   * original has not changed.
+   */
+  async refreshTranslation() {
+    if (!this.alive) return;
+    if (this.refreshing) { this.refreshAgain = true; return; }
+    const path = this.view.lang !== "orig" ? this.files.outputs[this.view.lang] : null;
+    if (!path) return;
+    this.refreshing = true;
+    clearTimeout(this.soonTimer);
+    clearTimeout(this.lateTimer);
+    this.lateTimer = null;
+    this.stale.clear();
+    this.lastRead = Date.now();
+    try {
       const old = openDocs.get(path);
       openDocs.delete(path);
-      const docs = await Promise.all(this.sources().map(openPdf)).catch(() => null);
-      old?.doc.then((d) => d.destroy()).catch(() => {});
-      if (!docs || !this.alive) return;
+      const doc = await openPdf(path).catch(() => null);
+      if (!doc) {
+        // The file could not be read just now: the pages keep the copy they have.
+        if (old) openDocs.set(path, old);
+        return;
+      }
+      if (!this.alive) return;
+      const source = openDocs.get(this.files.source);
+      if (source) source.stamp = filesStamp;
+      const docs = [...this.docs];
+      docs[docs.length - 1] = doc;
       this.docs = docs;
       this.texts = null;
       await this.loadTranslated();
-      for (const row of this.rows) {
-        if (this.translated.has(Number(row.el.dataset.page))) row.el.querySelector(".rd-untranslated")?.remove();
+      if (!this.alive) return;
+      this.syncBadges();
+      // A slot drawn from the old copy is drawn again from the new one by draw(), the picture replaced only
+      // once the new one is ready.
+      for (const p of [...this.drawnRows]) this.draw(p);
+      old?.doc.then((d) => d.destroy()).catch(() => {});
+    } finally {
+      this.refreshing = false;
+      if (this.refreshAgain) {
+        this.refreshAgain = false;
+        this.refreshSoon();
       }
-      for (const p of [...this.drawnRows]) {
-        for (const s of this.rows[p - 1].slots) s.stale = true;
-        this.draw(p);
-      }
-    }, 300);
+    }
   }
 
-  /** The translated file was rewritten: load it again and stay on the same page. */
+  /** The book's files changed on disk: a job ended, a translation came or was removed, a picture was put in.
+      The translation shown is read again in place; when a language came or went, the reader is built again
+      on the same spot. */
   async reloadTranslation() {
     if (!this.alive) return;
-    const files = await invoke("book_files", { id: this.book.id });
+    const files = await invoke("book_files", { id: this.book.id }).catch(() => null);
+    if (!files || !this.alive) return;
     const newLangs = Object.keys(files.outputs).filter((l) => !this.files.outputs[l]);
-    if (newLangs.length) {
-      // A first translation arrived: show it.
-      toast(RS.ready(langName(newLangs[0])));
-      go("reader", { id: this.book.id, lang: this.view.lang === "orig" ? newLangs[0] : this.view.lang, page: this.page });
+    const gone = Object.keys(this.files.outputs).filter((l) => !files.outputs[l]);
+    if (newLangs.length || gone.length) {
+      let lang = this.view.lang;
+      if (newLangs.length) {
+        toast(RS.ready(langName(newLangs[0])));
+        // A first translation is shown to someone who never chose what to read in this book; someone who
+        // chose the original keeps reading it.
+        if (lang === "orig" && !readingPrefs(this.book.id).chose) lang = newLangs[0];
+      }
+      if (lang !== "orig" && !files.outputs[lang]) lang = "orig";
+      keptPlace = { id: this.book.id, place: this.place(), at: Date.now() };
+      go("reader", { id: this.book.id, lang, page: this.page });
       return;
     }
-    if (this.view.lang === "orig") return;
     this.files = files;
-    const page = this.page;
-    for (const row of this.rows) for (const s of row.slots) s.task?.cancel();
-    this.docs = await Promise.all(this.sources().map(openPdf));
-    this.texts = null;
-    this.outlineItems = null;
-    await this.loadTranslated();
-    this.build();
-    this.goTo(page, false);
-    this.updateLive();
+    await this.refreshTranslation();
   }
 }
 
+/** Let go of the copy of a file read before, so that it is read again when it is next opened. */
+function forgetPdf(path) {
+  const cached = openDocs.get(path);
+  if (!cached) return;
+  openDocs.delete(path);
+  cached.doc.then((d) => d.destroy()).catch(() => {});
+}
+
 listen("job-progress", ({ payload: p }) => {
-  if (state.route.view === "reader" && reader && p.book_id === reader.book.id) reader.updateLive(p);
+  if (state.route.view === "reader" && reader && p.book_id === reader.book.id) {
+    reader.noteProgress(p);
+    reader.updateLive(p);
+  }
 });
 listen("book-written", ({ payload: [bookId, lang] }) => {
   if (state.route.view === "reader" && reader && bookId === reader.book.id) reader.translationWritten(lang);
@@ -1003,6 +1516,7 @@ listen("book-written", ({ payload: [bookId, lang] }) => {
 listen("job-updated", ({ payload: job }) => {
   if (state.route.view === "reader" && reader && job.book_id === reader.book.id) {
     reader.updateLive();
-    if (job.status === "done" || job.status === "cancelled") readerFilesChanged();
+    // A job that ended has written its last pages: they are shown at once.
+    if (job.status === "done" || job.status === "cancelled" || job.status === "failed") readerFilesChanged();
   }
 });

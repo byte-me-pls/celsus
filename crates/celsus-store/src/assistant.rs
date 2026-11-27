@@ -9,14 +9,13 @@ use celsus_core::assist::{self, BookInfo, Fresh};
 use celsus_core::fonts::FontSet;
 use rusqlite::Connection;
 
-pub use celsus_core::assist::{Pending, Rejected, SubmitResult, Submitted};
+pub use celsus_core::assist::{KeptBlock, Pending, Rejected, Sent, SubmitResult, Submitted};
 
 use crate::db::{self, DbCache, Result};
 use crate::library;
 
 fn open(library_dir: &Path, book_id: i64) -> Result<celsus_pdf::Document> {
-    celsus_pdf::Document::open(library::source_file(library_dir, book_id))
-        .map_err(|e| e.to_string())
+    library::open_book(library_dir, book_id)
 }
 
 fn done_pages(conn: &Connection, book_id: i64, to: &Language) -> Result<BTreeSet<usize>> {
@@ -83,29 +82,24 @@ pub fn translate_again(
         .pages()
         .map_err(|e| e.to_string())?
         .len();
+    assist::check_pages(count, pages)?;
     let list: Vec<usize> = if pages.is_empty() {
         (1..=count).collect()
     } else {
-        pages
-            .iter()
-            .copied()
-            .filter(|p| (1..=count).contains(p))
-            .collect()
+        pages.to_vec()
     };
-    if list.is_empty() {
-        return Err(format!("the book has {count} pages"));
-    }
     db::add_redo_pages(conn, book_id, to.as_str(), &list)?;
     Ok(list.len())
 }
 
-/// Check and store translations; pages that are complete are written into the book's output PDF.
+/// Check and store translations; pages that are complete are written into the book's output PDF. Each
+/// translation may be accepted anyway on its own; `accept_anyway` accepts the whole batch.
 pub fn submit(
     conn: &Connection,
     library_dir: &Path,
     book_id: i64,
     to: &Language,
-    items: &[Submitted],
+    items: &[Sent],
     accept_anyway: bool,
 ) -> Result<SubmitResult> {
     let doc = open(library_dir, book_id)?;
@@ -119,11 +113,12 @@ pub fn submit(
         mut result,
         complete,
         fresh_keys,
-    } = assist::accept(&doc, &mut DbCache(conn), to, items, accept_anyway, fresh)?;
+    } = assist::accept_sent(&doc, &mut DbCache(conn), to, items, accept_anyway, fresh)?;
     db::add_redo_keys(conn, book_id, to.as_str(), &fresh_keys)?;
     if !complete.is_empty() {
         db::finish_redo(conn, book_id, to.as_str(), &complete)?;
-        result.blocks_kept_original = render(conn, library_dir, book_id, to, &complete)?;
+        result.kept_original = written(conn, library_dir, book_id, to, &complete)?;
+        result.blocks_kept_original = result.kept_original.len();
         result.completed_pages = complete;
         result.output = Some(
             library::output_file(library_dir, book_id, to.as_str())
@@ -143,6 +138,17 @@ pub fn render(
     to: &Language,
     new_pages: &[usize],
 ) -> Result<usize> {
+    Ok(written(conn, library_dir, book_id, to, new_pages)?.len())
+}
+
+/// [`render`], returning the blocks of the new pages that kept their original text.
+fn written(
+    conn: &Connection,
+    library_dir: &Path,
+    book_id: i64,
+    to: &Language,
+    new_pages: &[usize],
+) -> Result<Vec<KeptBlock>> {
     let doc = open(library_dir, book_id)?;
     let fonts_dir = db::setting(conn, "fonts_dir")?
         .filter(|d| !d.is_empty())
@@ -151,19 +157,23 @@ pub fn render(
     if fonts.is_empty() {
         return Err(format!("no usable fonts in {fonts_dir}"));
     }
+    // One writer at a time, and the finished pages read once it is this one's turn: each write holds every
+    // page finished before it.
+    let _lock = library::lock_output(library_dir, book_id, to.as_str())?;
     let mut pages = done_pages(conn, book_id, to)?;
     pages.extend(new_pages);
     let redrawn = library::redrawn_images(library_dir, book_id, to.as_str());
     let out = assist::render(&doc, &fonts, &mut DbCache(conn), to, &pages, &redrawn)?;
+    // The pages count as finished once they are in the file: if it cannot be written, they are written the
+    // next time blocks are asked for.
+    library::write_output(
+        &library::output_file(library_dir, book_id, to.as_str()),
+        &out.pdf,
+    )?;
     for (&n, &kept) in &out.kept {
         db::mark_page(conn, book_id, to.as_str(), n as i64, kept as i64)?;
     }
-    std::fs::write(
-        library::output_file(library_dir, book_id, to.as_str()),
-        out.pdf,
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(new_pages.iter().filter_map(|n| out.kept.get(n)).sum())
+    Ok(out.kept_on(new_pages))
 }
 
 /// Remove a book and everything translated for it. Its translations leave the cache too, so that the same
@@ -182,7 +192,9 @@ pub fn remove_book(
     if let Ok(doc) = open(library_dir, book_id) {
         let pages: Vec<usize> = (1..=doc.pages().map(|p| p.len()).unwrap_or(0)).collect();
         for to in langs.iter().filter_map(|l| l.parse::<Language>().ok()) {
-            mine.extend(celsus_core::pipeline::keys_of(&doc, &to, &pages));
+            mine.extend(with_waiting(celsus_core::pipeline::keys_of(
+                &doc, &to, &pages,
+            )));
         }
     }
     library::remove_book(&db.lock().unwrap(), library_dir, book_id)?;
@@ -208,7 +220,9 @@ pub fn remove_translation(
     let mut mine = std::collections::HashSet::new();
     if let Ok(doc) = open(library_dir, book_id) {
         let pages: Vec<usize> = (1..=doc.pages().map(|p| p.len()).unwrap_or(0)).collect();
-        mine.extend(celsus_core::pipeline::keys_of(&doc, to, &pages));
+        mine.extend(with_waiting(celsus_core::pipeline::keys_of(
+            &doc, to, &pages,
+        )));
     }
     db::delete_translation(&db.lock().unwrap(), book_id, to.as_str())?;
     let file = library::output_file(library_dir, book_id, to.as_str());
@@ -222,6 +236,12 @@ pub fn remove_translation(
     let translated = db::all_translated_pages(&db.lock().unwrap())?;
     let keep = keys_in_use(library_dir, &translated);
     db::delete_cache_keys(&db.lock().unwrap(), mine.difference(&keep))
+}
+
+/// Cache keys, and the keys under which new translations of their text wait while pages are translated again.
+fn with_waiting(keys: Vec<String>) -> Vec<String> {
+    let waiting: Vec<String> = keys.iter().map(|k| assist::again_key(k)).collect();
+    keys.into_iter().chain(waiting).collect()
 }
 
 /// The cache keys that the translated pages of the library are written from. Books that cannot be opened or

@@ -12,6 +12,7 @@ tauri-build = { version = "2.7.4", features = [] }
 
 [dependencies]
 celsus-core.workspace = true
+celsus-ocr.workspace = true
 celsus-pdf.workspace = true
 celsus-store.workspace = true
 tauri = { version = "2.12.5", features = ["tray-icon"] }

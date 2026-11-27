@@ -114,6 +114,9 @@ pub struct Outcome {
     pub failed: Option<String>,
     /// It stopped because the model stayed silent.
     pub no_answer: bool,
+    /// It stopped because the account has no credit left. [`Outcome::failed`] is then exactly
+    /// [`crate::provider::OUT_OF_CREDIT`], a code the interface puts in words of its own.
+    pub out_of_credit: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -560,7 +563,12 @@ pub fn translate_document(
             Ok(t) => t,
             Err(e) => {
                 outcome.no_answer = matches!(e, TranslateError::NoAnswer { .. });
-                outcome.failed = Some(format!("page {n}: {e}"));
+                outcome.out_of_credit = crate::provider::is_out_of_credit(&e);
+                outcome.failed = Some(if outcome.out_of_credit {
+                    crate::provider::OUT_OF_CREDIT.to_owned()
+                } else {
+                    format!("page {n}: {e}")
+                });
                 session.offline = true;
                 // What the page already got is in the cache; the rest of it is missing.
                 session.translate(&blocks, "", "").unwrap_or_default()
@@ -605,6 +613,7 @@ pub fn translate_document(
             && !session.offline
             && written.elapsed() >= Duration::from_secs(options.written_every)
         {
+            label(&mut writer, &*session.cache, &options.to);
             if let Ok(bytes) = writer.snapshot() {
                 (session.progress)(Progress::Written { bytes });
             }
@@ -613,5 +622,12 @@ pub fn translate_document(
     }
     outcome.requests = session.requests;
     outcome.usage = session.usage.clone();
+    label(&mut writer, &*session.cache, &options.to);
     Ok((writer.finish()?, outcome))
+}
+
+/// Give the file its language, and its bookmarks and title in that language where their text was translated
+/// with the pages (a chapter's title is the heading on its first page).
+fn label(writer: &mut BookWriter, cache: &dyn Cache, to: &Language) {
+    writer.label(to, &|text| cache.get(&cache_key(to, text)));
 }

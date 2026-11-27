@@ -189,18 +189,89 @@ pub fn set_cover(conn: &Connection, library: &Path, id: i64, jpeg: &[u8]) -> Res
     db::set_cover(conn, id, true)
 }
 
+/// Whether a title from a file's metadata is one a program put there rather than the book's: empty, the file's
+/// name, or a word processor's or a layout program's default.
+pub fn placeholder_title(title: &str) -> bool {
+    let t = title.trim().to_lowercase();
+    let t = t.trim_start_matches("microsoft word - ").trim();
+    if t.chars().count() <= 2 || t.ends_with(".pdf") || t.ends_with(".doc") || t.ends_with(".docx")
+    {
+        return true;
+    }
+    let generic = [
+        "untitled",
+        "document",
+        "layout",
+        "powerpoint presentation",
+        "presentation",
+        "title",
+        "book",
+        "new document",
+        "unknown",
+        "adobe indesign",
+        "pdf",
+    ];
+    // "Untitled-1", "Document1", "Layout 1": a default name and a number.
+    let word = t.trim_end_matches(|c: char| c.is_ascii_digit() || c == ' ' || c == '-' || c == '_');
+    generic.contains(&word) || t.starts_with("microsoft word")
+}
+
+/// A book in the library that holds the same file as `path`, byte for byte.
+pub fn same_file(conn: &Connection, library: &Path, path: &Path) -> Result<Option<Book>> {
+    let size = std::fs::metadata(path).map_err(|e| e.to_string())?.len() as i64;
+    for book in db::books(conn)? {
+        if book.bytes != size {
+            continue;
+        }
+        let (Ok(a), Ok(b)) = (
+            std::fs::read(path),
+            std::fs::read(source_file(library, book.id)),
+        ) else {
+            continue;
+        };
+        if a == b {
+            return Ok(Some(book));
+        }
+    }
+    Ok(None)
+}
+
+/// Why a file could not be added, in a word the interface has text for: not a PDF, locked with a password, or
+/// damaged beyond reading; anything else is "other".
+pub fn add_failure(error: &str) -> &'static str {
+    let e = error.to_lowercase();
+    if e.contains("password") || e.contains("encrypt") {
+        "pdf_password"
+    } else if e.contains("not a pdf") || e.contains("no %pdf") || e.contains("header") {
+        "not_pdf"
+    } else if e.contains("damaged")
+        || e.contains("catalog")
+        || e.contains("xref")
+        || e.contains("trailer")
+    {
+        "pdf_damaged"
+    } else {
+        "other"
+    }
+}
+
 /// Copy a PDF into the library and record it.
 pub fn add_book(conn: &Connection, library: &Path, path: &Path) -> Result<Book> {
+    add_book_checked(conn, library, path).map(|(book, _)| book)
+}
+
+/// Copy a PDF into the library and record it, saying too whether the file was damaged and was read as far as
+/// it could be (some of its pages may be missing).
+pub fn add_book_checked(conn: &Connection, library: &Path, path: &Path) -> Result<(Book, bool)> {
     let doc = Document::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let repaired = doc.was_repaired();
     let pages = doc.pages().map_err(|e| e.to_string())?.len() as i64;
     let original_name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let title = Some(info(&doc, "Title"))
-        .filter(|t| {
-            t.len() > 2 && !t.to_lowercase().ends_with(".pdf") && !t.contains("Microsoft Word")
-        })
+        .filter(|t| !placeholder_title(t))
         .unwrap_or_else(|| {
             original_name
                 .trim_end_matches(".pdf")
@@ -225,12 +296,21 @@ pub fn add_book(conn: &Connection, library: &Path, path: &Path) -> Result<Book> 
     };
     book.id = db::insert_book(conn, &book)?;
     let dir = book_dir(library, book.id);
+    // The number of a book deleted last is given out again. Whatever of that book stayed behind (a folder that
+    // could not be removed, a picture redrawn after it was deleted) is not this book's.
+    if dir.exists() && std::fs::remove_dir_all(&dir).is_err() {
+        let _ = db::delete_book(conn, book.id);
+        return Err(format!(
+            "{} is left from a deleted book and cannot be cleared; close what has it open and try again",
+            dir.display()
+        ));
+    }
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     if let Err(e) = std::fs::copy(path, source_file(library, book.id)) {
         let _ = db::delete_book(conn, book.id);
         return Err(e.to_string());
     }
-    db::book(conn, book.id)
+    Ok((db::book(conn, book.id)?, repaired))
 }
 
 pub fn remove_book(conn: &Connection, library: &Path, id: i64) -> Result<()> {
@@ -247,6 +327,42 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("celsus-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
+    }
+
+    #[test]
+    fn titles_a_program_left_are_not_taken_for_the_book_s() {
+        for t in [
+            "Untitled",
+            "untitled-1",
+            "Document1",
+            "Layout 1",
+            "PowerPoint Presentation",
+            "Microsoft Word - notes.docx",
+            "book.pdf",
+            "",
+        ] {
+            assert!(placeholder_title(t), "{t:?}");
+        }
+        for t in [
+            "Calculus Made Easy",
+            "The Rust Programming Language",
+            "Document Engineering",
+        ] {
+            assert!(!placeholder_title(t), "{t:?}");
+        }
+    }
+
+    #[test]
+    fn why_a_file_could_not_be_added_is_put_in_a_word() {
+        assert_eq!(
+            add_failure("x.pdf: the PDF needs a password to open"),
+            "pdf_password"
+        );
+        assert_eq!(
+            add_failure("x.pdf: damaged file: no document catalog"),
+            "pdf_damaged"
+        );
+        assert_eq!(add_failure("x.pdf: Access is denied."), "other");
     }
 
     #[test]
@@ -358,4 +474,132 @@ mod tests {
         assert_eq!(decode_text(b"\xFE\xFF\x00D\x00D\x00D"), "DDD");
         assert_eq!(decode_text(b"Evans"), "Evans");
     }
+}
+
+/// What was read off the pictures of a book's scanned pages: the lines of each page read (none, where nothing
+/// could be read), and the pages found to carry text of their own, so that no page is looked at twice.
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Scans {
+    #[serde(default)]
+    pub read: std::collections::BTreeMap<usize, Vec<ReadLine>>,
+    #[serde(default)]
+    pub with_text: std::collections::BTreeSet<usize>,
+}
+
+/// One line read off a picture, with its box in PDF points.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ReadLine {
+    pub text: String,
+    pub bounds: [f32; 4],
+}
+
+fn scans_file(library: &Path, id: i64) -> PathBuf {
+    book_dir(library, id).join("read.json")
+}
+
+pub fn scans(library: &Path, id: i64) -> Scans {
+    std::fs::read(scans_file(library, id))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+/// Keep what was found of a book's scanned pages, with what is kept already: the app and an assistant may be
+/// looking at the same book, and neither loses what the other found.
+pub fn keep_scans(library: &Path, id: i64, scans: &Scans) -> Result<()> {
+    let path = scans_file(library, id);
+    let part = path.with_extension(format!("{}.part", std::process::id()));
+    let mut all = self::scans(library, id);
+    all.read
+        .extend(scans.read.iter().map(|(k, v)| (*k, v.clone())));
+    all.with_text.extend(scans.with_text.iter().copied());
+    let bytes = serde_json::to_vec(&all).map_err(|e| e.to_string())?;
+    std::fs::write(&part, bytes).map_err(|e| e.to_string())?;
+    std::fs::rename(&part, &path).map_err(|e| e.to_string())
+}
+
+/// Open a book's file, with the lines read off its scanned pages laid on them.
+pub fn open_book(library: &Path, id: i64) -> Result<Document> {
+    let path = source_file(library, id);
+    let doc = Document::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    for (page, lines) in scans(library, id).read {
+        doc.set_read_lines(
+            page,
+            lines
+                .into_iter()
+                .map(|l| celsus_pdf::interp::ScanLine {
+                    text: l.text,
+                    bounds: l.bounds,
+                })
+                .collect(),
+        );
+    }
+    Ok(doc)
+}
+
+/// The right to write a book's translated file in one language. Assistants (each in a process of its own) and
+/// the app may finish pages of the same book at once; each writes the file with every page finished so far,
+/// so two writing at once would leave out the other's page. Held while the pages are read and the file is
+/// written; let go when dropped.
+pub struct OutputLock(PathBuf);
+
+impl Drop for OutputLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Wait for the right to write the translated file of book `id` in `lang`.
+pub fn lock_output(library: &Path, id: i64, lang: &str) -> Result<OutputLock> {
+    let path = output_file(library, id, lang).with_extension("pdf.lock");
+    let started = std::time::Instant::now();
+    loop {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(_) => return Ok(OutputLock(path)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // A lock left by a program that stopped half way is let go of after a while: writing a book
+                // takes seconds, not minutes.
+                let stale = std::fs::metadata(&path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age > std::time::Duration::from_secs(600));
+                if stale {
+                    let _ = std::fs::remove_file(&path);
+                    continue;
+                }
+                if started.elapsed() > std::time::Duration::from_secs(300) {
+                    return Err(format!(
+                        "{} has been being written by another program for five minutes; try again later",
+                        output_file(library, id, lang).display()
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        }
+    }
+}
+
+/// Write a translated book. It is written beside the old file and swapped in, so that a crash cannot leave
+/// half a PDF; where the old file is open somewhere and cannot be swapped, it is written over.
+pub fn write_output(output: &Path, bytes: &[u8]) -> Result<()> {
+    let part = output.with_extension(format!("pdf.{}.part", std::process::id()));
+    std::fs::write(&part, bytes).map_err(|e| e.to_string())?;
+    if std::fs::rename(&part, output).is_err() {
+        let written = std::fs::write(output, bytes);
+        let _ = std::fs::remove_file(&part);
+        written.map_err(|e| {
+            format!(
+                "{} could not be written ({e}). If it is open in another program, close it: the finished pages \
+                 are written the next time blocks are asked for.",
+                output.display()
+            )
+        })?;
+    }
+    Ok(())
 }

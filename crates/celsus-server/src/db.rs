@@ -212,6 +212,24 @@ const MIGRATIONS: &[&str] = &[
     // Covers used to be a picture taken out of the first page, which was sometimes the wrong one. They are drawn
     // from the page now: forget the old ones, and the web interface draws them again.
     "UPDATE books SET has_cover = false;",
+    // Pages being translated again into a language, and the translations given for them since: until a page has
+    // all of its new translation, it stays in the translated PDF as it was. Keys can be long (they hold the source
+    // text), so rows are told apart by a hash of the key.
+    r#"
+    CREATE TABLE redo_pages (
+        book_id TEXT NOT NULL REFERENCES books (id) ON DELETE CASCADE,
+        lang TEXT NOT NULL,
+        page INT NOT NULL,
+        PRIMARY KEY (book_id, lang, page)
+    );
+    CREATE TABLE redo_keys (
+        book_id TEXT NOT NULL REFERENCES books (id) ON DELETE CASCADE,
+        lang TEXT NOT NULL,
+        key_hash BYTEA NOT NULL,
+        key TEXT NOT NULL,
+        PRIMARY KEY (book_id, lang, key_hash)
+    );
+    "#,
 ];
 
 pub fn pool(url: &str) -> Result<Pool, String> {

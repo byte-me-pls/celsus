@@ -46,6 +46,13 @@ For setting the server up, see [server-setup.md](server-setup.md).
   each hash, so they can be raised later and old hashes are upgraded at the next sign-in.
 - **Unknown accounts** take the same time as known ones: a dummy hash is checked so response time does not reveal
   which addresses exist, and the error message is the same.
+- **A forgotten password** is reset only on the server's command line (`celsus-server reset-password <email>`,
+  with `--reset-2fa` to turn off two-step sign-in too). There is no reset over the network, so nobody can start one
+  from outside. The new password is random (192 bits), printed once and never stored or logged in the clear; every
+  session of the account ends.
+- **Deleting an account** is for admins signed in with a browser (not API keys), with the same rules as changing
+  one: the owner cannot be deleted, admins only by the owner, and nobody deletes themselves. Its private books are
+  deleted with it; its shared books pass to the admin who deletes it.
 
 ## Signing in
 
@@ -99,8 +106,9 @@ For setting the server up, see [server-setup.md](server-setup.md).
 
 ## Audit log
 
-Sign-ins (successful and failed), sign-outs, two-step changes, password changes, invitations, role and account
-changes, API key creation and revocation, and setup are recorded with time, account, client address and user agent.
+Sign-ins (successful and failed), sign-outs, two-step changes, password changes and resets, invitations, role
+and account changes, deleted accounts, removed books and translations, API key creation and revocation, and setup
+are recorded with time, account, client address and user agent.
 The log is append-only for the application and visible to admins. It never contains passwords, codes or tokens.
 
 ## Secrets at rest
@@ -129,7 +137,8 @@ The log is append-only for the application and visible to admins. It never conta
 - **Who sees a book.** A book is private to whoever added it unless they share it with all members. A book someone
   may not see answers "not found", exactly like one that does not exist, so ids reveal nothing; ids are 128 random
   bits. Readers of a shared book may translate it; only its owner changes who sees it, and the owner or an admin may
-  edit or delete it. Admins do not see other people's private books.
+  edit or delete it, or remove one of its translations. Admins do not see other people's private books; they can
+  only delete them, with the account or once the account is disabled.
 - **Files.** Every path on disk is built from a server-made id and a checked language code, never from a name a
   client sent; uploaded file names are kept only as text. The web files are served by a file server that refuses
   paths leaving its folder.
@@ -144,6 +153,10 @@ The log is append-only for the application and visible to admins. It never conta
   translations.
 - **Jobs.** Page lists are checked against the book; one person can queue at most 20 jobs. Only the person who
   started a job, the book's owner or an admin can stop it.
+- **Limits.** An admin can set the most books one member may have and the most pages one member may have waiting
+  to be translated (0 is no limit). They are checked on every upload, over MCP too, and every new job.
+- **Scanned pages.** The server reads no text off pictures. A page that is only a picture is never called
+  translated by an assistant's work; it stays unfinished and the assistant is told why.
 
 ## Model connections
 
@@ -161,6 +174,3 @@ The log is append-only for the application and visible to admins. It never conta
 - Everything from the server is escaped before it becomes HTML; book titles such as `<img onerror=...>` show as text.
 - The session cookie is invisible to scripts; every change carries the CSRF token.
 
-## Still to come
-
-- Per-user storage quotas.

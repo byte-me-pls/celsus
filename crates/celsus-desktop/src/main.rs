@@ -37,6 +37,15 @@ fn show_window(app: &AppHandle) {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+        let _ = app.emit("window-shown", ());
+    }
+}
+
+/// Put the window away in the tray. The window is told, so that it keeps what jobs do meanwhile to say later.
+fn hide_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+        let _ = app.emit("window-hidden", ());
     }
 }
 
@@ -54,7 +63,7 @@ fn make_tray(app: &AppHandle) -> tauri::Result<Tray> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => show_window(app),
-            "quit" => app.exit(0),
+            "quit" => quit_asking(app),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -95,6 +104,43 @@ fn tray_texts(app: AppHandle, open: String, quit: String) {
         let _ = tray.open.set_text(open);
         let _ = tray.quit.set_text(quit);
     }
+}
+
+/// What the tray icon says when the pointer is on it: what Celsus is doing, or what it did while the window was
+/// closed.
+#[tauri::command]
+fn tray_status(app: AppHandle, text: String) {
+    if let Some(tray) = app.tray_by_id("main") {
+        let text = if text.is_empty() {
+            "Celsus".to_owned()
+        } else {
+            format!("Celsus: {text}")
+        };
+        let _ = tray.set_tooltip(Some(text));
+    }
+}
+
+/// Quit, unless a translation is running: then the window comes forward and asks first.
+fn quit_asking(app: &AppHandle) {
+    let busy = app.try_state::<App>().is_some_and(|a| a.runner.busy());
+    if busy {
+        show_window(app);
+        let _ = app.emit("quit-asked", ());
+    } else {
+        app.exit(0);
+    }
+}
+
+/// Quit, once the person has said so.
+#[tauri::command]
+fn app_quit(app: AppHandle) {
+    app.exit(0);
+}
+
+/// Put the window away in the tray, once the person has said so.
+#[tauri::command]
+fn app_hide(app: AppHandle) {
+    hide_window(&app);
 }
 
 type Res<T> = Result<T, String>;
@@ -188,7 +234,59 @@ async fn pick_pdfs(handle: AppHandle) -> Vec<String> {
 #[derive(Serialize)]
 struct AddResult {
     added: Vec<db::Book>,
-    failed: Vec<String>,
+    failed: Vec<Failed>,
+    /// Files that are in the library already: not added unless asked again with `again`.
+    already: Vec<Already>,
+    /// Books whose file was damaged and was read as far as it could be: some pages may be missing.
+    repaired: Vec<i64>,
+}
+
+#[derive(Serialize)]
+struct Failed {
+    file: String,
+    /// What went wrong, as a word the interface has text for (see library::add_failure).
+    reason: String,
+    detail: String,
+}
+
+#[derive(Serialize)]
+struct Already {
+    path: String,
+    file: String,
+    book: db::Book,
+}
+
+/// The PDF files among `paths`, with those in folders that were given (and their folders, down to a few
+/// levels), and how many files were not PDFs.
+#[tauri::command]
+fn pdfs_in(paths: Vec<String>) -> (Vec<String>, usize) {
+    fn walk(path: &Path, depth: usize, out: &mut Vec<String>, other: &mut usize) {
+        if path.is_dir() {
+            if depth > 4 {
+                return;
+            }
+            let Ok(entries) = std::fs::read_dir(path) else {
+                return;
+            };
+            let mut entries: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+            entries.sort();
+            for e in entries {
+                walk(&e, depth + 1, out, other);
+            }
+        } else if path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+        {
+            out.push(path.display().to_string());
+        } else if depth == 0 {
+            *other += 1;
+        }
+    }
+    let (mut out, mut other) = (Vec::new(), 0);
+    for p in paths {
+        walk(Path::new(&p), 0, &mut out, &mut other);
+    }
+    (out, other)
 }
 
 #[tauri::command]
@@ -196,17 +294,45 @@ async fn books_add(
     handle: AppHandle,
     paths: Vec<String>,
     ui_lang: Option<String>,
+    again: Option<bool>,
 ) -> Res<AddResult> {
     let app = handle.state::<App>();
     let mut result = AddResult {
         added: Vec::new(),
         failed: Vec::new(),
+        already: Vec::new(),
+        repaired: Vec::new(),
     };
     for p in paths {
         let conn = app.db.lock().unwrap();
-        match library::add_book(&conn, &app.library, Path::new(&p)) {
-            Ok(b) => result.added.push(b),
-            Err(e) => result.failed.push(e),
+        let path = Path::new(&p);
+        let file = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| p.clone());
+        // The same file twice is one book, unless the user says otherwise.
+        if again != Some(true)
+            && let Ok(Some(book)) = library::same_file(&conn, &app.library, path)
+        {
+            result.already.push(Already {
+                path: p.clone(),
+                file,
+                book,
+            });
+            continue;
+        }
+        match library::add_book_checked(&conn, &app.library, path) {
+            Ok((b, repaired)) => {
+                if repaired {
+                    result.repaired.push(b.id);
+                }
+                result.added.push(b);
+            }
+            Err(e) => result.failed.push(Failed {
+                file,
+                reason: library::add_failure(&e).to_owned(),
+                detail: e,
+            }),
         }
     }
     let _ = handle.emit("library-changed", ());
@@ -228,8 +354,8 @@ async fn books_add(
 fn client_for(app: &App, task: &str) -> Res<OpenAiCompatible> {
     let (provider, model) = db::model_for(&app.db.lock().unwrap(), task)?.ok_or_else(|| {
         match task {
-            "image" => "Choose a picture model in Settings → Models first.",
-            _ => "Choose a model in Settings → Models first.",
+            "image" => "no_image_model",
+            _ => "no_metadata_model",
         }
         .to_owned()
     })?;
@@ -244,8 +370,7 @@ fn client_for(app: &App, task: &str) -> Res<OpenAiCompatible> {
 fn recognise(app: &App, id: i64, ui_lang: &str) -> Res<BookInfo> {
     let book = db::book(&app.db.lock().unwrap(), id)?;
     let client = client_for(app, "metadata")?;
-    let doc = celsus_pdf::Document::open(library::source_file(&app.library, id))
-        .map_err(|e| e.to_string())?;
+    let doc = library::open_book(&app.library, id)?;
     let sample = BookSample {
         file_name: book.original_name.clone(),
         title: book.title.clone(),
@@ -269,12 +394,15 @@ fn recognise_and_fill(handle: &AppHandle, id: i64, ui_lang: &str) -> Res<()> {
     {
         let conn = app.db.lock().unwrap();
         let book = db::book(&conn, id)?;
+        // A title made from the file name, or one a program left in the file ("Untitled", "Document1"), is not
+        // the book's: what the book says of itself replaces it.
         let from_file_name = book.title
             == book
                 .original_name
                 .trim_end_matches(".pdf")
                 .trim_end_matches(".PDF")
-                .replace(['_', '-'], " ");
+                .replace(['_', '-'], " ")
+            || library::placeholder_title(&book.title);
         let pick = |current: &str, found: &str, replace: bool| {
             if (current.trim().is_empty() || replace) && !found.is_empty() {
                 found.to_owned()
@@ -326,7 +454,26 @@ fn book_update(
 #[tauri::command]
 async fn book_delete(handle: AppHandle, id: i64) -> Res<()> {
     let app = handle.state::<App>();
+    // A job on the book is stopped first, and waited for, so that it cannot write into the book's folder once
+    // the book is gone (a new book may take its number and its folder).
+    {
+        let conn = app.db.lock().unwrap();
+        for j in db::jobs(&conn, Some(id))? {
+            if j.status == "queued" {
+                db::set_status(&conn, j.id, "cancelled", None)?;
+            }
+        }
+    }
     app.runner.cancel_book(id);
+    for _ in 0..200 {
+        let running = db::jobs(&app.db.lock().unwrap(), Some(id))?
+            .iter()
+            .any(|j| j.status == "running");
+        if !running {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
     // Its translations go with it: the same file added again starts afresh.
     celsus_store::assistant::remove_book(&app.db, &app.library, id, || {
         let _ = handle.emit("library-changed", ());
@@ -381,8 +528,7 @@ fn book_pages(app: State<App>, id: i64, lang: String) -> Res<Vec<(i64, i64)>> {
 #[tauri::command]
 async fn book_estimate(handle: AppHandle, id: i64, pages: Vec<i64>) -> Res<u64> {
     let app = handle.state::<App>();
-    let path = library::source_file(&app.library, id);
-    let doc = celsus_pdf::Document::open(&path).map_err(|e| e.to_string())?;
+    let doc = library::open_book(&app.library, id)?;
     let all = doc.pages().map_err(|e| e.to_string())?;
     let mut chars = 0u64;
     for n in pages {
@@ -400,6 +546,46 @@ async fn book_estimate(handle: AppHandle, id: i64, pages: Vec<i64>) -> Res<u64> 
         }
     }
     Ok(chars)
+}
+
+/// Which of `pages` are scanned pictures without a text layer that have not been read yet.
+#[tauri::command]
+async fn book_scans(handle: AppHandle, id: i64, pages: Vec<i64>) -> Res<Vec<usize>> {
+    let app = handle.state::<App>();
+    let pages: Vec<usize> = pages.into_iter().map(|p| p as usize).collect();
+    celsus_ocr::unread_pages(&app.library, id, &pages)
+}
+
+/// Whether the models that read scanned pages are here, and how many bytes they are to download.
+#[tauri::command]
+fn ocr_models() -> (bool, u64) {
+    let dir = celsus_ocr::models_dir(&celsus_store::data_dir());
+    (celsus_ocr::ready(&dir), celsus_ocr::download_size())
+}
+
+/// Download the models that read scanned pages, telling the window how far it got.
+#[tauri::command]
+async fn ocr_download(handle: AppHandle) -> Res<()> {
+    let dir = celsus_ocr::models_dir(&celsus_store::data_dir());
+    let mut said = u64::MAX;
+    OCR_CANCEL.store(false, std::sync::atomic::Ordering::Relaxed);
+    celsus_ocr::download(&dir, |done, total| {
+        let percent = done * 100 / total.max(1);
+        if percent != said {
+            said = percent;
+            let _ = handle.emit("ocr-download", percent);
+        }
+        !OCR_CANCEL.load(std::sync::atomic::Ordering::Relaxed)
+    })
+}
+
+/// Set to stop the download of the OCR models.
+static OCR_CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Stop downloading the OCR models.
+#[tauri::command]
+fn ocr_download_cancel() {
+    OCR_CANCEL.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[tauri::command]
@@ -451,8 +637,7 @@ struct ImageInfo {
 #[tauri::command]
 async fn page_images(handle: AppHandle, id: i64, page: usize, lang: String) -> Res<Vec<ImageInfo>> {
     let app = handle.state::<App>();
-    let doc = celsus_pdf::Document::open(library::source_file(&app.library, id))
-        .map_err(|e| e.to_string())?;
+    let doc = library::open_book(&app.library, id)?;
     let pages = doc.pages().map_err(|e| e.to_string())?;
     let p = pages.get(page.wrapping_sub(1)).ok_or("No such page.")?;
     Ok(celsus_pdf::image::page_images(&doc, p)
@@ -473,8 +658,7 @@ async fn page_images(handle: AppHandle, id: i64, page: usize, lang: String) -> R
 #[tauri::command]
 async fn image_original(handle: AppHandle, id: i64, image: String) -> Res<tauri::ipc::Response> {
     let app = handle.state::<App>();
-    let doc = celsus_pdf::Document::open(library::source_file(&app.library, id))
-        .map_err(|e| e.to_string())?;
+    let doc = library::open_book(&app.library, id)?;
     let obj = library::parse_image_id(&image).ok_or("bad picture id")?;
     let (bytes, _) =
         celsus_pdf::image::export(&doc, obj).ok_or("This picture's format cannot be read.")?;
@@ -501,8 +685,7 @@ async fn image_redraw(
     let client = celsus_store::pictures::client(&app.db.lock().unwrap())?;
     // The model call takes a while; the database is locked only to write the book afterwards.
     let book = db::book(&app.db.lock().unwrap(), id)?;
-    let doc = celsus_pdf::Document::open(library::source_file(&app.library, id))
-        .map_err(|e| e.to_string())?;
+    let doc = library::open_book(&app.library, id)?;
     let obj = library::parse_image_id(&image).ok_or("bad picture id")?;
     let pages = doc.pages().map_err(|e| e.to_string())?;
     let p = pages.get(page.wrapping_sub(1)).ok_or("No such page.")?;
@@ -516,7 +699,13 @@ async fn image_redraw(
     let instructions = celsus_store::pictures::instructions(&book, page, &to, note.as_deref());
     let picture = client
         .edit_image(&bytes, mime, aspect, &instructions)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            if celsus_core::provider::is_out_of_credit(&e) {
+                "out_of_credit".to_owned()
+            } else {
+                e.to_string()
+            }
+        })?;
     let file = celsus_store::pictures::place(
         &app.db.lock().unwrap(),
         &app.library,
@@ -562,6 +751,7 @@ fn job_create(
     book_id: i64,
     lang: String,
     pages: Vec<i64>,
+    again: Option<bool>,
 ) -> Res<db::Job> {
     lang.parse::<celsus_core::Language>()
         .map_err(|e| e.to_string())?;
@@ -571,12 +761,34 @@ fn job_create(
     pages.sort_unstable();
     pages.dedup();
     if pages.is_empty() {
-        return Err("Choose at least one page.".into());
+        return Err("no_pages".into());
     }
     let job = {
         let conn = app.db.lock().unwrap();
         if db::model_for(&conn, "translate")?.is_none() {
             return Err("no_model".into());
+        }
+        // A book is not translated into the language it is written in: every page would be paid for, and
+        // nothing would change.
+        let source = db::book(&conn, book_id)?.source_lang.to_lowercase();
+        let base = |l: &str| l.split(['-', '_']).next().unwrap_or("").to_owned();
+        if !source.is_empty() && source != "auto" && base(&source) == base(&lang) {
+            return Err("same_language".into());
+        }
+        // Pages to be translated anew: those translated already are asked for again, and keep their earlier
+        // translation in the file until the new one is done.
+        if again == Some(true) {
+            let done: std::collections::BTreeSet<i64> =
+                db::translated_pages(&conn, book_id, &lang)?
+                    .into_iter()
+                    .map(|(p, _)| p)
+                    .collect();
+            let redo: Vec<usize> = pages
+                .iter()
+                .filter(|p| done.contains(p))
+                .map(|&p| p as usize)
+                .collect();
+            db::add_redo_pages(&conn, book_id, &lang, &redo)?;
         }
         // The same request sent twice (a double click) is one job.
         let same = db::jobs(&conn, Some(book_id))?.into_iter().find(|j| {
@@ -720,9 +932,18 @@ fn provider_save(app: State<App>, provider: db::Provider, key: Option<String>) -
     if !web_address(&provider.url) {
         return Err("bad_url".into());
     }
-    let id = db::save_provider(&app.db.lock().unwrap(), &provider)?;
-    if let Some(k) = key {
-        secrets::set_key(id, k.trim())?;
+    let conn = app.db.lock().unwrap();
+    let id = db::save_provider(&conn, &provider)?;
+    if let Some(k) = key
+        && let Err(e) = secrets::set_key(id, k.trim())
+    {
+        // A new connection without its key is no connection: it goes again, so that saving once more does not
+        // make a second one.
+        if provider.id == 0 {
+            let _ = db::delete_provider(&conn, id);
+        }
+        eprintln!("the key store refused the key: {e}");
+        return Err("key_store".into());
     }
     Ok(id)
 }
@@ -825,11 +1046,14 @@ async fn provider_check(url: String, key: Option<String>, id: Option<i64>) -> Re
     let models = match client.list_models() {
         Ok(models) => models.len(),
         Err(e) if refused(&e) => return Err("bad_key".into()),
+        Err(e) if celsus_core::provider::is_out_of_credit(&e) => return Err("out_of_credit".into()),
         Err(e) => return Err(e.to_string()),
     };
     match client.check_key() {
         Ok(()) => Ok(models),
         Err(e) if refused(&e) => Err("bad_key".into()),
+        // A key that works on an account with nothing left on it is said to be so.
+        Err(e) if celsus_core::provider::is_out_of_credit(&e) => Err("out_of_credit".into()),
         // Anything else is about that one request, not about the key.
         Err(_) => Ok(models),
     }
@@ -876,10 +1100,12 @@ fn task_models(app: State<App>) -> Res<Vec<TaskModel>> {
 
 #[tauri::command]
 fn task_model_set(
+    handle: AppHandle,
     app: State<App>,
     task: String,
     provider_id: Option<i64>,
     model: String,
+    ui_lang: Option<String>,
 ) -> Res<()> {
     if !db::TASKS.contains(&task.as_str()) {
         return Err(format!("unknown task {task}"));
@@ -888,7 +1114,34 @@ fn task_model_set(
         Some(id) if !model.trim().is_empty() => format!("{id}:{}", model.trim()),
         _ => String::new(),
     };
-    db::set_setting(&app.db.lock().unwrap(), &format!("model.{task}"), &value)
+    let unknown = {
+        let conn = app.db.lock().unwrap();
+        let before = db::setting(&conn, &format!("model.{task}"))?.unwrap_or_default();
+        db::set_setting(&conn, &format!("model.{task}"), &value)?;
+        // Books added before there was a model to recognise them with are recognised now.
+        if task == "metadata" && before.is_empty() && !value.is_empty() {
+            db::books(&conn)?
+                .into_iter()
+                .filter(|b| b.author.is_empty() && b.subject.is_empty() && b.source_lang.is_empty())
+                .map(|b| b.id)
+                .collect()
+        } else {
+            Vec::new()
+        }
+    };
+    // Jobs waiting for a model go on.
+    app.runner.wake();
+    if !unknown.is_empty() {
+        let lang = ui_lang.unwrap_or_else(|| "en".into());
+        std::thread::spawn(move || {
+            for id in unknown {
+                if let Err(e) = recognise_and_fill(&handle, id, &lang) {
+                    eprintln!("could not recognise book {id}: {e}");
+                }
+            }
+        });
+    }
+    Ok(())
 }
 
 /// Check a model: a one sentence translation for text models, a model list lookup for picture models (drawing a
@@ -989,7 +1242,10 @@ fn usage_stats(app: State<App>) -> Res<db::Usage> {
 struct StorageInfo {
     library: String,
     database: String,
+    data: String,
     library_bytes: u64,
+    database_bytes: u64,
+    models_bytes: u64,
     cached_translations: i64,
     cached_chars: i64,
 }
@@ -1012,10 +1268,16 @@ fn dir_size(p: &Path) -> u64 {
 async fn storage_info(handle: AppHandle) -> Res<StorageInfo> {
     let app = handle.state::<App>();
     let (n, chars) = db::cache_size(&app.db.lock().unwrap())?;
+    let file = |p: &Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
     Ok(StorageInfo {
         library: app.library.display().to_string(),
         database: app.db_path.display().to_string(),
+        data: celsus_store::data_dir().display().to_string(),
         library_bytes: dir_size(&app.library),
+        database_bytes: file(&app.db_path)
+            + file(&app.db_path.with_extension("db-wal"))
+            + file(&app.db_path.with_extension("db-shm")),
+        models_bytes: dir_size(&celsus_store::data_dir().join("models")),
         cached_translations: n,
         cached_chars: chars,
     })
@@ -1024,13 +1286,53 @@ async fn storage_info(handle: AppHandle) -> Res<StorageInfo> {
 /// Clear the kept translations that no translated page uses. What the books in the library are written from
 /// stays: without it, the next time a book is written its pages would go back to the original.
 #[tauri::command]
-async fn cache_clear(handle: AppHandle) -> Res<()> {
+async fn cache_clear(handle: AppHandle) -> Res<usize> {
     let app = handle.state::<App>();
     let translated = db::all_translated_pages(&app.db.lock().unwrap())?;
     // Reading the books takes a while; the database is free in the meantime.
     let keep = celsus_store::assistant::keys_in_use(&app.library, &translated);
-    db::clear_cache_except(&app.db.lock().unwrap(), &keep)?;
-    Ok(())
+    db::clear_cache_except(&app.db.lock().unwrap(), &keep)
+}
+
+/// Make a backup of the library in a folder the user picks. Says where it went, or nothing if no folder was
+/// picked.
+#[tauri::command]
+async fn backup_make(handle: AppHandle) -> Res<Option<String>> {
+    let Some(parent) = handle
+        .dialog()
+        .file()
+        .blocking_pick_folder()
+        .and_then(|f| f.into_path().ok())
+    else {
+        return Ok(None);
+    };
+    let app = handle.state::<App>();
+    let dir = celsus_store::back_up(&app.db.lock().unwrap(), &parent)?;
+    Ok(Some(dir.display().to_string()))
+}
+
+/// Put a backup the user picks in place of the library. It is done when Celsus starts again, which it does at
+/// once; what was there is kept beside it.
+#[tauri::command]
+async fn backup_restore(handle: AppHandle) -> Res<bool> {
+    let Some(dir) = handle
+        .dialog()
+        .file()
+        .blocking_pick_folder()
+        .and_then(|f| f.into_path().ok())
+    else {
+        return Ok(false);
+    };
+    if !celsus_store::is_backup(&dir) {
+        return Err("not_backup".into());
+    }
+    let app = handle.state::<App>();
+    if app.runner.busy() {
+        return Err("busy_restore".into());
+    }
+    std::fs::write(celsus_store::restore_marker(), dir.display().to_string())
+        .map_err(|e| e.to_string())?;
+    handle.restart();
 }
 
 // ---------- MCP connection ----------
@@ -1116,10 +1418,99 @@ fn mcp_client_remove(id: String) -> Res<()> {
 }
 
 /// Open a web page (a provider's key page, a download page) in the default browser. Only https links.
+/// How many of the fonts Celsus writes translations with are in `dir`, for `lang` (the interface's target
+/// language): none means translations into it cannot be written from that folder.
+#[tauri::command]
+fn fonts_check(dir: String, lang: String) -> Res<usize> {
+    let to = parse_lang(&lang)?;
+    Ok(
+        celsus_core::fonts::FontSet::for_language(Path::new(&dir), &to)
+            .faces()
+            .len(),
+    )
+}
+
+/// Pick a folder; nothing when none was picked.
+#[tauri::command]
+async fn pick_folder(handle: AppHandle) -> Option<String> {
+    handle
+        .dialog()
+        .file()
+        .blocking_pick_folder()
+        .and_then(|f| f.into_path().ok())
+        .map(|p| p.display().to_string())
+}
+
+/// Open a file with the program the system uses for it, such as a translated PDF in the user's PDF reader.
+#[tauri::command]
+fn open_path(path: String) -> Res<()> {
+    let path = Path::new(&path);
+    if !path.exists() {
+        return Err(format!("{} is not there any more", path.display()));
+    }
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = std::process::Command::new("explorer");
+        c.arg(path);
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg(path);
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(path);
+        c
+    };
+    cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Show a file in its folder, marked, or a folder itself.
+#[tauri::command]
+fn show_in_folder(path: String) -> Res<()> {
+    let path = Path::new(&path);
+    if !path.exists() {
+        return Err(format!("{} is not there any more", path.display()));
+    }
+    #[cfg(windows)]
+    let result = if path.is_dir() {
+        std::process::Command::new("explorer").arg(path).spawn()
+    } else {
+        std::process::Command::new("explorer")
+            .arg(format!("/select,{}", path.display()))
+            .spawn()
+    };
+    #[cfg(target_os = "macos")]
+    let result = if path.is_dir() {
+        std::process::Command::new("open").arg(path).spawn()
+    } else {
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(path)
+            .spawn()
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let result = std::process::Command::new("xdg-open")
+        .arg(if path.is_dir() {
+            path
+        } else {
+            path.parent().unwrap_or(path)
+        })
+        .spawn();
+    result.map(|_| ()).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn open_url(url: String) -> Res<()> {
-    if !url.starts_with("https://") || url.chars().any(|c| c.is_whitespace() || c == '"') {
-        return Err("Only https links can be opened.".into());
+    // Web addresses only, given to the browser: links in books are often plain http. Nothing else (a file, a
+    // program) is opened this way.
+    let web = url.starts_with("https://") || url.starts_with("http://");
+    if !web || url.chars().any(|c| c.is_whitespace() || c == '"') {
+        return Err("Only web links can be opened.".into());
     }
     #[cfg(windows)]
     let child = std::process::Command::new("explorer").arg(&url).spawn();
@@ -1190,7 +1581,7 @@ async fn update_install(handle: AppHandle) -> Res<()> {
         .check()
         .await
         .map_err(|e| e.to_string())?
-        .ok_or("There is no newer version to install.")?;
+        .ok_or("no_update")?;
     update
         .download_and_install(|_, _| {}, || {})
         .await
@@ -1213,6 +1604,10 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // The same folder the MCP server uses, so both see one library.
+            // A backup asked for at the last start is put in place before anything is opened.
+            if let Err(e) = celsus_store::restore_if_asked() {
+                eprintln!("could not restore the backup: {e}");
+            }
             let library = celsus_store::library_dir();
             let db_path = celsus_store::database_path();
             let conn = celsus_store::open().map_err(std::io::Error::other)?;
@@ -1240,6 +1635,11 @@ fn main() {
             book_get,
             pick_pdfs,
             books_add,
+            pdfs_in,
+            fonts_check,
+            pick_folder,
+            open_path,
+            show_in_folder,
             book_update,
             translation_remove,
             book_delete,
@@ -1247,6 +1647,10 @@ fn main() {
             cover_save,
             book_pages,
             book_estimate,
+            book_scans,
+            ocr_models,
+            ocr_download,
+            ocr_download_cancel,
             book_recognise,
             page_images,
             image_original,
@@ -1275,6 +1679,8 @@ fn main() {
             usage_stats,
             storage_info,
             cache_clear,
+            backup_make,
+            backup_restore,
             mcp_info,
             mcp_client_add,
             mcp_client_remove,
@@ -1284,15 +1690,35 @@ fn main() {
             languages,
             open_url,
             tray_texts,
+            tray_status,
+            app_quit,
+            app_hide,
             release_notes
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event
                 && window.label() == "main"
-                && closes_to_tray(window.app_handle())
             {
-                api.prevent_close();
-                let _ = window.hide();
+                let app = window.app_handle();
+                if closes_to_tray(app) {
+                    api.prevent_close();
+                    // The first time, the window says where Celsus goes, and lets the person quit instead.
+                    let told = app.try_state::<App>().is_some_and(|a| {
+                        db::setting(&a.db.lock().unwrap(), "tray_told")
+                            .ok()
+                            .flatten()
+                            .is_some()
+                    });
+                    if told {
+                        hide_window(app);
+                    } else {
+                        let _ = app.emit("tray-first", ());
+                    }
+                } else if app.try_state::<App>().is_some_and(|a| a.runner.busy()) {
+                    // Closing quits, and a translation is running: it is stopped only if the person says so.
+                    api.prevent_close();
+                    let _ = app.emit("quit-asked", ());
+                }
             }
         })
         .build(tauri::generate_context!())

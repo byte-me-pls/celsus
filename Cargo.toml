@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/celsus-core", "crates/celsus-desktop", "crates/celsus-mcp", "crates/celsus-pdf", "crates/celsus-server", "crates/celsus-store"]
+members = ["crates/celsus-core", "crates/celsus-desktop", "crates/celsus-mcp", "crates/celsus-ocr", "crates/celsus-pdf", "crates/celsus-server", "crates/celsus-store"]
 
 [workspace.package]
 version = "0.2611.10"
@@ -11,6 +11,7 @@ license = "MIT"
 
 [workspace.dependencies]
 celsus-core = { path = "crates/celsus-core" }
+celsus-ocr = { path = "crates/celsus-ocr" }
 celsus-pdf = { path = "crates/celsus-pdf" }
 celsus-store = { path = "crates/celsus-store" }
 

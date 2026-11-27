@@ -20,6 +20,87 @@ pub const ANSWER_WAIT: u64 = 180;
 /// model would ever be in time.
 pub const ANSWER_WAIT_RANGE: std::ops::RangeInclusive<u64> = 20..=600;
 
+/// The error a request ends with when the account has no money or credit left on it. It is a code the app shows
+/// in words of its own, and a job that ends with it is not tried again by itself: more requests would not help.
+pub const OUT_OF_CREDIT: &str = "out_of_credit";
+
+/// Whether a request failed because the account ran out of credit.
+pub fn is_out_of_credit(e: &TranslateError) -> bool {
+    matches!(e, TranslateError::Fatal(why) if why == OUT_OF_CREDIT)
+}
+
+/// Error codes services give when an account has run out of money, credit or its paid quota.
+const NO_CREDIT_CODES: [&str; 11] = [
+    "insufficient_quota",
+    "billing_hard_limit_reached",
+    "billing_not_active",
+    "insufficient_balance",
+    "insufficient_credits",
+    "insufficient_credit",
+    "insufficient_funds",
+    "exceeded_current_quota_error",
+    "credit_limit_exceeded",
+    "payment_required",
+    "quota_exceeded",
+];
+
+/// Whether an answer says the account has no credit left, rather than that too many requests came at once.
+/// Both often arrive as status 429; only the second passes by waiting.
+fn no_credit(status: u16, text: &str) -> bool {
+    if status == 402 {
+        return true;
+    }
+    if !matches!(status, 400 | 403 | 429) {
+        return false;
+    }
+    let value = serde_json::from_str::<Value>(text).unwrap_or(Value::Null);
+    // `{"error": {...}}`, or a list of such (Google's services).
+    let errors = [&value["error"], &value[0]["error"], &value];
+    let coded = errors.iter().any(|e| {
+        ["code", "type", "status"].iter().any(|key| {
+            e[key]
+                .as_str()
+                .is_some_and(|code| NO_CREDIT_CODES.contains(&code.to_ascii_lowercase().as_str()))
+        })
+    });
+    if coded {
+        return true;
+    }
+    if status != 429 {
+        return false;
+    }
+    // Without a code, the words decide; a limit that lifts after a while is a rate limit even when it is
+    // called a quota.
+    let lower = text.to_lowercase();
+    let says = [
+        "insufficient credit",
+        "insufficient balance",
+        "insufficient funds",
+        "out of credit",
+        "credit balance",
+        "not enough credit",
+        "no credits",
+        "billing",
+        "quota exceeded",
+        "exceeded your current quota",
+    ]
+    .iter()
+    .any(|w| lower.contains(w));
+    let passes = [
+        "rate limit",
+        "rate-limit",
+        "rate_limit",
+        "per minute",
+        "per day",
+        "retry",
+        "try again",
+        "too many requests",
+    ]
+    .iter()
+    .any(|w| lower.contains(w));
+    says && !passes
+}
+
 /// Send one JSON request and read the whole answer: status, body, and how long the server asks to wait.
 fn send(
     agent: &ureq::Agent,
@@ -151,6 +232,9 @@ impl OpenAiCompatible {
     }
 
     fn failure(status: u16, text: &str, retry_after: Option<u64>) -> TranslateError {
+        if no_credit(status, text) {
+            return TranslateError::Fatal(OUT_OF_CREDIT.into());
+        }
         if status == 429 {
             return TranslateError::RateLimited {
                 retry_after_secs: retry_after.unwrap_or(30).clamp(1, 3600),
@@ -275,7 +359,8 @@ impl OpenAiCompatible {
 
     /// Whether the connection takes the key, found out without spending anything: a request for a model that
     /// does not exist is turned away for its key before anything else about it is looked at. A connection that
-    /// asks for no key takes any.
+    /// asks for no key takes any. An account with no credit left is reported as [`OUT_OF_CREDIT`] when the
+    /// service says so for this request too.
     pub fn check_key(&self) -> Result<(), TranslateError> {
         let body = json!({
             "model": "celsus-key-check",
@@ -284,6 +369,7 @@ impl OpenAiCompatible {
         });
         let (status, text, _) = self.post("chat/completions", &body, Duration::from_secs(30))?;
         match status {
+            _ if no_credit(status, &text) => Err(TranslateError::Fatal(OUT_OF_CREDIT.into())),
             401 | 403 => Err(Self::failure(status, &text, None)),
             _ => Ok(()),
         }
@@ -739,6 +825,51 @@ mod tests {
             ),
             "{e:?}"
         );
+    }
+
+    #[test]
+    fn running_out_of_credit_is_not_a_rate_limit() {
+        let openai = r#"{"error":{"message":"You exceeded your current quota, please check your plan and billing details.","type":"insufficient_quota","param":null,"code":"insufficient_quota"}}"#;
+        let openrouter = r#"{"error":{"code":402,"message":"Insufficient credits. Add more using https://openrouter.ai/settings/credits"}}"#;
+        let deepseek = r#"{"error":{"message":"Insufficient Balance","type":"unknown_error"}}"#;
+        let words = r#"{"error":{"message":"Your credit balance is too low."}}"#;
+        for (status, body) in [
+            (429, openai),
+            (402, openrouter),
+            (402, deepseek),
+            (429, words),
+        ] {
+            let server = serve(vec![(
+                status,
+                vec![("Retry-After", "7".into())],
+                body.into(),
+            )]);
+            let e = OpenAiCompatible::new(&server.url, None, "m")
+                .chat("s", "u")
+                .unwrap_err();
+            assert!(is_out_of_credit(&e), "{status} {body}: {e:?}");
+            // The connection test says so too, instead of calling the key good.
+            let server = serve(vec![(status, Vec::new(), body.into())]);
+            let e = OpenAiCompatible::new(&server.url, Some("k".into()), "")
+                .check_key()
+                .unwrap_err();
+            assert!(is_out_of_credit(&e), "{status} {body}: {e:?}");
+        }
+        // A quota per minute lifts by itself: that is a rate limit.
+        let per_minute = r#"[{"error":{"code":429,"message":"You exceeded your current quota, please check your plan and billing details. Please retry in 21s.","status":"RESOURCE_EXHAUSTED"}}]"#;
+        for body in [
+            per_minute,
+            r#"{"error":{"message":"Rate limit reached","code":"rate_limit_exceeded"}}"#,
+        ] {
+            let server = serve(vec![(429, Vec::new(), body.into())]);
+            let e = OpenAiCompatible::new(&server.url, None, "m")
+                .chat("s", "u")
+                .unwrap_err();
+            assert!(
+                matches!(e, TranslateError::RateLimited { .. }),
+                "{body}: {e:?}"
+            );
+        }
     }
 
     #[test]

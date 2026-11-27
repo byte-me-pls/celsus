@@ -1002,3 +1002,340 @@ async fn translations_stay_with_their_book() {
     assert_eq!(cached(&s, &mine).await.len(), 1);
     s.finish().await;
 }
+
+/// A PDF whose pages draw these content streams, with Helvetica as /F1 and a gray picture as /Im1.
+fn pages_pdf(contents: &[&str]) -> Vec<u8> {
+    let pixels = celsus_pdf::filters::deflate(&vec![120u8; 60 * 80]);
+    let stream = |dict: String, data: &[u8]| {
+        let mut o = format!("{dict}\nstream\n").into_bytes();
+        o.extend_from_slice(data);
+        o.extend_from_slice(b"\nendstream");
+        o
+    };
+    let n = contents.len();
+    let kids: Vec<String> = (0..n).map(|i| format!("{} 0 R", 5 + 2 * i)).collect();
+    let mut objects: Vec<Vec<u8>> = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        format!("<< /Type /Pages /Kids [{}] /Count {n} >>", kids.join(" ")).into_bytes(),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+        stream(
+            format!(
+                "<< /Type /XObject /Subtype /Image /Width 60 /Height 80 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode /Length {} >>",
+                pixels.len()
+            ),
+            &pixels,
+        ),
+    ];
+    for (i, content) in contents.iter().enumerate() {
+        objects.push(format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> /XObject << /Im1 4 0 R >> >> /Contents {} 0 R >>",
+            6 + 2 * i
+        ).into_bytes());
+        objects.push(stream(
+            format!("<< /Length {} >>", content.len()),
+            content.as_bytes(),
+        ));
+    }
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+        pdf.extend_from_slice(o);
+        pdf.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = pdf.len();
+    pdf.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
+    for o in offsets {
+        pdf.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    pdf
+}
+
+/// The text of one page of a book's translated PDF.
+async fn translated_text(s: &Server, b: &Browser, book: &str, page: usize) -> String {
+    let pdf = s.get(b, &format!("/api/books/{book}/file/tr")).await;
+    assert_eq!(pdf.status, StatusCode::OK);
+    let doc = celsus_pdf::Document::load(pdf.bytes).unwrap();
+    let all = doc.pages().unwrap();
+    celsus_core::extract::extract_page(&doc, &all[page - 1], page as u32)
+        .unwrap()
+        .layout
+        .blocks
+        .iter()
+        .map(|b| b.plain())
+        .collect::<Vec<_>>()
+        .join(" / ")
+}
+
+/// Translate every block handed out, with `word` in front of each source text.
+async fn translate_all(s: &Server, k: &str, book: &str, word: &str) {
+    loop {
+        let todo = ok(
+            s,
+            k,
+            "get_text_to_translate",
+            json!({ "book_id": book, "target_language": "tr" }),
+        )
+        .await;
+        let blocks = todo["blocks"].as_array().unwrap().clone();
+        if blocks.is_empty() {
+            break;
+        }
+        let items: Vec<Value> = blocks
+            .iter()
+            .map(|b| json!({ "page": b["page"], "id": b["id"], "text": format!("{word} {}", b["text"].as_str().unwrap()), "accept_anyway": true }))
+            .collect();
+        let r = ok(
+            s,
+            k,
+            "submit_translations",
+            json!({ "book_id": book, "target_language": "tr", "translations": items }),
+        )
+        .await;
+        assert_eq!(r["rejected"], json!([]), "{r}");
+    }
+}
+
+#[tokio::test]
+async fn pages_are_translated_again_without_mixing_old_and_new() {
+    let s = Server::new().await;
+    let owner = s.owner().await;
+    let book = upload(
+        &s,
+        &owner,
+        pages_pdf(&[
+            "BT /F1 14 Tf 72 700 Td (The opening words of the page) Tj ET BT /F1 14 Tf 72 200 Td (The closing words of the page) Tj ET",
+            "BT /F1 14 Tf 72 700 Td (Another page of the same book) Tj ET",
+            "q 612 0 0 792 0 0 cm /Im1 Do Q",
+        ]),
+    )
+    .await;
+    let k = key(&s, &owner, &["read", "translate"]).await;
+    let tools = rpc(
+        &s,
+        &k,
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+    )
+    .await;
+    assert!(tools.body.to_string().contains("\"translate_again\""));
+
+    // The scanned page is left unfinished, and the assistant is told why.
+    translate_all(&s, &k, &book, "Eski").await;
+    let todo = ok(
+        &s,
+        &k,
+        "get_text_to_translate",
+        json!({ "book_id": book, "target_language": "tr" }),
+    )
+    .await;
+    assert_eq!(todo["scanned_pages_without_text"], json!([3]), "{todo}");
+    assert!(
+        todo["note"].as_str().unwrap().contains("desktop app"),
+        "{todo}"
+    );
+    let info = ok(
+        &s,
+        &k,
+        "book_info",
+        json!({ "book_id": book, "target_language": "tr" }),
+    )
+    .await;
+    assert_eq!(info["done_pages"], json!([1, 2]));
+
+    // Page 1 again: half of it is given anew, then page 2 is finished again.
+    let again = ok(
+        &s,
+        &k,
+        "translate_again",
+        json!({ "book_id": book, "target_language": "tr", "pages": "1-2" }),
+    )
+    .await;
+    assert_eq!(again["pages_to_translate_again"], 2);
+    let todo = ok(
+        &s,
+        &k,
+        "get_text_to_translate",
+        json!({ "book_id": book, "target_language": "tr", "pages": "1" }),
+    )
+    .await;
+    let blocks = todo["blocks"].as_array().unwrap().clone();
+    assert_eq!(blocks.len(), 2, "{todo}");
+    let half = ok(
+        &s,
+        &k,
+        "submit_translations",
+        json!({ "book_id": book, "target_language": "tr", "translations": [
+            { "page": "1", "id": blocks[0]["id"], "text": format!("Yeni {}", blocks[0]["text"].as_str().unwrap()), "accept_anyway": true }] }),
+    )
+    .await;
+    assert_eq!(
+        (half["accepted"].clone(), half["completed_pages"].clone()),
+        (json!(1), json!([]))
+    );
+    translate_all(&s, &k, &book, "Yeni").await;
+    // Page 1 took its new translation whole, once all of it was given.
+    let one = translated_text(&s, &owner, &book, 1).await;
+    assert!(
+        one.contains("Yeni The opening") && one.contains("Yeni The closing"),
+        "{one}"
+    );
+
+    // Again, and this time page 2 is finished while page 1 is only half done: page 1 stays as it was.
+    ok(
+        &s,
+        &k,
+        "translate_again",
+        json!({ "book_id": book, "target_language": "tr" }),
+    )
+    .await;
+    let todo = ok(
+        &s,
+        &k,
+        "get_text_to_translate",
+        json!({ "book_id": book, "target_language": "tr", "pages": [1] }),
+    )
+    .await;
+    let blocks = todo["blocks"].as_array().unwrap().clone();
+    ok(
+        &s,
+        &k,
+        "submit_translations",
+        json!({ "book_id": book, "target_language": "tr", "translations": [
+            { "page": 1, "id": blocks[0]["id"], "text": format!("Üçüncü {}", blocks[0]["text"].as_str().unwrap()), "accept_anyway": true }] }),
+    )
+    .await;
+    let todo = ok(
+        &s,
+        &k,
+        "get_text_to_translate",
+        json!({ "book_id": book, "target_language": "tr", "pages": "2" }),
+    )
+    .await;
+    let b = &todo["blocks"][0];
+    let two = ok(
+        &s,
+        &k,
+        "submit_translations",
+        json!({ "book_id": book, "target_language": "tr", "translations": [
+            { "page": 2, "id": b["id"], "text": format!("Üçüncü {}", b["text"].as_str().unwrap()), "accept_anyway": true }] }),
+    )
+    .await;
+    assert_eq!(two["completed_pages"], json!([2]), "{two}");
+    let one = translated_text(&s, &owner, &book, 1).await;
+    assert!(
+        one.contains("Yeni The opening")
+            && one.contains("Yeni The closing")
+            && !one.contains("Üçüncü"),
+        "{one}"
+    );
+    assert!(
+        translated_text(&s, &owner, &book, 2)
+            .await
+            .contains("Üçüncü")
+    );
+    s.finish().await;
+}
+
+#[tokio::test]
+async fn mistakes_are_answered_with_what_to_do() {
+    let s = Server::new().await;
+    let owner = s.owner().await;
+    let book = upload(&s, &owner, sample_pdf("Chapter 7 begins here")).await;
+    let k = key(&s, &owner, &["read", "translate"]).await;
+    let args = |extra: Value| {
+        let mut a = json!({ "book_id": book, "target_language": "tr" });
+        for (key, v) in extra.as_object().unwrap() {
+            a[key] = v.clone();
+        }
+        a
+    };
+    for pages in [json!("99"), json!("0"), json!("0-4")] {
+        let e = fails(
+            &s,
+            &k,
+            "get_text_to_translate",
+            args(json!({ "pages": pages })),
+        )
+        .await;
+        assert!(e.contains("the book has 1 pages"), "{e}");
+    }
+    let e = fails(&s, &k, "translate_again", args(json!({ "pages": "5" }))).await;
+    assert!(e.contains("the book has 1 pages"), "{e}");
+    let e = fails(
+        &s,
+        &k,
+        "get_text_to_translate",
+        args(json!({ "target_language": "turkish" })),
+    )
+    .await;
+    assert!(e.contains("For Turkish it is tr"), "{e}");
+    let e = fails(
+        &s,
+        &k,
+        "get_text_to_translate",
+        args(json!({ "book_id": 1 })),
+    )
+    .await;
+    assert!(e.contains("list_books"), "{e}");
+    // A book is not translated into the language it is written in.
+    let r = s
+        .send(
+            &owner,
+            Method::PATCH,
+            &format!("/api/books/{book}"),
+            Some(json!({ "source_lang": "tr" })),
+            &[],
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    for tool_name in ["get_text_to_translate", "translate_again"] {
+        let e = fails(&s, &k, tool_name, args(json!({}))).await;
+        assert!(e.contains("nothing to translate"), "{e}");
+    }
+    s.send(
+        &owner,
+        Method::PATCH,
+        &format!("/api/books/{book}"),
+        Some(json!({ "source_lang": "en" })),
+        &[],
+    )
+    .await;
+    // An empty translation is never kept, not even with accept_anyway.
+    let todo = ok(&s, &k, "get_text_to_translate", args(json!({}))).await;
+    let id = todo["blocks"][0]["id"].clone();
+    let r = ok(
+        &s,
+        &k,
+        "submit_translations",
+        args(json!({ "accept_anyway": true, "translations": [{ "page": 1, "id": id, "text": "  " }] })),
+    )
+    .await;
+    assert_eq!(r["accepted"], 0);
+    assert!(
+        r["rejected"][0]["problems"][0]
+            .as_str()
+            .unwrap()
+            .contains("empty")
+    );
+    // Only the item that asks for it is waived.
+    let r = ok(
+        &s,
+        &k,
+        "submit_translations",
+        args(json!({ "translations": [{ "page": "1", "id": id, "text": "Bölüm burada başlıyor", "accept_anyway": true }] })),
+    )
+    .await;
+    assert_eq!(r["accepted"], 1, "{r}");
+    assert_eq!(r["completed_pages"], json!([1]));
+    s.finish().await;
+}

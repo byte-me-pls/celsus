@@ -1,0 +1,17 @@
+[package]
+name = "celsus-ocr"
+description = "Reading the words off scanned pages that carry no text layer, for Celsus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+celsus-core.workspace = true
+celsus-pdf.workspace = true
+celsus-store.workspace = true
+hayro = { version = "0.9.0", default-features = false }
+pure-onnx-ocr = "0.3.2"
+sha2 = "0.10"
+ureq = "3.5.1"

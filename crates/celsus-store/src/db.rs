@@ -131,6 +131,40 @@ pub fn open(path: &Path) -> Result<Connection> {
         conn.execute_batch("PRAGMA user_version = 3;")
             .map_err(err)?;
     }
+    // What was spent is kept on its own, a row each time a model answers and each time a page is finished, so
+    // that it is counted as it happens and stays counted when jobs and translations are removed. What jobs had
+    // counted before comes along once.
+    if version < 4 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS usage (
+                 id INTEGER PRIMARY KEY,
+                 job_id INTEGER,
+                 book_id INTEGER,
+                 at INTEGER NOT NULL,
+                 pages INTEGER NOT NULL DEFAULT 0,
+                 requests INTEGER NOT NULL DEFAULT 0,
+                 prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                 completion_tokens INTEGER NOT NULL DEFAULT 0
+             );
+             INSERT INTO usage (job_id, book_id, at, pages, requests, prompt_tokens, completion_tokens)
+                 SELECT id, book_id, created_at, done_pages, requests, prompt_tokens, completion_tokens FROM jobs;
+             PRAGMA user_version = 4;",
+        )
+        .map_err(err)?;
+    }
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS usage (
+             id INTEGER PRIMARY KEY,
+             job_id INTEGER,
+             book_id INTEGER,
+             at INTEGER NOT NULL,
+             pages INTEGER NOT NULL DEFAULT 0,
+             requests INTEGER NOT NULL DEFAULT 0,
+             prompt_tokens INTEGER NOT NULL DEFAULT 0,
+             completion_tokens INTEGER NOT NULL DEFAULT 0
+         );",
+    )
+    .map_err(err)?;
     Ok(conn)
 }
 
@@ -520,24 +554,49 @@ pub fn set_status(conn: &Connection, id: i64, status: &str, error: Option<&str>)
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn job_counters(
+/// Where a job stands. What it spent is counted by [`add_usage`] as it is spent.
+pub fn job_progress(
     conn: &Connection,
     id: i64,
     done: i64,
     total: i64,
     replaced: i64,
     kept: i64,
-    requests: i64,
-    prompt: i64,
-    completion: i64,
     model: &str,
 ) -> Result<()> {
     conn.execute(
-        "UPDATE jobs SET done_pages = ?, total_pages = ?, replaced = ?, kept = ?, requests = ?, prompt_tokens = ?,
-         completion_tokens = ?, model = ? WHERE id = ?",
-        params![done, total, replaced, kept, requests, prompt, completion, model, id],
+        "UPDATE jobs SET done_pages = ?, total_pages = ?, replaced = ?, kept = ?, model = ? WHERE id = ?",
+        params![done, total, replaced, kept, model, id],
     )
     .map_err(err)?;
+    Ok(())
+}
+
+/// Count what was spent: pages finished, requests answered and their tokens, for a job of a book. A job's own
+/// counters add it up as well, across all its runs.
+pub fn add_usage(
+    conn: &Connection,
+    job: Option<i64>,
+    book: i64,
+    pages: i64,
+    requests: i64,
+    prompt: i64,
+    completion: i64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO usage (job_id, book_id, at, pages, requests, prompt_tokens, completion_tokens)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+        params![job, book, now(), pages, requests, prompt, completion],
+    )
+    .map_err(err)?;
+    if let Some(job) = job {
+        conn.execute(
+            "UPDATE jobs SET requests = requests + ?, prompt_tokens = prompt_tokens + ?,
+             completion_tokens = completion_tokens + ? WHERE id = ?",
+            params![requests, prompt, completion, job],
+        )
+        .map_err(err)?;
+    }
     Ok(())
 }
 
@@ -565,11 +624,11 @@ pub struct Usage {
 pub fn usage(conn: &Connection) -> Result<Usage> {
     let month_start = now() - 30 * 24 * 3600;
     conn.query_row(
-        "SELECT (SELECT COUNT(*) FROM books), COUNT(*), COALESCE(SUM(done_pages), 0), COALESCE(SUM(prompt_tokens), 0),
-                COALESCE(SUM(completion_tokens), 0),
-                COALESCE(SUM(CASE WHEN created_at >= ?1 THEN done_pages END), 0),
-                COALESCE(SUM(CASE WHEN created_at >= ?1 THEN prompt_tokens + completion_tokens END), 0)
-         FROM jobs",
+        "SELECT (SELECT COUNT(*) FROM books), (SELECT COUNT(*) FROM jobs), COALESCE(SUM(pages), 0),
+                COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(completion_tokens), 0),
+                COALESCE(SUM(CASE WHEN at >= ?1 THEN pages END), 0),
+                COALESCE(SUM(CASE WHEN at >= ?1 THEN prompt_tokens + completion_tokens END), 0)
+         FROM usage",
         [month_start],
         |r| {
             Ok(Usage {
@@ -904,6 +963,10 @@ pub fn clear_cache_except(
             .map_err(err)?;
     }
     tx.commit().map_err(err)?;
+    // The file gives the room back only when it is written anew.
+    if cleared > 0 {
+        let _ = conn.execute_batch("VACUUM;");
+    }
     Ok(cleared)
 }
 

@@ -37,10 +37,61 @@ fn healthcheck() -> i32 {
     }
 }
 
+/// `celsus-server reset-password <email> [--reset-2fa]`: give an account a new random password, printed once,
+/// and end its sessions. With `--reset-2fa`, two-step sign-in is turned off for it too. For an owner or admin who
+/// cannot sign in any more; it needs the server's own settings (`CELSUS_DATABASE_URL`), so only whoever runs the
+/// server can use it.
+async fn reset_password(args: &[String]) -> i32 {
+    let two_step_off = args.iter().any(|a| a == "--reset-2fa");
+    let emails: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
+    let ([email], true) = (
+        emails.as_slice(),
+        args.iter()
+            .filter(|a| a.starts_with("--"))
+            .all(|a| a == "--reset-2fa"),
+    ) else {
+        eprintln!("usage: celsus-server reset-password <email> [--reset-2fa]");
+        return 2;
+    };
+    let result = async {
+        let config = celsus_server::Config::from_env()?;
+        let pool = celsus_server::db::pool(&config.database_url)?;
+        celsus_server::db::migrate(&pool).await?;
+        let db = pool.get().await.map_err(|e| format!("database: {e}"))?;
+        celsus_server::routes::admin::reset_password(&**db, email, two_step_off).await
+    }
+    .await;
+    match result {
+        Ok(r) => {
+            println!("New password for {email}: {}", r.password);
+            println!(
+                "It is shown only this once. Sign in with it and choose a new one under Account."
+            );
+            println!("Sessions ended: {}.", r.sessions_ended);
+            if r.two_step_off {
+                println!(
+                    "Two-step sign-in is off for this account; turn it on again after signing in."
+                );
+            }
+            if r.disabled {
+                println!("This account is disabled: it cannot sign in until an admin enables it.");
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
-    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
-        std::process::exit(healthcheck());
+    let args: Vec<String> = std::env::args().collect();
+    match args.get(1).map(String::as_str) {
+        Some("healthcheck") => std::process::exit(healthcheck()),
+        Some("reset-password") => std::process::exit(reset_password(&args[2..]).await),
+        _ => {}
     }
     tracing_subscriber::fmt()
         .with_env_filter(

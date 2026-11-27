@@ -73,9 +73,10 @@ It also has a fast built-in reader with a side-by-side view of original and tran
 ## What it does not do yet
 
 - **PDF only.** EPUB and other formats are not read.
-- **Scanned books only when they carry their text.** A book scanned in black and white that can be searched
-  has its text laid on the pages, and Celsus translates it from there. A scan in grey or colour, or one that
-  is only pictures, is not read yet: Celsus does not do OCR.
+- **Scanned pages turned on their side** are not read. Other scans are: those that carry their text are
+  translated from it, and those that are only pictures are read with OCR first (the models, 31 MB, are
+  downloaded the first time, when you agree). OCR runs in the desktop app and its MCP server, not in the server
+  edition.
 - **Styles inside a paragraph** are kept for left-to-right languages. A right-to-left translation keeps the style
   of its block.
 - **Typeface matching** covers the Latin, Cyrillic and Greek alphabets. Other scripts are written with the system's

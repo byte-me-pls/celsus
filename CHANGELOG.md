@@ -2,6 +2,73 @@
 
 Versions are 0.YYMM.N: year and month of the release, then a counter for further releases in that month.
 
+## Unreleased
+
+- **Scanned books are read and translated.** A page that is only a picture of a page, with no text in it, used to have nothing to translate. Celsus now reads the words off the picture and translates them like any other text: headings, paragraphs and their sizes are found from what is read, and the translation is written in their place. Reading needs PaddleOCR's PP-OCRv6 models (31 MB, Apache 2.0). They are not part of the app: the first time a scanned book is translated, Celsus asks before downloading them once from Hugging Face, checks them and keeps them. A page takes a second or two to read, and is read once: what was found is kept with the book. Whoever would rather not download them can still translate the pages of the book that have text of their own: the scans wait. Translating from the reader asks the same. Assistants get the text of scanned pages too, a few pages at a time; when the models are missing, they go on with the other pages and are told to ask for the models to be downloaded in the app. Signs that reading misses, such as an integral sign, are covered with their line instead of being left half showing. Pages turned on their side are not read yet.
+- **Words are taken out of a scan, not covered.** The words of a scanned page used to be covered with a box of white, which showed on paper that has a grain, a stain or the shadow of the binding. Now the ink itself is taken out of the picture: it is filled from the paper around it, with the grain of the paper nearby, and the paper keeps its colour, shadows and texture where the translation goes. This works for scans in grey or colour stored as JPEG or plain samples; black and white scans, whose paper is white, and pictures in other forms (JPEG 2000, for one) are still covered.
+- **Scans in grey or colour that carry their text are translated.** Most scanned books found online are pictures in grey or colour with the words laid on them as invisible text. Only black and white scans were read that way: in the others the invisible text was passed over, so an assistant was told the pages were done when nothing on them had been translated, and the app said they had no text. Now their text is read as the scan's, and the words are taken out of the picture where the translation goes.
+- **Pages finished by assistants at the same moment are all kept.** Two assistants, or one that sends several pages at once, could each write the translated book with only their own page, and a page counted as finished was missing from the file. The book is now written by one at a time, with every page finished so far. A page is counted as finished only once it is in the file: when the file is open in another program and cannot be written, the assistant is told to close it, and the page is written the next time blocks are asked for.
+- **Pages can be translated again in the app.** A page that came out badly used to stay as it was: choosing it again only wrote it again, and the only way out was to remove the whole language. The book's page has "Translate pages already translated again", each language with pages that kept some of their text untranslated has a button to translate those again, and the reader's Translate menu offers the page in view again. The earlier translation stays in the file until the new one is done, and nothing kept of it is used.
+- **Locked PDFs open.** Many books bought or downloaded online carry a permissions password but open in any reader without one; Celsus refused all of them. Those encrypted with RC4 or AES (128 and 256 bits) and no password to open them are now read, and what Celsus writes from them is not encrypted. A PDF that does need a password to open says so, and how to add it.
+- **What was spent is counted as it is spent.** A job's tokens were counted once a run ended and started from nothing at each run: a job that was stopped, failed, retried itself or was continued, or an app that was quit or crashed, lost what had been used. Every answer is counted when it comes, the counts of all runs add up, and removing a translation or a job no longer takes what was spent out of the totals.
+- **Out of credit is said, not waited out.** A service whose account has nothing left answered like one that was busy, and the job waited and tried again for half an hour. It now stops at once and says the account is out of credit; checking the connection says so too.
+- **Adding books.**
+  - Adding several files at once ends with one account of what could not be added and why, in plain words (not a PDF, locked with a password, damaged), instead of messages that hid one another.
+  - A file that is in the library already is not added twice without asking.
+  - A dropped folder adds the PDFs in it; files that are not PDFs are said to be left out.
+  - A file that was damaged and read only as far as it could be is pointed out, since pages may be missing.
+  - Titles that a program left in a file ("Untitled", "Document1", "Layout 1") are replaced by the book's own when it is recognised, and books added before there was a model to recognise them with are recognised once one is chosen.
+  - Details being recognised while the book's page is open fill in only the fields that were not touched, and saving the page no longer puts back what was there before.
+- **Finding books and files.** The library's search finds "İstanbul" under "istanbul" and "kitabı" under "kitabi", and searches the file names too. A right click on a book offers to read, translate, open a translation, show the file in its folder or delete it. A saved translation can be opened, or shown in its folder, from the message that says where it went; saving a book that is only partly translated says so first.
+- **Backups.** Settings → Storage makes a backup of every book, its translations and the settings in a folder of your choice, and restores one, on the same computer or a new one. Keys are not in it and are entered again. The page also opens the data folder, counts the database and the OCR models in the space used, and clearing the cache says what it freed and gives the room back.
+- **Closing, quitting and coming back.** The first time the window is closed, Celsus says it goes on working beside the clock, and offers to quit instead. Quitting, from the window or the tray, while a translation runs asks first. What jobs did while the window was closed is shown on the tray icon and told when the window comes back.
+- **The queue waits for a model.** Jobs no longer fail one by one when the connection their model belongs to is removed: they wait until another is chosen, and the removal says so.
+- **The reader.**
+  - Text can be selected and copied.
+  - Links in a book work: to other places in it, and to the web.
+  - In scroll mode the keys Page Up, Page Down, Space, Home and End work at once, without first clicking a page.
+  - In page mode, when zoomed in, the wheel scrolls down the page before it turns it.
+  - The book's own page numbers (i, ii, 1, 2) are shown beside the page box and can be typed in it.
+  - Long books with pages of different sizes no longer jump as pages are drawn.
+  - While a job writes the book, the reader reads the file again only when a page in view changed, instead of every few seconds.
+  - A search shows its first result as soon as it is found.
+  - A book being read in its original is not switched to its translation when one arrives.
+- **The translated PDF.** Its bookmarks are in the translation's language where their text was translated, and it says which language it is in.
+- **Other improvements.**
+  - The cost of a translation can be estimated before it is queued, at a price per million tokens set under Settings → Translation. The estimate leaves out pages translated already.
+  - "See which ones answer" asks first: it sends a request to every model of the connection.
+  - A book is not translated into the language it is written in.
+  - A language code that Celsus does not know is refused, with the nearest one it does.
+  - The fonts folder can be picked with a button, and says how many usable fonts it holds.
+  - Colours that would leave text unreadable on its background are corrected.
+  - The model list can be used with the arrow keys and Enter.
+  - Error messages are read out by screen readers and stay until they are clicked away.
+  - Leaving a settings page with unsaved changes asks first.
+  - About has a "Check now" button.
+  - A key the system's key store will not keep or give is said to be so: saving a connection then no longer leaves a second copy of it, and a job no longer fails as if the key were wrong.
+  - Deleting a book waits for a job on it to stop.
+  - The download of the OCR models can be stopped, and gives up on a connection that stays silent.
+  - More messages are in the interface's language.
+- **Assistants.**
+  - An empty translation is never accepted, even with accept_anyway. accept_anyway can be given for one block rather than the whole batch, and the answer names each block that kept its original text.
+  - A page translated again keeps its earlier translation until every block of it has a new one: sending only part of it no longer mixes the old and the new in the book.
+  - Asking for pages the book does not have is an error, not an answer that looks finished.
+  - Ids sent as text ("1") are taken.
+  - A language given by its name ("turkish") is answered with its code.
+  - Translating a book into the language it is written in is refused.
+- **Server edition.**
+  - Scanned pages without text are no longer counted as translated: the server cannot read them, says so, and leaves them for the desktop app.
+  - Pages can be translated again, from the web interface and by assistants, and a book's translation into one language can be removed.
+  - An admin can delete a member's account, or only their private books once the account is disabled.
+  - A lost password is reset on the server with `celsus-server reset-password <email>`, and `--reset-2fa` turns off two-step sign-in too.
+  - An admin can limit how many books each member keeps and how many pages each has waiting.
+  - A damaged upload is pointed out, a PDF that needs a password says so, and running out of credit is said in so many words.
+- **Installing and removing.** The uninstaller's box that deletes the application data now says it deletes your books, translations and settings. Installing an update, or uninstalling, first stops the MCP server that other apps keep running from the install folder, which could keep it from being replaced.
+- **A new book does not inherit what was left of a deleted one.** A book takes the number of the book deleted last, and anything of that book that stayed on disk, such as text read off its scanned pages, became part of the new one.
+- **Code in parentheses is no longer cut out of a translation.** Glosses a model adds, such as "kalıcılık (persistence)", are taken out of translations; parentheses around code, as in `(( ))`, were taken for one and part of the translation went with them. Parentheses that hold tags are now left alone.
+- **Dots in code are not an ellipsis.** A translation was refused for an added ellipsis when Rust's `..` came after a full stop. Text in code is now left out of that check.
+- **Code stays whole and dark.** Words in code inside a paragraph or a table cell are no longer broken at a hyphen or a slash (`[A-Za-z0-9]`, `src/main.rs`); they move to the next line whole, and are broken only when longer than a line. Where a book sets code in a monospaced face that is not installed, a sturdy one (DejaVu Sans Mono, Cascadia Mono, Consolas) now stands in for it before Courier New, whose hairline strokes looked faint beside the text; books set in Courier keep Courier.
+
 ## 0.2611.10 (2026-11-18)
 
 - **A translation can be removed.** Each language on a book's page has a Remove button: the translated PDF, its pages, the pictures redrawn for it, its jobs and the kept translations of the book's text in that language are deleted, and the book with its other languages stays. A job translating into that language is stopped first and waited for. Text that the translated pages of another book also hold is kept.

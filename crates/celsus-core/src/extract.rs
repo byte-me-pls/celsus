@@ -93,6 +93,34 @@ impl Region {
     }
 }
 
+/// Whether `page` is only a scanned picture of a page: no text of its own, and pictures over much of it. Its
+/// words have to be read off the picture (see [`Document::set_read_lines`]) before there is anything to
+/// translate.
+pub fn picture_only(doc: &Document, page: &Page) -> bool {
+    let Ok(content) = interp::interpret(doc, page) else {
+        return false;
+    };
+    if content
+        .runs
+        .iter()
+        .any(|r| r.glyphs.iter().any(|g| !g.text.trim().is_empty()))
+    {
+        return false;
+    }
+    let [x0, y0, x1, y1] = page.crop_box.map(|v| v as f32);
+    let whole = (x1 - x0) * (y1 - y0);
+    if whole <= 0.0 {
+        return false;
+    }
+    // Scans are sometimes drawn in strips, so the pictures' shares are added up.
+    let covered: f32 = content
+        .images
+        .iter()
+        .map(|b| (b[2].min(x1) - b[0].max(x0)).max(0.0) * (b[3].min(y1) - b[1].max(y0)).max(0.0))
+        .sum();
+    covered / whole >= 0.4
+}
+
 /// Extract the blocks of `page` (number is 1-based, for the layout record).
 pub fn extract_page(doc: &Document, page: &Page, number: u32) -> celsus_pdf::Result<ExtractedPage> {
     extract_page_in(doc, page, number, &[])
@@ -163,7 +191,11 @@ pub fn extract_page_in(
             })
             .map(|(i, _)| i)
     };
-    let content = interp::interpret(doc, page)?;
+    let mut content = interp::interpret(doc, page)?;
+    // A scan without a text layer: the lines read off its picture stand in for one.
+    if let Some(lines) = doc.read_lines(number as usize) {
+        interp::add_read_lines(&mut content, &lines);
+    }
     let [cx0, _, _, cy1] = page.crop_box.map(|v| v as f32);
     let (width, height) = (page.width() as f32, page.height() as f32);
     let to_rect = |b: [f32; 4]| Rect {
@@ -178,13 +210,20 @@ pub fn extract_page_in(
     // A scanned page is a picture of the page with its text laid on it, for searching: some of it invisible,
     // some drawn over the picture's own words. Both kinds are the text of that page. They are read like any
     // other text, and remembered as lying on a scan.
-    let on_scan = |b: &[f32; 4]| {
+    let inside = |b: &[f32; 4], s: &[f32; 4]| {
         let (x, y) = ((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0);
-        content
-            .bitonal
-            .iter()
-            .any(|s| x >= s[0] && x <= s[2] && y >= s[1] && y <= s[3])
+        x >= s[0] && x <= s[2] && y >= s[1] && y <= s[3]
     };
+    let on_scan = |b: &[f32; 4]| content.bitonal.iter().any(|s| inside(b, s));
+    // A scan in grey or colour is a picture over most of the page. Invisible text on it is its text layer; text
+    // drawn on such a picture where it shows (a heading over a photograph) is ordinary text.
+    let whole = (width * height).max(1.0);
+    let page_pictures: Vec<&[f32; 4]> = content
+        .images
+        .iter()
+        .filter(|s| (s[2] - s[0]).max(0.0) * (s[3] - s[1]).max(0.0) >= whole * 0.4)
+        .collect();
+    let on_page_picture = |b: &[f32; 4]| page_pictures.iter().any(|s| inside(b, s));
     let mut glyphs = Vec::new();
     let mut scan_glyphs: HashSet<GlyphRef> = HashSet::new();
     let mut rotated_runs = Vec::new();
@@ -203,7 +242,7 @@ pub fn extract_page_in(
             if g.text.is_empty() || !g.visible {
                 continue;
             }
-            let scan = on_scan(&g.bounds);
+            let scan = on_scan(&g.bounds) || (hidden && on_page_picture(&g.bounds));
             // Invisible text anywhere else is not part of what the page shows.
             if hidden && !scan {
                 continue;
@@ -219,6 +258,24 @@ pub fn extract_page_in(
                 size: run.size,
                 at: GlyphRef { run: ri, glyph: gi },
             });
+        }
+    }
+
+    // The text layer of a scan gives its words the size of the boxes they were read in, and those differ from
+    // word to word: a word with capitals or descenders stands taller. Words near the usual size of the scan's
+    // text are of that size, so that its lines and paragraphs hold together; headings, well off it, keep theirs.
+    let mut scan_sizes: Vec<f32> = glyphs
+        .iter()
+        .filter(|g| !g.space && scan_glyphs.contains(&g.at))
+        .map(|g| g.size)
+        .collect();
+    if scan_sizes.len() >= 20 {
+        scan_sizes.sort_by(f32::total_cmp);
+        let usual = scan_sizes[scan_sizes.len() / 2];
+        for g in glyphs.iter_mut().filter(|g| scan_glyphs.contains(&g.at)) {
+            if (0.75..=1.3).contains(&(g.size / usual)) {
+                g.size = usual;
+            }
         }
     }
 

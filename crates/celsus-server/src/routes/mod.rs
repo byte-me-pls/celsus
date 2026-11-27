@@ -80,7 +80,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/keys", get(keys::list).post(keys::create))
         .route("/api/keys/{id}", delete(keys::revoke))
         .route("/api/admin/users", get(admin::users))
-        .route("/api/admin/users/{id}", patch(admin::update_user))
+        .route(
+            "/api/admin/users/{id}",
+            patch(admin::update_user).delete(admin::delete_user),
+        )
+        .route(
+            "/api/admin/users/{id}/books",
+            delete(admin::delete_user_books),
+        )
         .route("/api/admin/invites", post(admin::invite))
         .route("/api/admin/audit", get(admin::audit))
         .route(
@@ -111,6 +118,10 @@ pub fn router(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(books::COVER_LIMIT)),
         )
         .route("/api/books/{id}/pages/{lang}", get(books::pages))
+        .route(
+            "/api/books/{id}/translations/{lang}",
+            delete(books::remove_translation),
+        )
         .route("/api/books/{id}/jobs", post(books::create_job))
         .route("/api/jobs", get(books::jobs))
         .route("/api/books/{id}/pictures", get(extras::pictures))

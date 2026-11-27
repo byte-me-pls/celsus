@@ -460,14 +460,28 @@ pub(crate) fn choose<'a>(
     out
 }
 
+/// Monospaced families of an even, sturdy stroke, about as wide as Courier.
+const STURDY_MONO: &[&str] = &["DejaVu Sans Mono", "Cascadia Mono", "Consolas"];
+
 /// An installed family drawn to the widths of the one asked for.
 fn same_widths(key: &str, usable: &[&InstalledFamily]) -> Option<usize> {
     let group = SAME_WIDTHS
         .iter()
         .find(|g| g.iter().any(|name| family_key(name) == key))?;
-    group
-        .iter()
-        .find_map(|name| usable.iter().position(|f| f.key == family_key(name)))
+    let find = |name: &&str| usable.iter().position(|f| f.key == family_key(name));
+    // Courier's strokes are hairlines. A monospaced face that is not Courier itself (Liberation Mono, Cousine)
+    // looks far closer in a sturdy monospaced face of nearly its width than in Courier, which looks faint
+    // beside it; Courier stays for Courier, and for the rest when nothing else is installed.
+    let courier = |name: &str| family_key(name).starts_with("courier");
+    if group.iter().any(|name| courier(name)) && !key.starts_with("courier") {
+        return group
+            .iter()
+            .filter(|name| !courier(name))
+            .find_map(find)
+            .or_else(|| STURDY_MONO.iter().find_map(find))
+            .or_else(|| group.iter().find_map(find));
+    }
+    group.iter().find_map(find)
 }
 
 /// The installed family nearest in width, among those of the same kind of design.
@@ -551,6 +565,20 @@ mod tests {
     }
 
     /// An installed family whose letters are all of one width.
+    #[test]
+    fn a_sturdy_monospaced_face_stands_in_for_liberation_mono_and_courier_for_courier() {
+        let fams = [
+            installed("Courier New", Family::Mono, 0.6),
+            installed("Consolas", Family::Mono, 0.55),
+        ];
+        let usable: Vec<&InstalledFamily> = fams.iter().collect();
+        assert_eq!(same_widths(&family_key("LiberationMono"), &usable), Some(1));
+        assert_eq!(same_widths(&family_key("Courier"), &usable), Some(0));
+        // With Courier alone, it stays the stand-in.
+        let usable: Vec<&InstalledFamily> = fams[..1].iter().collect();
+        assert_eq!(same_widths(&family_key("LiberationMono"), &usable), Some(0));
+    }
+
     fn installed(name: &str, class: Family, width: f32) -> InstalledFamily {
         let mut widths = [0.0; 52];
         widths[..26].fill(width);

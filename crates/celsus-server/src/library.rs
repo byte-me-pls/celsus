@@ -134,7 +134,13 @@ pub struct Parsed {
     pub title: String,
     pub author: String,
     pub pages: i32,
+    /// The file was damaged and rebuilt to be read: some pages or parts of them may be missing.
+    pub repaired: bool,
 }
+
+/// Said to whoever adds a damaged file that could be read only after it was rebuilt.
+pub const REPAIRED: &str = "The PDF was damaged and had to be repaired to be read, so some pages or parts of \
+pages may be missing. If they are, add an undamaged copy of the book.";
 
 fn decode_text(bytes: &[u8]) -> String {
     if bytes.starts_with(&[0xFE, 0xFF]) {
@@ -169,8 +175,13 @@ pub fn parse(bytes: Vec<u8>, original_name: &str) -> Result<Parsed, String> {
     {
         return Err("This is not a PDF file.".into());
     }
-    let doc =
-        celsus_pdf::Document::load(bytes).map_err(|e| format!("The PDF could not be read: {e}"))?;
+    let doc = celsus_pdf::Document::load(bytes).map_err(|e| match e {
+        celsus_pdf::Error::PasswordProtected => {
+            "This PDF needs a password to open. Remove the password and add the book again."
+                .to_owned()
+        }
+        e => format!("The PDF could not be read: {e}"),
+    })?;
     let pages = doc
         .pages()
         .map_err(|e| format!("The PDF could not be read: {e}"))?;
@@ -203,6 +214,7 @@ pub fn parse(bytes: Vec<u8>, original_name: &str) -> Result<Parsed, String> {
         },
         author: info("Author"),
         pages: pages.len().min(i32::MAX as usize) as i32,
+        repaired: doc.was_repaired(),
     })
 }
 

@@ -789,3 +789,138 @@ async fn a_cover_is_kept_for_those_who_may_edit_the_book() {
     );
     s.finish().await;
 }
+
+/// Wait for a job to end; returns it.
+async fn finished(s: &Server, b: &Browser, job_id: &str) -> Value {
+    for _ in 0..200 {
+        let jobs = s.get(b, "/api/jobs").await;
+        let j = jobs.body["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["id"] == job_id)
+            .unwrap()
+            .clone();
+        if !matches!(j["status"].as_str(), Some("queued" | "running")) {
+            return j;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("the job did not end");
+}
+
+#[tokio::test]
+async fn pages_are_translated_again_and_a_translation_can_be_removed() {
+    let s = Server::new().await;
+    let owner = s.owner().await;
+    choose_fake_model(&s, &owner).await;
+    let id = id_of(&upload(&s, &owner, sample_pdf("Hello world"), "?visibility=shared").await);
+    let job = s
+        .post(
+            &owner,
+            &format!("/api/books/{id}/jobs"),
+            json!({"lang": "tr", "pages": [1]}),
+        )
+        .await;
+    let j = finished(&s, &owner, job.body["id"].as_str().unwrap()).await;
+    assert_eq!(j["status"], "done", "{j}");
+    // The same page again without asking anew: written from what was kept, nothing is asked.
+    let job = s
+        .post(
+            &owner,
+            &format!("/api/books/{id}/jobs"),
+            json!({"lang": "tr", "pages": [1]}),
+        )
+        .await;
+    let j = finished(&s, &owner, job.body["id"].as_str().unwrap()).await;
+    assert_eq!(
+        (j["status"].clone(), j["tokens"].clone()),
+        (json!("done"), json!(0)),
+        "{j}"
+    );
+    // Translated again: the model is asked once more.
+    let job = s
+        .post(
+            &owner,
+            &format!("/api/books/{id}/jobs"),
+            json!({"lang": "tr", "pages": [1], "again": true}),
+        )
+        .await;
+    let j = finished(&s, &owner, job.body["id"].as_str().unwrap()).await;
+    assert_eq!(
+        (j["status"].clone(), j["tokens"].clone()),
+        (json!("done"), json!(15)),
+        "{j}"
+    );
+    let redo: i64 = s
+        .db()
+        .await
+        .query_one("SELECT COUNT(*) FROM redo_pages", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(redo, 0, "the page is translated again to the end");
+
+    // Removing the translation: only for those who may edit the book.
+    let member = s.member(&owner, "reader@lib.test", "member").await;
+    let path = format!("/api/books/{id}/translations/tr");
+    let r = s.send(&member, Method::DELETE, &path, None, &[]).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN);
+    let r = s.send(&owner, Method::DELETE, &path, None, &[]).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    assert!(r.body["cached_translations_removed"].as_u64().unwrap() >= 1);
+    assert_eq!(
+        s.get(&owner, &format!("/api/books/{id}/file/tr"))
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+    let pages = s.get(&owner, &format!("/api/books/{id}/pages/tr")).await;
+    assert_eq!(pages.body["pages"], json!([]));
+    let db = s.db().await;
+    let left: i64 = db
+        .query_one(
+            "SELECT (SELECT COUNT(*) FROM jobs WHERE book_id = $1) + (SELECT COUNT(*) FROM translation_cache WHERE book_id = $1)",
+            &[&id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(left, 0);
+    assert!(s.audit_text().await.contains("translation_removed"));
+    // A language with nothing in it, or not a language at all.
+    let r = s.send(&owner, Method::DELETE, &path, None, &[]).await;
+    assert_eq!(r.status, StatusCode::OK);
+    let r = s
+        .send(
+            &owner,
+            Method::DELETE,
+            &format!("/api/books/{id}/translations/..%2Fx"),
+            None,
+            &[],
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+    s.finish().await;
+}
+
+#[tokio::test]
+async fn a_damaged_file_is_read_and_the_uploader_is_told() {
+    let s = Server::new().await;
+    let owner = s.owner().await;
+    // Cut short: the cross-reference table is gone, and the file is rebuilt to be read.
+    let whole = sample_pdf("Hello world");
+    let cut = whole.windows(4).position(|w| w == b"xref").unwrap();
+    let r = upload(&s, &owner, whole[..cut].to_vec(), "").await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.body);
+    assert_eq!(r.body["book"]["repaired"], true, "{:?}", r.body);
+    assert!(
+        r.body["book"]["note"]
+            .as_str()
+            .unwrap()
+            .contains("repaired")
+    );
+    let r = upload(&s, &owner, whole, "").await;
+    assert!(r.body["book"].get("repaired").is_none());
+    s.finish().await;
+}

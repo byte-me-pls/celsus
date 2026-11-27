@@ -51,9 +51,9 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
-        run: cargo clippy --locked -p celsus-pdf -p celsus-core -p celsus-store -p celsus-mcp -p celsus-server --all-targets -- -D warnings
+        run: cargo clippy --locked -p celsus-pdf -p celsus-core -p celsus-store -p celsus-mcp -p celsus-ocr -p celsus-server --all-targets -- -D warnings
       - name: Tests
-        run: cargo test --locked -p celsus-pdf -p celsus-core -p celsus-store -p celsus-mcp -p celsus-server
+        run: cargo test --locked -p celsus-pdf -p celsus-core -p celsus-store -p celsus-mcp -p celsus-ocr -p celsus-server
 
   web:
     runs-on: ubuntu-24.04

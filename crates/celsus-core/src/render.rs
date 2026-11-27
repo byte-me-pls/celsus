@@ -318,7 +318,8 @@ impl<'d> BookWriter<'d> {
         let mut shapers: Vec<Styled> = entries
             .iter()
             .map(|e| {
-                let mut shaper = Styled::new(fonts, &e.chains, rtl && !e.companion);
+                let mut shaper =
+                    Styled::new(fonts, &e.chains, rtl && !e.companion).with_code_of(e.block);
                 // A title set in a condensed face is drawn narrow again, so that it takes the room it took.
                 // Not for text from a scan: what the scan's text layer says of the widths is rough.
                 if !e.companion && !rtl && !extracted.scans.contains(&e.block.id) {
@@ -382,6 +383,15 @@ impl<'d> BookWriter<'d> {
         let (picture, inks, leaders, found) = match seen {
             Some((seen, p)) => (Some(p), seen.inks, seen.leaders, seen.bodies),
             None => (None, Vec::new(), Vec::new(), Vec::new()),
+        };
+        // The words of a scan are covered in the colour of the paper around them, which is white only where it
+        // was: paper that has yellowed is seldom of one colour from edge to edge.
+        let paper_at = |r: &Rect| {
+            picture
+                .as_ref()
+                .map_or([255; 3], |p| p.paper_near(r))
+                .map(|c| real(f64::from(c) / 255.0))
+                .join(" ")
         };
         // A face can look heavy and say it is regular: a display face drawn heavy is made that way and named
         // for nothing else. What the picture shows decides, and the translation is set in bold.
@@ -526,6 +536,9 @@ impl<'d> BookWriter<'d> {
         let mut whites = String::new();
         // The same for text that stands inside a body that moved: laid down once the body is in its new place.
         let mut whites_after = String::new();
+        // The places of the words of a scanned picture that translations go over, and how far their text was
+        // carried down with a body that moved.
+        let mut scan_covers: Vec<(Rect, f32)> = Vec::new();
         let mut insertions: Vec<Insertion> = Vec::new();
         let mut used_faces = BTreeSet::new();
         let mut drawn = 0usize;
@@ -633,16 +646,10 @@ impl<'d> BookWriter<'d> {
                 writeln!(draw, "{} cm", inv.map(real).join(" ")).unwrap();
             }
             if scan {
-                // The words of the original are in the picture and cannot be taken out of it: they are covered
-                // with the white of the paper, each line with a little room around it for the strokes that reach
-                // above and below. A page scanned in one bit a pixel has no other white.
-                // Where the page was looked at, the cover is the box of the ink that was seen there.
+                // The words of the original are in the picture: they are taken out of it, or covered, each line
+                // with a little room around it for the strokes that reach above and below. Where the page was
+                // looked at, the place is the box of the ink that was seen there.
                 let (dx, dy) = (b.style.font_size * 0.3, b.style.font_size * 0.22);
-                let out = if carried > 0.3 {
-                    &mut whites_after
-                } else {
-                    &mut whites
-                };
                 for (n, line) in b.lines.iter().enumerate() {
                     let r = match inks.get(line0 + n) {
                         Some(Some(ink)) => Rect {
@@ -659,17 +666,7 @@ impl<'d> BookWriter<'d> {
                             y1: line.rect.y1 + dy,
                         },
                     };
-                    let mut cover = |r: &Rect| {
-                        writeln!(
-                            out,
-                            "{} {} {} {} re",
-                            real(cx0 + f64::from(r.x0)),
-                            real(cy1 - f64::from(r.y1 + carried)),
-                            real(f64::from(r.x1 - r.x0)),
-                            real(f64::from(r.y1 - r.y0))
-                        )
-                        .unwrap();
-                    };
+                    let mut cover = |r: &Rect| scan_covers.push((*r, carried));
                     cover(&r);
                     // A row of dots that led on from the line gives way to a longer line: as much of it is
                     // covered as the new text takes, and a little more, so that the dots begin after a space.
@@ -968,8 +965,56 @@ impl<'d> BookWriter<'d> {
             );
             stream.extend_from_slice(fill.as_bytes());
         }
+        // The words of a scanned picture that can be taken apart are taken out of it, so that the paper shows
+        // as it is; elsewhere (a picture in one bit a pixel, whose paper is white, or one in a form that is not
+        // read) they are covered in the colour of the paper around them.
+        if !scan_covers.is_empty() {
+            let mut seen = BTreeSet::new();
+            let mut scans: Vec<crate::erase::Scan> = extracted
+                .content
+                .pictures
+                .iter()
+                .filter(|(id, _)| seen.insert(*id))
+                .filter_map(|(id, ctm)| crate::erase::Scan::open(self.doc, *id, ctm))
+                .collect();
+            for (r, carried) in &scan_covers {
+                let on_page = [
+                    cx0 + f64::from(r.x0),
+                    cy1 - f64::from(r.y1),
+                    cx0 + f64::from(r.x1),
+                    cy1 - f64::from(r.y0),
+                ];
+                if scans.iter_mut().any(|s| s.clear(on_page)) {
+                    continue;
+                }
+                let out = if *carried > 0.3 {
+                    &mut whites_after
+                } else {
+                    &mut whites
+                };
+                writeln!(
+                    out,
+                    "{} rg {} {} {} {} re f",
+                    paper_at(r),
+                    real(cx0 + f64::from(r.x0)),
+                    real(cy1 - f64::from(r.y1 + carried)),
+                    real(f64::from(r.x1 - r.x0)),
+                    real(f64::from(r.y1 - r.y0))
+                )
+                .unwrap();
+            }
+            for scan in scans.into_iter().filter(crate::erase::Scan::changed) {
+                let id = scan.id;
+                if let Some(stream) = scan
+                    .finish()
+                    .and_then(|jpeg| celsus_pdf::image::jpeg_xobject(&jpeg))
+                {
+                    self.saver.set(id, Object::Stream(stream));
+                }
+            }
+        }
         if !whites.is_empty() {
-            stream.extend_from_slice(format!("q 1 1 1 rg\n{whites}f Q\n").as_bytes());
+            stream.extend_from_slice(format!("q\n{whites}Q\n").as_bytes());
         }
         // Then each body in its new place: the page's content once more, moved down, and of it only what shows
         // through the new places of the bodies that went this far.
@@ -996,7 +1041,7 @@ impl<'d> BookWriter<'d> {
             stream.extend_from_slice(b"Q\n");
         }
         if !whites_after.is_empty() {
-            stream.extend_from_slice(format!("q 1 1 1 rg\n{whites_after}f Q\n").as_bytes());
+            stream.extend_from_slice(format!("q\n{whites_after}Q\n").as_bytes());
         }
         stream.extend_from_slice(drawn_last.as_bytes());
         let contents = self.saver.add(Object::Stream(Stream {
@@ -1109,6 +1154,89 @@ impl<'d> BookWriter<'d> {
         Ok(())
     }
 
+    /// Mark the file as written in `to` (the catalog's `/Lang`), and put the translations of the outline's titles
+    /// (bookmarks) and of the document's title in place of the originals, where `translated` knows them. It is
+    /// given a title with its spaces collapsed, as the cache keeps headings; what it does not know stays as it
+    /// was. Always worked out from the original document, so it can be done again as more becomes known.
+    pub fn label(&mut self, to: &crate::Language, translated: &dyn Fn(&str) -> Option<String>) {
+        /// More entries than any book's outline has; a file made to waste time stops here.
+        const MOST: usize = 20_000;
+        let doc = self.doc;
+        let title_of = |dict: &Dict| -> Option<String> {
+            let original = doc.get_in(dict, "Title")?;
+            let text = celsus_pdf::object::decode_text(original.as_str_bytes()?);
+            let text = text.replace('\0', "");
+            let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            if text.is_empty() {
+                return None;
+            }
+            let translation = inline::strip_marks(&translated(&text)?);
+            let translation = translation.trim();
+            (!translation.is_empty() && translation != text).then(|| translation.to_owned())
+        };
+        let retitle = |saver: &mut Saver, id: ObjRef, title: String| {
+            if let Ok(Object::Dict(mut dict)) = saver.get(id) {
+                dict.insert(
+                    b"Title".to_vec(),
+                    Object::String(celsus_pdf::object::encode_text(&title)),
+                );
+                saver.set(id, Object::Dict(dict));
+            }
+        };
+
+        let Some(root) = doc.trailer.get(&b"Root"[..]).and_then(Object::as_ref) else {
+            return;
+        };
+        if let Ok(Object::Dict(mut catalog)) = self.saver.get(root) {
+            catalog.insert(
+                b"Lang".to_vec(),
+                Object::String(to.as_str().as_bytes().to_vec()),
+            );
+            self.saver.set(root, Object::Dict(catalog));
+        }
+
+        // The outline is a tree of entries linked by /First and /Next.
+        let outlines = doc
+            .catalog()
+            .ok()
+            .and_then(|c| c.as_dict().and_then(|c| c.get(&b"Outlines"[..]).cloned()));
+        let mut stack: Vec<ObjRef> = outlines
+            .and_then(|o| doc.resolve(&o).ok())
+            .and_then(|o| {
+                o.as_dict()
+                    .and_then(|d| d.get(&b"First"[..]))
+                    .and_then(Object::as_ref)
+            })
+            .into_iter()
+            .collect();
+        let mut seen = BTreeSet::new();
+        while let Some(id) = stack.pop() {
+            if seen.len() >= MOST || !seen.insert(id.num) {
+                continue;
+            }
+            let Ok(entry) = doc.get(id) else { continue };
+            let Some(dict) = entry.as_dict() else {
+                continue;
+            };
+            for key in ["Next", "First"] {
+                if let Some(next) = dict.get(key.as_bytes()).and_then(Object::as_ref) {
+                    stack.push(next);
+                }
+            }
+            if let Some(title) = title_of(dict) {
+                retitle(&mut self.saver, id, title);
+            }
+        }
+
+        // The document's title, when its information dictionary is an object of its own.
+        if let Some(info) = doc.trailer.get(&b"Info"[..]).and_then(Object::as_ref)
+            && let Ok(dict) = doc.get(info)
+            && let Some(title) = dict.as_dict().and_then(title_of)
+        {
+            retitle(&mut self.saver, info, title);
+        }
+    }
+
     /// Embed the fonts and produce the new file.
     pub fn finish(mut self) -> celsus_pdf::Result<Vec<u8>> {
         let mut saver = std::mem::replace(&mut self.saver, Saver::new(self.doc));
@@ -1177,6 +1305,8 @@ fn document_fonts(doc: &Document) -> Vec<Font> {
 /// with it says with marks where each style begins (see [`crate::inline`]).
 struct Styled<'f> {
     shapers: Vec<Shaper<'f>>,
+    /// The styles set in a monospaced face inside the block: code, kept whole on a line.
+    code: Vec<bool>,
     /// How much narrower the letters are drawn than the fonts have them: the original was set in a condensed
     /// face, and none of the fonts is one.
     narrow: f32,
@@ -1195,8 +1325,22 @@ impl<'f> Styled<'f> {
                 .iter()
                 .map(|chain| Shaper::new(fonts, chain.clone(), rtl))
                 .collect(),
+            code: Vec::new(),
             narrow: 1.0,
         }
+    }
+
+    /// Know which of the styles of `block` are code: monospaced words in a text that is not.
+    fn with_code_of(mut self, block: &TextBlock) -> Self {
+        self.code = std::iter::once(false)
+            .chain(
+                block
+                    .inline
+                    .iter()
+                    .map(|s| s.monospace && !block.style.monospace),
+            )
+            .collect();
+        self
     }
 
     /// How wide the original letters of `block` are against these fonts' letters for the same words, when the
@@ -1236,6 +1380,10 @@ impl<'f> Styled<'f> {
 }
 
 impl Measure for Styled<'_> {
+    fn keeps_together(&self, style: usize) -> bool {
+        self.code.get(style).copied().unwrap_or(false)
+    }
+
     fn width(&self, text: &str, size: f32) -> f32 {
         if self.shapers.len() == 1 {
             return self.shapers[0].width(text, size) * self.narrow;
@@ -1357,4 +1505,78 @@ fn write_run(
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02X}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A file of numbered objects with a cross-reference table.
+    fn file(objects: &[&str]) -> Vec<u8> {
+        let mut pdf = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, body) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", i + 1).as_bytes());
+        }
+        let at = pdf.len();
+        let mut xref = format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1);
+        for o in offsets {
+            xref.push_str(&format!("{o:010} 00000 n \n"));
+        }
+        pdf.extend_from_slice(
+            format!(
+                "{xref}trailer\n<< /Size {} /Root 1 0 R /Info 7 0 R >>\nstartxref\n{at}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        pdf
+    }
+
+    fn title(doc: &Document, id: u32) -> String {
+        let obj = doc
+            .get(ObjRef {
+                num: id,
+                generation: 0,
+            })
+            .unwrap();
+        let title = doc.get_in(obj.as_dict().unwrap(), "Title").unwrap();
+        celsus_pdf::object::decode_text(title.as_str_bytes().unwrap())
+    }
+
+    #[test]
+    fn bookmarks_and_title_are_written_in_the_language_of_the_translation() {
+        let pdf = file(&[
+            "<< /Type /Catalog /Pages 2 0 R /Outlines 4 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+            "<< /Type /Outlines /First 5 0 R /Last 6 0 R /Count 2 >>",
+            // Spaces in a title are collapsed before it is looked up; a child is reached through /First.
+            "<< /Title (The  First\nChapter) /Parent 4 0 R /Next 6 0 R /First 8 0 R /Last 8 0 R >>",
+            "<< /Title <FEFF0049006E006400650078> /Parent 4 0 R /Prev 5 0 R >>",
+            "<< /Title (A Book) /Producer (tests) >>",
+            "<< /Title (A Section) /Parent 5 0 R >>",
+        ]);
+        let doc = Document::load(pdf).unwrap();
+        let mut writer = BookWriter::new(&doc, &FontSet::default());
+        let known: BTreeMap<&str, &str> = [
+            ("The First Chapter", "Birinci Bölüm"),
+            ("A Section", "Bir \u{F0001}Kısım"),
+        ]
+        .into_iter()
+        .collect();
+        let to: crate::Language = "tr".parse().unwrap();
+        writer.label(&to, &|text| known.get(text).map(|t| t.to_string()));
+        let out = Document::load(writer.finish().unwrap()).unwrap();
+        let catalog = out.catalog().unwrap();
+        let lang = out.get_in(catalog.as_dict().unwrap(), "Lang").unwrap();
+        assert_eq!(lang.as_str_bytes(), Some(&b"tr"[..]));
+        assert_eq!(title(&out, 5), "Birinci Bölüm");
+        // Marks of style that translations carry are taken out.
+        assert_eq!(title(&out, 8), "Bir Kısım");
+        // Without a translation the original stays, the document's title too.
+        assert_eq!(title(&out, 6), "Index");
+        assert_eq!(title(&out, 7), "A Book");
+    }
 }

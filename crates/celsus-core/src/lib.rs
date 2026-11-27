@@ -4,6 +4,7 @@
 
 pub mod assist;
 pub mod base64;
+pub mod erase;
 pub mod extract;
 pub mod fit;
 pub mod fonts;

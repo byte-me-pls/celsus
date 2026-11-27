@@ -1,12 +1,12 @@
 //! The translation queue: one job at a time (a Raspberry Pi has little to spare), surviving restarts.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use celsus_core::fonts::FontSet;
-use celsus_core::pipeline::{Options, Progress, translate_document};
+use celsus_core::pipeline::{Cache, Options, Progress, translate_document};
 use celsus_core::provider::OpenAiCompatible;
 use tokio::runtime::Handle;
 use tokio::sync::Notify;
@@ -182,6 +182,39 @@ async fn db_setting(state: &AppState, key: &str) -> Option<String> {
         .map(|r| r.get(0))
 }
 
+/// The kept translations, for a job that translates some pages anew: the kept translations of those pages'
+/// text count as not there until they have been asked for again. What comes back is kept as their translation
+/// from then on, also when the job is stopped and goes on later.
+struct Again {
+    inner: PgCache,
+    lang: String,
+    /// The keys of the text of the pages translated anew.
+    stale: HashSet<String>,
+    /// Those of them translated anew already.
+    fresh: HashSet<String>,
+}
+
+impl Cache for Again {
+    fn get(&self, key: &str) -> Option<String> {
+        if self.stale.contains(key) && !self.fresh.contains(key) {
+            return None;
+        }
+        self.inner.get(key)
+    }
+
+    fn put(&mut self, key: &str, translation: &str) {
+        if self.stale.contains(key) && self.fresh.insert(key.to_owned()) {
+            let _ = self.inner.handle.block_on(crate::assist::add_redo_keys(
+                &self.inner.state,
+                &self.inner.book_id,
+                &self.lang,
+                &[key.to_owned()],
+            ));
+        }
+        self.inner.put(key, translation);
+    }
+}
+
 /// Run one job. `Ok(true)` means it was cancelled part way; what was done is kept.
 async fn run_job(state: &AppState, id: &str, cancel: Arc<AtomicBool>) -> Result<bool, String> {
     let db = state.pool.get().await.map_err(|e| e.to_string())?;
@@ -256,12 +289,22 @@ async fn run_job(state: &AppState, id: &str, cancel: Arc<AtomicBool>) -> Result<
         .collect();
     options.pages = all.into_iter().collect();
     let wanted: BTreeSet<usize> = wanted.iter().map(|&p| p as usize).collect();
+    // Pages to be translated anew: their earlier translation stays in the file until the new one is done.
+    let again: BTreeSet<usize> = crate::assist::redo_pages(state, &book_id, &lang)
+        .await
+        .map_err(|e| e.message)?
+        .into_iter()
+        .filter(|p| wanted.contains(p))
+        .collect();
+    let fresh_keys = crate::assist::redo_keys(state, &book_id, &lang)
+        .await
+        .map_err(|e| e.message)?;
     // What is left to do. A job that was stopped goes on from where it was: its pages that are translated
-    // already count as done from the start.
+    // already count as done from the start, unless they are to be translated anew.
     let todo: BTreeSet<usize> = wanted
         .iter()
         .copied()
-        .filter(|p| !done.contains(&(*p as i32)))
+        .filter(|p| !done.contains(&(*p as i32)) || again.contains(p))
         .collect();
     // Pages translated before are only written again: nothing is asked, and so nothing is paid, for them.
     options.settled = options
@@ -292,10 +335,18 @@ async fn run_job(state: &AppState, id: &str, cancel: Arc<AtomicBool>) -> Result<
     let (bytes, outcome, unfinished, no_text) = tokio::task::spawn_blocking(move || {
         let fonts = FontSet::for_language(&fonts_dir, &target);
         let doc = celsus_pdf::Document::open(&source).map_err(|e| e.to_string())?;
-        let mut cache = PgCache {
-            state: st.clone(),
-            handle: handle.clone(),
-            book_id: cache_book,
+        let again_pages: Vec<usize> = again.iter().copied().collect();
+        let mut cache = Again {
+            inner: PgCache {
+                state: st.clone(),
+                handle: handle.clone(),
+                book_id: cache_book,
+            },
+            lang: lang.clone(),
+            stale: celsus_core::pipeline::keys_of(&doc, &target, &again_pages)
+                .into_iter()
+                .collect(),
+            fresh: fresh_keys,
         };
         let mut done = already;
         // Pages translated by this run.
@@ -344,6 +395,9 @@ async fn run_job(state: &AppState, id: &str, cancel: Arc<AtomicBool>) -> Result<
                                     &[&book_id, &lang, &(page as i32), &(kept as i32)],
                                 )
                                 .await;
+                            if again.contains(&page) {
+                                let _ = crate::assist::finish_redo(&st, &book_id, &lang, &[page]).await;
+                            }
                         }
                         // It stays as the original in the new file, and is not called translated any more.
                         if gone {

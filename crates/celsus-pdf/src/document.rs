@@ -4,6 +4,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use crate::crypt::Crypt;
 use crate::filters;
 use crate::lexer::{Lexer, Token};
 use crate::object::{Dict, ObjRef, Object, Stream, get, numbers};
@@ -57,6 +58,8 @@ pub struct Document {
     objstm: RefCell<HashMap<u32, Rc<ObjStm>>>,
     /// The file needed reconstruction because its cross-reference data was broken.
     pub repaired: bool,
+    /// How the file is encrypted, when it is. Objects are decrypted as they are read.
+    crypt: Option<Crypt>,
     /// How many objects are being loaded inside one another right now.
     nesting: Cell<usize>,
     /// Bytes of the file parsed into objects, and bytes of decoded object streams kept. Objects in a sound file
@@ -64,6 +67,9 @@ pub struct Document {
     /// stream would otherwise be copied once per entry.
     parsed: Cell<usize>,
     unpacked: Cell<usize>,
+    /// Lines read off the pictures of pages that carry no text of their own (a scan without a text layer), by
+    /// page number from 1. They are read as the invisible text a scan's text layer would be.
+    read: RefCell<HashMap<usize, Vec<crate::interp::ScanLine>>>,
 }
 
 impl Document {
@@ -75,21 +81,109 @@ impl Document {
             cache: RefCell::new(HashMap::new()),
             objstm: RefCell::new(HashMap::new()),
             repaired: false,
+            crypt: None,
             nesting: Cell::new(0),
             parsed: Cell::new(0),
             unpacked: Cell::new(0),
+            read: RefCell::new(HashMap::new()),
         };
         let read = doc.read_xref_chain();
+        let unlocked = match read {
+            Ok(()) => doc.unlock(),
+            Err(_) => Ok(()),
+        };
+        // A file that cannot be decrypted is refused as it is; repairing it would not help.
+        if let Err(e @ (Error::PasswordProtected | Error::Encrypted | Error::Unsupported(_))) =
+            unlocked
+        {
+            return Err(e);
+        }
         if read.is_err()
+            || unlocked.is_err()
             || doc.catalog().is_err()
             || doc.pages().map(|p| p.is_empty()).unwrap_or(true)
         {
             doc.reconstruct()?;
         }
-        if get(&doc.trailer, "Encrypt").is_some() {
-            return Err(Error::Encrypted);
-        }
         Ok(doc)
+    }
+
+    /// Whether the file was damaged (cut short, or with broken cross-reference data) and had to be rebuilt by
+    /// scanning it for objects. Such a file usually reads fine, but parts of it may be missing.
+    pub fn was_repaired(&self) -> bool {
+        self.repaired
+    }
+
+    /// Whether the file was encrypted. It is decrypted as it is read, and saved copies are not encrypted.
+    pub fn was_encrypted(&self) -> bool {
+        self.crypt.is_some()
+    }
+
+    /// Set up decryption from the trailer's `/Encrypt`, if there is one. Everything loaded before is dropped,
+    /// since it was read without decryption.
+    fn unlock(&mut self) -> Result<()> {
+        self.crypt = None;
+        self.forget();
+        let Some(entry) = get(&self.trailer, "Encrypt").cloned() else {
+            return Ok(());
+        };
+        let dict_num = entry.as_ref().map(|r| r.num);
+        let encrypt = self.inline(&entry, 3);
+        let Object::Dict(encrypt) = encrypt else {
+            // `/Encrypt null`, or a reference to nothing, means the file is not encrypted.
+            if encrypt.is_null() {
+                return Ok(());
+            }
+            return Err(Error::Corrupt("encryption dictionary".into()));
+        };
+        let id0 = get(&self.trailer, "ID")
+            .map(|id| self.inline(id, 2))
+            .and_then(|id| {
+                id.as_array()
+                    .and_then(|a| a.first())
+                    .and_then(Object::as_str_bytes)
+                    .map(<[u8]>::to_vec)
+            })
+            .unwrap_or_default();
+        let crypt = Crypt::open(&encrypt, dict_num, &id0)?;
+        self.forget();
+        self.crypt = Some(crypt);
+        Ok(())
+    }
+
+    /// A copy of `obj` with references replaced by what they point at, `depth` levels down.
+    fn inline(&self, obj: &Object, depth: usize) -> Object {
+        let obj = match obj {
+            Object::Ref(_) => match self.resolve(obj) {
+                Ok(o) => (*o).clone(),
+                Err(_) => Object::Null,
+            },
+            other => other.clone(),
+        };
+        if depth == 0 {
+            return obj;
+        }
+        match obj {
+            Object::Array(a) => {
+                Object::Array(a.iter().map(|o| self.inline(o, depth - 1)).collect())
+            }
+            Object::Dict(d) => Object::Dict(
+                d.iter()
+                    .map(|(k, v)| (k.clone(), self.inline(v, depth - 1)))
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+
+    /// Give page `number` (from 1) the lines read off its picture.
+    pub fn set_read_lines(&self, number: usize, lines: Vec<crate::interp::ScanLine>) {
+        self.read.borrow_mut().insert(number, lines);
+    }
+
+    /// The lines read off the picture of page `number` (from 1), if it was read.
+    pub fn read_lines(&self, number: usize) -> Option<Vec<crate::interp::ScanLine>> {
+        self.read.borrow().get(&number).cloned()
     }
 
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
@@ -256,6 +350,7 @@ impl Document {
     fn reconstruct(&mut self) -> Result<()> {
         self.repaired = true;
         self.xref.clear();
+        self.crypt = None;
         self.forget();
         let data = &self.data;
         let mut found: Vec<(u32, u16, usize)> = Vec::new();
@@ -288,13 +383,45 @@ impl Document {
         for (num, generation, start) in found {
             self.xref.insert(num, (Entry::Offset(start), generation)); // later definitions win
         }
-        // Objects inside object streams, and an xref stream that may hold the trailer keys.
+        let orphan = self.index_packed(&mut trailer);
+        // In an encrypted file the object streams could not be read before the key was known.
+        if get(&trailer, "Encrypt").is_some() {
+            self.trailer = trailer.clone();
+            match self.unlock() {
+                Ok(()) => {}
+                Err(Error::PasswordProtected) => return Err(Error::PasswordProtected),
+                Err(_) => {
+                    return Err(Error::Corrupt(
+                        "the file is locked, and the part needed to unlock it is damaged".into(),
+                    ));
+                }
+            }
+            self.index_packed(&mut trailer);
+        } else if orphan || mentions_encryption(&self.data) {
+            return Err(Error::Corrupt(
+                "the file is locked, and the part needed to unlock it is missing".into(),
+            ));
+        }
+        self.cache.borrow_mut().clear();
+        self.parsed.set(0);
+        if get(&trailer, "Root").is_none() {
+            return Err(Error::Corrupt("no document catalog".into()));
+        }
+        self.trailer = trailer;
+        Ok(())
+    }
+
+    /// Find the objects packed in object streams, and the trailer keys if no trailer was found yet. Returns
+    /// whether an encryption dictionary turned up as an object of its own.
+    fn index_packed(&mut self, trailer: &mut Dict) -> bool {
+        let mut encryption = false;
+        // The newest cross-reference stream (the one furthest into the file), which carries the trailer keys.
+        let mut newest: Option<(usize, Dict)> = None;
+        let mut catalog = None;
         let ids: Vec<u32> = self.xref.keys().copied().collect();
         for num in ids {
-            let Ok(obj) = self.get(ObjRef {
-                num,
-                generation: self.xref[&num].1,
-            }) else {
+            let (entry, generation) = self.xref[&num];
+            let Ok(obj) = self.get(ObjRef { num, generation }) else {
                 continue;
             };
             let Some(dict) = obj.as_dict() else { continue };
@@ -311,20 +438,53 @@ impl Document {
                         }
                     }
                 }
-                Some(b"XRef") if get(&trailer, "Root").is_none() => trailer = dict.clone(),
-                Some(b"Catalog") if get(&trailer, "Root").is_none() => {
-                    trailer.insert(b"Root".to_vec(), Object::Ref(ObjRef { num, generation: 0 }));
+                Some(b"XRef") => {
+                    let at = match entry {
+                        Entry::Offset(at) => at,
+                        Entry::Compressed { .. } => 0,
+                    };
+                    if newest.as_ref().is_none_or(|(seen, _)| at > *seen) {
+                        newest = Some((at, dict.clone()));
+                    }
                 }
-                _ => {}
+                Some(b"Catalog") => catalog = Some(num),
+                _ => {
+                    encryption |= get(dict, "Filter").and_then(Object::as_name)
+                        == Some(b"Standard")
+                        && get(dict, "O").is_some()
+                        && get(dict, "U").is_some();
+                }
             }
         }
-        self.cache.borrow_mut().clear();
-        self.parsed.set(0);
-        if get(&trailer, "Root").is_none() {
-            return Err(Error::Corrupt("no document catalog".into()));
+        if get(trailer, "Root").is_none()
+            && let Some((_, dict)) = newest
+            && get(&dict, "Root").is_some()
+        {
+            *trailer = dict;
         }
-        self.trailer = trailer;
-        Ok(())
+        if get(trailer, "Root").is_none() {
+            // The catalog may itself be packed in one of the object streams just indexed.
+            if catalog.is_none() {
+                let packed: Vec<u32> = self
+                    .xref
+                    .iter()
+                    .filter(|(_, (e, _))| matches!(e, Entry::Compressed { .. }))
+                    .map(|(&num, _)| num)
+                    .collect();
+                catalog = packed.into_iter().find(|&num| {
+                    self.get(ObjRef { num, generation: 0 }).is_ok_and(|o| {
+                        o.as_dict()
+                            .and_then(|d| get(d, "Type"))
+                            .and_then(Object::as_name)
+                            == Some(b"Catalog")
+                    })
+                });
+            }
+            if let Some(num) = catalog {
+                trailer.insert(b"Root".to_vec(), Object::Ref(ObjRef { num, generation: 0 }));
+            }
+        }
+        encryption
     }
 
     /// Drop everything loaded so far.
@@ -501,7 +661,13 @@ impl Document {
     fn load_object(&self, id: ObjRef) -> Result<Object> {
         Ok(match self.xref.get(&id.num) {
             None | Some((Entry::Offset(0), _)) => Object::Null,
-            Some((Entry::Offset(off), _)) => self.parse_indirect_at(*off)?.1,
+            Some((Entry::Offset(off), _)) => {
+                let (found, obj) = self.parse_indirect_at(*off)?;
+                match &self.crypt {
+                    Some(crypt) => crypt.decrypt_object(found, obj),
+                    None => obj,
+                }
+            }
             Some((Entry::Compressed { stream, index }, _)) => {
                 if *stream == id.num {
                     return Err(Error::Corrupt("object stream contains itself".into()));
@@ -703,6 +869,22 @@ struct Inherited {
 
 pub(crate) fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Whether the file names an `/Encrypt` entry anywhere, which in a file whose trailer is lost means its objects
+/// are encrypted with a key that can no longer be found.
+fn mentions_encryption(data: &[u8]) -> bool {
+    let mut at = 0;
+    while let Some(rel) = find(&data[at..], b"/Encrypt") {
+        at += rel + 8;
+        if data
+            .get(at)
+            .is_none_or(|b| crate::lexer::is_whitespace(*b) || crate::lexer::is_delimiter(*b))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {

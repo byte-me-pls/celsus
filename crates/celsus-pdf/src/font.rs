@@ -58,6 +58,30 @@ pub struct Glyph {
 }
 
 impl Font {
+    /// The font of words read off a picture: no file of its own, an ordinary serif face as far as anyone asks.
+    pub fn read_off_picture() -> Font {
+        Font {
+            id: None,
+            name: "Times-Roman".into(),
+            kind: FontKind::Simple,
+            vertical: false,
+            bold: false,
+            italic: false,
+            serif: true,
+            fixed_pitch: false,
+            ascent: 0.75,
+            descent: -0.25,
+            letters: Vec::new(),
+            simple_unicode: Vec::new(),
+            simple_widths: Vec::new(),
+            cmap: CMap::default(),
+            to_unicode: None,
+            cid_widths: HashMap::new(),
+            default_width: 0.5,
+            width_scale: 0.001,
+        }
+    }
+
     pub fn load(doc: &Document, dict: &Dict, id: Option<ObjRef>) -> Font {
         let subtype = get(dict, "Subtype")
             .and_then(Object::as_name)

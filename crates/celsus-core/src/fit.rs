@@ -9,6 +9,12 @@ use crate::inline;
 /// Measures text in a given font. Widths are in points.
 pub trait Measure {
     fn width(&self, text: &str, size: f32) -> f32;
+    /// Whether words in inline style `style` (see [`crate::inline`]) are kept whole on a line: code, where
+    /// `[A-Za-z0-9]` or `src/main.rs` broken at its hyphen or slash would read as two things. Such words are
+    /// still broken where they are longer than a line.
+    fn keeps_together(&self, _style: usize) -> bool {
+        false
+    }
     /// Ascender as a fraction of the font size.
     fn ascent(&self) -> f32;
     /// Descender as a positive fraction of the font size.
@@ -90,6 +96,9 @@ pub fn wrap_widths(
         let mut line = String::new();
         let mut from = 0;
         for (to, _) in unicode_linebreak::linebreaks(&paragraph) {
+            if inside_kept_words(&paragraph, to, m) {
+                continue;
+            }
             let piece = &paragraph[from..to];
             from = to;
             let candidate = format!("{line}{piece}");
@@ -125,6 +134,26 @@ pub fn wrap_widths(
         end_line(&mut lines, &mut line);
     }
     lines
+}
+
+/// Whether a break at byte `at` of `text` would fall inside a word of a style kept together: not after a space,
+/// and not where the style changes.
+fn inside_kept_words(text: &str, at: usize, m: &dyn Measure) -> bool {
+    if at >= text.len() || text[..at].ends_with(char::is_whitespace) {
+        return false;
+    }
+    if text[at..]
+        .chars()
+        .next()
+        .and_then(inline::style_of)
+        .is_some()
+    {
+        return false;
+    }
+    let style = inline::last_mark(&text[..at])
+        .and_then(inline::style_of)
+        .unwrap_or(0);
+    m.keeps_together(style)
 }
 
 /// Nothing to print: spaces, and the marks that say which style the words after them are in.
@@ -324,6 +353,38 @@ mod tests {
         .unwrap();
         assert_eq!(f.lines, vec!["kısa", "uzun bir giriş"]);
         assert!(f.size < 10.0 && f.size >= 6.2, "size {}", f.size);
+    }
+
+    /// Style 1 is code.
+    struct Code;
+    impl Measure for Code {
+        fn width(&self, text: &str, size: f32) -> f32 {
+            inline::strip_marks(text).chars().count() as f32 * size * 0.5
+        }
+        fn ascent(&self) -> f32 {
+            0.8
+        }
+        fn descent(&self) -> f32 {
+            0.2
+        }
+        fn keeps_together(&self, style: usize) -> bool {
+            style == 1
+        }
+    }
+
+    #[test]
+    fn code_is_not_broken_at_its_hyphens() {
+        let code = |s: &str| format!("{}{s}{}", inline::mark(1), inline::mark(0));
+        let text = format!("eşdeğerdir: {}", code("[A-Za-z0-9]"));
+        // 12 + 11 letters; a line of 18 would end after "[A-Za-" if the code could be broken there.
+        let lines: Vec<String> = wrap_widths(&text, &|_| 18.0 * 5.0, 10.0, &Code)
+            .iter()
+            .map(|l| inline::strip_marks(l))
+            .collect();
+        assert_eq!(lines, ["eşdeğerdir:", "[A-Za-z0-9]"]);
+        // Ordinary words still break at their hyphens.
+        let lines = wrap_widths("eşdeğerdir: well-known-words", &|_| 18.0 * 5.0, 10.0, &Code);
+        assert_eq!(lines[0], "eşdeğerdir: well-");
     }
 
     #[test]

@@ -258,7 +258,10 @@ pub fn strip_source_glosses(source: &str, translation: &str) -> String {
             break;
         };
         let inner = rest[open + 1..close].trim();
+        // Parentheses around tags are not a gloss: they may be code's own, as in `(( ))`, and taking them out
+        // would cut the tags apart.
         let repeats_source = !inner.is_empty()
+            && !inner.contains(['<', '>'])
             && inner.chars().any(char::is_alphabetic)
             && lower_source.contains(&inner.to_lowercase())
             && !lower_source.contains(&rest[open..=close].to_lowercase());
@@ -326,6 +329,33 @@ fn only_names(text: &str) -> bool {
     })
 }
 
+/// Whether a text has an ellipsis. ". . ." with spaces is how many books typeset one.
+fn has_ellipsis(s: &str) -> bool {
+    let squeezed: String = s.chars().filter(|c| *c != ' ').collect();
+    squeezed.contains("...") || s.contains('…')
+}
+
+/// The text without what is in `<code>` tags (any number), and without the other tags.
+fn outside_code(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("<code") {
+        let Some(gt) = rest[start..].find('>').map(|g| start + g) else {
+            break;
+        };
+        let name = &rest[start + 1..gt];
+        let closing = format!("</{name}>");
+        let Some(end) = rest[gt..].find(&closing).map(|e| gt + e + closing.len()) else {
+            break;
+        };
+        out.push_str(&rest[..start]);
+        out.push(' ');
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    inline::without_tags(&out)
+}
+
 /// Local checks of one translation against its source.
 pub fn check(source: &str, translation: &str) -> Vec<Problem> {
     // The tags around words printed in another style are looked at on their own; the rest is about the text.
@@ -336,6 +366,13 @@ pub fn check(source: &str, translation: &str) -> Vec<Problem> {
         );
         if !inline::tags_kept(source, translation) {
             problems.push(Problem::Tags);
+        }
+        // Dots in code are code (Rust's `..`, a path's `../`): next to a full stop of the sentence they would
+        // read as an ellipsis.
+        if problems.contains(&Problem::InventedEllipsis)
+            && (!has_ellipsis(&outside_code(translation)) || has_ellipsis(&outside_code(source)))
+        {
+            problems.retain(|p| *p != Problem::InventedEllipsis);
         }
         return problems;
     }
@@ -362,12 +399,7 @@ pub fn check(source: &str, translation: &str) -> Vec<Problem> {
     if words >= 3 && norm(source) == norm(translation) && !only_names(source) {
         problems.push(Problem::Untranslated);
     }
-    // ". . ." with spaces is how many books typeset an ellipsis.
-    let ellipsis = |s: &str| {
-        let squeezed: String = s.chars().filter(|c| *c != ' ').collect();
-        squeezed.contains("...") || s.contains('…')
-    };
-    if ellipsis(translation) && !ellipsis(source) {
+    if has_ellipsis(translation) && !has_ellipsis(source) {
         problems.push(Problem::InventedEllipsis);
     }
     // An explanation in parentheses that the source does not have.
@@ -390,6 +422,34 @@ pub fn check(source: &str, translation: &str) -> Vec<Problem> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn code_with_parentheses_or_dots_is_not_a_gloss_or_an_ellipsis() {
+        // `(( ))` is code: its parentheses must not be taken for a gloss and cut out of the translation.
+        let source =
+            "Compound Commands (covers <code>[[ ]]</code>, <code>(( ))</code> and <code>if</code>)";
+        let translation = "Compound Commands (<code>[[ ]]</code>, <code>(( ))</code> ve <code>if</code> konularını kapsar)";
+        assert_eq!(strip_source_glosses(source, translation), translation);
+        assert!(check(source, translation).is_empty());
+        // A gloss of plain words still goes.
+        assert_eq!(
+            strip_source_glosses("persistence", "kalıcılık (persistence)"),
+            "kalıcılık"
+        );
+        // Rust's `..` after a full stop is not an added ellipsis, but one in the words still is.
+        let source = "The <code>..</code> syntax fills in the rest.";
+        assert!(
+            check(
+                source,
+                "Geri kalanı doldurulur. <code>..</code> sözdizimi bunu yapar."
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            check(source, "Geri kalanı... <code>..</code> sözdizimi doldurur."),
+            [Problem::InventedEllipsis]
+        );
+    }
 
     #[test]
     fn a_list_of_terms_may_come_back_as_it_was() {

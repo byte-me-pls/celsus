@@ -1,6 +1,7 @@
 //! The languages Celsus offers by name: the world's widely written languages, each with its English name (for the
-//! model), its own name (for people) and its script (for fonts and direction). Any other well-formed language tag
-//! still works; it is just not listed.
+//! model), its own name (for people) and its script (for fonts and direction). These are the only languages a
+//! [`Language`] can be, with a region or script added (`pt-AO`, `sr-Latn`) and a few other usual names (`zh`,
+//! `no`, `tl`).
 
 use serde::Serialize;
 
@@ -310,8 +311,8 @@ mod tests {
                 && info(&lang("dv")).unwrap().rtl
         );
         assert!(!info(&lang("ru")).unwrap().rtl);
-        assert!(info(&lang("xx")).is_none());
+        assert!("xx".parse::<Language>().is_err());
         assert_eq!(english_name(&lang("ja")), "Japanese (ja)");
-        assert_eq!(english_name(&lang("tlh")), "tlh");
+        assert_eq!(english_name(&lang("pt-BR")), "Portuguese (Brazil) (pt-BR)");
     }
 }

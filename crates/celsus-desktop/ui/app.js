@@ -37,13 +37,45 @@ const fmtDate = (s) => (s ? new Date(s * 1000).toLocaleString(UI_LANG, { dateSty
 const fmtTime = (s) => (s ? new Date(s * 1000).toLocaleTimeString(UI_LANG, { timeStyle: "short" }) : "");
 const num = (n) => Number(n || 0).toLocaleString(UI_LANG);
 
-function toast(message, error = false) {
+function toast(message, error = false, actions = []) {
   const t = $("#toast");
   t.textContent = message;
+  // Buttons after the message, such as opening a file just saved; the message then stays until it is used.
+  for (const [label, act] of actions) {
+    const b = document.createElement("button");
+    b.className = "toast-action";
+    b.textContent = label;
+    b.onclick = (e) => { e.stopPropagation(); t.hidden = true; act(); };
+    t.append(" ", b);
+  }
   t.className = error ? "toast error" : "toast";
+  // Read out by screen readers; an error at once.
+  t.setAttribute("role", error ? "alert" : "status");
+  t.setAttribute("aria-live", error ? "assertive" : "polite");
   t.hidden = false;
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => (t.hidden = true), error ? 7000 : 3200);
+  // An error stays until it is clicked away or another message takes its place: it may be about something
+  // that happened while the user was looking elsewhere.
+  t.onclick = () => (t.hidden = true);
+  t.title = error ? T.clickToClose || "" : "";
+  if (!error) toast.timer = setTimeout(() => (t.hidden = true), actions.length ? 12000 : 3200);
+}
+
+/** A question with two answers of its own, rather than OK and Cancel. True for the first. */
+function ask(text, yes, no, kind = "info") {
+  const dialog = window.__TAURI__.dialog;
+  if (!dialog?.ask) return confirm(text);
+  return dialog.ask(text, { title: "Celsus", okLabel: yes, cancelLabel: no, kind });
+}
+
+/** What an error says, in the interface's language where it has words for it. Some come as a code and a number
+ * ("pages_unfinished:3"). */
+function errorText(e) {
+  const text = String(e);
+  const [code, arg] = text.split(":");
+  const known = T.errors?.[text] ?? (arg !== undefined && /^\d+$/.test(arg) ? T.errors?.[code] : undefined);
+  if (typeof known === "function") return known(Number(arg));
+  return known || text;
 }
 
 async function call(cmd, args) {
@@ -51,7 +83,7 @@ async function call(cmd, args) {
     return await invoke(cmd, args);
   } catch (e) {
     // Some failures come as a code, shown in the interface language.
-    toast(T.errors?.[String(e)] || String(e), true);
+    toast(errorText(e), true);
     // Nothing can be translated without a model: go to where one is chosen.
     if (String(e) === "no_model") setUpModel();
     throw e;
@@ -248,10 +280,14 @@ function bookStatus(book) {
 const wholeIn = (book, lang) => (book.translated[lang] || 0) >= book.pages;
 const translatedWhole = (book) => Object.keys(book.translated).some((l) => wholeIn(book, l));
 
+/** Text as it is searched: without accents, without the difference between dotted and dotless i, and in small
+ * letters, so that "istanbul" finds "İstanbul" and "kitabi" finds "kitabı". */
+const fold = (text) => text.replace(/[İIı]/g, "i").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
 function filteredBooks() {
-  const q = state.query.trim().toLowerCase();
+  const q = fold(state.query.trim());
   return state.books.filter((b) => {
-    if (q && !`${b.title} ${b.author}`.toLowerCase().includes(q)) return false;
+    if (q && !fold(`${b.title} ${b.author} ${b.original_name || ""}`).includes(q)) return false;
     const begun = Object.keys(b.translated).length > 0;
     const whole = translatedWhole(b);
     if (state.filter === "translated") return whole;
@@ -319,17 +355,84 @@ function drawGrid() {
         <svg viewBox="0 0 24 24"><path d="M4 5h9M8.5 3v2M6 5c.6 3.6 2.8 6.5 6 8"/><path d="M11 5c-.6 3.4-2.9 6.4-7 8.5"/><path d="M13 21l4-10 4 10M14.5 17.5h5"/></svg>${T.translateAction}</button>
     </div>`;
   }).join("");
-  for (const c of $$("[data-book]", grid)) c.onclick = () => openReader(state.books.find((b) => b.id === Number(c.dataset.book)));
+  for (const c of $$("[data-book]", grid)) {
+    c.onclick = () => openReader(state.books.find((b) => b.id === Number(c.dataset.book)));
+    // A right click (or the menu key) on a card offers what is otherwise at the bottom of the book's page.
+    c.oncontextmenu = (e) => { e.preventDefault(); cardMenu(state.books.find((b) => b.id === Number(c.dataset.book)), e.clientX, e.clientY); };
+  }
   for (const c of $$("[data-translate-book]", grid)) c.onclick = () => go("book", { id: Number(c.dataset.translateBook) });
   fillCovers(grid);
+}
+
+/** The menu of a book's card: read, translate, its files, delete. */
+async function cardMenu(book, x, y) {
+  $(".card-menu")?.remove();
+  const files = await invoke("book_files", { id: book.id }).catch(() => null);
+  const items = [
+    [T.read, () => openReader(book)],
+    [T.translateAction, () => go("book", { id: book.id })],
+    ...Object.entries(files?.outputs || {}).map(([lang, path]) => [T.openTranslation(langName(lang)), () => call("open_path", { path })]),
+    ...(files ? [[T.showInFolder, () => call("show_in_folder", { path: files.source })]] : []),
+    [T.deleteButton, async () => {
+      if (!(await confirm(T.confirmDelete(book.title)))) return;
+      await call("book_delete", { id: book.id });
+      state.covers.delete(book.id);
+      toast(T.deleted);
+      go("library");
+    }, "danger"],
+  ];
+  const menu = document.createElement("div");
+  menu.className = "card-menu";
+  menu.setAttribute("role", "menu");
+  for (const [label, act, cls] of items) {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.setAttribute("role", "menuitem");
+    if (cls) b.className = cls;
+    b.onclick = () => { menu.remove(); act(); };
+    menu.append(b);
+  }
+  document.body.append(menu);
+  const r = menu.getBoundingClientRect();
+  menu.style.left = `${Math.min(x, innerWidth - r.width - 8)}px`;
+  menu.style.top = `${Math.min(y, innerHeight - r.height - 8)}px`;
+  menu.querySelector("button").focus();
+  const close = (e) => { if (!menu.contains(e.target)) { menu.remove(); removeEventListener("mousedown", close, true); } };
+  addEventListener("mousedown", close, true);
+  menu.onkeydown = (e) => {
+    const buttons = [...menu.querySelectorAll("button")];
+    const at = buttons.indexOf(document.activeElement);
+    if (e.key === "Escape") menu.remove();
+    if (e.key === "ArrowDown") { e.preventDefault(); buttons[(at + 1) % buttons.length].focus(); }
+    if (e.key === "ArrowUp") { e.preventDefault(); buttons[(at - 1 + buttons.length) % buttons.length].focus(); }
+  };
 }
 
 async function addBooks(paths) {
   const list = Array.isArray(paths) ? paths : await call("pick_pdfs");
   if (!list.length) return;
   const res = await call("books_add", { paths: list, uiLang: UI_LANG });
-  if (res.added.length) toast(T.added(res.added.length));
-  for (const f of res.failed) toast(`${T.addFailed}: ${f}`, true);
+  // Files that are in the library already: added again only if the user wants a second copy.
+  if (res.already.length) {
+    const names = res.already.map((a) => `${a.file} → ${a.book.title}`).join("\n");
+    if (await ask(`${T.alreadyThere(res.already.length)}\n\n${names}`, T.alreadyOpen, T.alreadyAdd)) {
+      if (!res.added.length && res.already.length === 1) { openReader(res.already[0].book); return; }
+    } else {
+      const again = await call("books_add", { paths: res.already.map((a) => a.path), uiLang: UI_LANG, again: true });
+      res.added.push(...again.added);
+      res.failed.push(...again.failed);
+      res.repaired.push(...(again.repaired || []));
+    }
+  }
+  // What could not be added, file by file and in plain words, all at once rather than one message hiding the
+  // one before.
+  if (res.failed.length) {
+    const lines = res.failed.map((f) => `• ${f.file}: ${T.addWhy?.[f.reason] || f.detail}`).join("\n");
+    const head = res.added.length ? `${T.added(res.added.length)}\n\n` : "";
+    await window.__TAURI__.dialog?.message?.(`${head}${T.addFailedSome(res.failed.length)}\n\n${lines}`, { title: "Celsus", kind: "warning" });
+  } else if (res.added.length) toast(T.added(res.added.length));
+  const damaged = res.added.filter((b) => res.repaired?.includes(b.id));
+  if (damaged.length) toast(T.addedDamaged(damaged.map((b) => b.title).join(", ")), true);
   if (res.added.length === 1 && list.length === 1) openReader(res.added[0]);
   else go("library");
 }
@@ -369,7 +472,8 @@ async function renderBook(id) {
             <label>${T.firstPage}<input id="b-first" type="number" min="1" max="${book.pages}" value="${bookForm.first}"></label>
             <label>${T.lastPage}<input id="b-last" type="number" min="1" max="${book.pages}" value="${bookForm.last}"></label>
           </div>
-          <div class="estimate" id="b-estimate"><div><b>–</b><small>${T.estChars}</small></div><div><b>–</b><small>${T.estTokens}</small></div><div><b>–</b><small>${T.estTime}</small></div></div>
+          <label class="check-row"><input type="checkbox" id="b-again"><span>${T.againLabel}<small class="hint">${T.againHint}</small></span></label>
+          <div class="estimate" id="b-estimate"><div><b>–</b><small>${T.estChars}</small></div><div><b>–</b><small>${T.estTokens}</small></div><div><b>–</b><small>${T.estTime}</small></div><div id="b-cost" hidden><b>–</b><small>${T.estCost}</small></div></div>
           <button class="primary-button wide" id="b-enqueue">${T.enqueue}</button>
         </section>
         <section class="card stack">
@@ -412,9 +516,18 @@ async function renderBook(id) {
   setMode(bookForm.mode);
   for (const id2 of ["#b-first", "#b-last"]) $(id2).oninput = () => { bookForm.first = Number($("#b-first").value); bookForm.last = Number($("#b-last").value); estimate(book); };
   $("#b-target").oninput = () => { bookForm.lang = $("#b-target").value.trim(); renderBookStatus(book); estimate(book); renderPictures(book); };
+  $("#b-again").onchange = () => estimate(book);
   $("#b-enqueue").onclick = () => enqueue(book);
   $("#b-save").onclick = async () => {
-    await call("book_update", { id: book.id, title: $("#b-title").value, author: $("#b-author").value, subject: $("#b-subject").value, sourceLang: $("#b-source").value });
+    const now = await call("book_get", { id: book.id });
+    const field = (sel, was, current) => ($(sel).value !== was ? $(sel).value : current);
+    await call("book_update", {
+      id: book.id,
+      title: field("#b-title", book.title, now.title),
+      author: field("#b-author", book.author, now.author),
+      subject: field("#b-subject", book.subject, now.subject),
+      sourceLang: field("#b-source", book.source_lang, now.source_lang),
+    });
     toast(T.savedDetails);
     go("book", { id: book.id });
   };
@@ -466,9 +579,15 @@ let estimateTimer;
 function estimate(book) {
   clearTimeout(estimateTimer);
   estimateTimer = setTimeout(async () => {
-    const pages = await chosenPages(book);
     const cells = $$("#b-estimate b");
     if (!cells.length) return;
+    // Pages translated already are written again for nothing, unless they are to be translated anew.
+    let pages = await chosenPages(book);
+    if (!$("#b-again")?.checked) {
+      const lang = ($("#b-target")?.value.trim() || DEFAULT_TARGET).toLowerCase();
+      const done = new Set((await invoke("book_pages", { id: book.id, lang }).catch(() => [])).map(([p]) => p));
+      pages = pages.filter((p) => !done.has(p));
+    }
     if (!pages.length) { cells.forEach((c) => (c.textContent = "0")); return; }
     const chars = await invoke("book_estimate", { id: book.id, pages: pages.slice(0, 2000) });
     // About 3.5 characters per token each way, plus the prompt and context sent with every request.
@@ -476,11 +595,15 @@ function estimate(book) {
     cells[0].textContent = num(chars);
     cells[1].textContent = num(tokens);
     cells[2].textContent = T.minutes(pages.length * 16 / 60);
+    // What it may cost, at the price per million tokens set under Settings, if one is.
+    const price = Number(String(state.settings.token_price || "").replace(",", "."));
+    $("#b-cost").hidden = !(price > 0);
+    if (price > 0) cells[3].textContent = (tokens / 1e6 * price).toFixed(tokens / 1e6 * price < 10 ? 2 : 0);
   }, 250);
 }
 
 async function enqueue(book) {
-  const pages = await chosenPages(book);
+  let pages = await chosenPages(book);
   if (!pages.length) { toast(T.nothingToDo); return; }
   const lang = ($("#b-target").value.trim() || DEFAULT_TARGET).toLowerCase();
   // One click, one job: the button waits until this one is in the queue.
@@ -488,20 +611,64 @@ async function enqueue(book) {
   if (button.disabled) return;
   button.disabled = true;
   try {
-    // Pages that are only pictures (a scanned book) have nothing to translate: say so now, not after a job.
-    if (!(await invoke("book_estimate", { id: book.id, pages: pages.slice(0, 2000) }))) {
-      toast(T.errors.no_text, true);
-      return;
-    }
+    pages = await pagesToQueue(book.id, pages, button);
+    if (!pages) return;
     if ($("#b-source").value.trim() !== book.source_lang) {
-      await call("book_update", { id: book.id, title: book.title, author: book.author, subject: book.subject, sourceLang: $("#b-source").value });
+      const now = await call("book_get", { id: book.id });
+      await call("book_update", { id: book.id, title: now.title, author: now.author, subject: now.subject, sourceLang: $("#b-source").value });
     }
-    await call("job_create", { bookId: book.id, lang, pages });
+    await call("job_create", { bookId: book.id, lang, pages, again: $("#b-again").checked });
     toast(T.enqueued);
     await refreshCounts();
     renderBookStatus(book);
   } finally {
     button.disabled = false;
+  }
+}
+
+/** The pages of `pages` that can be queued now, or null when none can. Pages that are only pictures (a scanned
+ * book) are read before they are translated, with models downloaded the first time they are needed, once the
+ * user agrees; if they would rather not, the pages with text of their own go on and the scans wait. `button`,
+ * where there is one, shows how far the download got. */
+async function pagesToQueue(bookId, pages, button) {
+  const scans = await call("book_scans", { id: bookId, pages: pages.slice(0, 2000) });
+  if (!scans.length) {
+    if (await invoke("book_estimate", { id: bookId, pages: pages.slice(0, 2000) })) return pages;
+    toast(T.errors.no_text, true);
+    return null;
+  }
+  if (await readyToReadScans(scans.length, button)) return pages;
+  const waiting = new Set(scans);
+  const rest = pages.filter((p) => !waiting.has(p));
+  if (!rest.length) return null;
+  toast(T.ocrSkipped(scans.length));
+  return rest;
+}
+
+/** Make sure the models that read scanned pages are here, asking before they are downloaded. */
+async function readyToReadScans(scans, button) {
+  const [ready, size] = await invoke("ocr_models");
+  if (ready) return true;
+  if (!(await confirm(T.ocrAsk(scans, Math.ceil(size / 1e6))))) return false;
+  const label = button?.textContent;
+  // The download shows how far it got, with a way to stop it.
+  const cancel = [[T.cancel, () => invoke("ocr_download_cancel")]];
+  const show = (p) => {
+    if (button) button.textContent = T.ocrDownloading(p);
+    toast(T.ocrDownloading(p), false, cancel);
+  };
+  const stop = await listen("ocr-download", ({ payload: p }) => show(p));
+  try {
+    show(0);
+    await invoke("ocr_download");
+    toast(T.ocrReady);
+    return true;
+  } catch (e) {
+    if (String(e) !== "cancelled") toast(errorText(e), true);
+    return false;
+  } finally {
+    stop();
+    if (button) button.textContent = label;
   }
 }
 
@@ -526,6 +693,7 @@ async function renderBookStatus(book) {
           <div class="meter"><span style="width:${(100 * pages.length) / fresh.pages}%"></span></div></span>
         <span class="lang-actions"><button class="quiet-button" data-read="${esc(lang)}">${T.read}</button>
           <button class="quiet-button" data-save="${esc(lang)}">${T.savePdf}</button>
+          ${issues ? `<button class="quiet-button" data-redo="${esc(lang)}" title="${esc(T.redoIssuesHint)}">${T.redoIssues(issues)}</button>` : ""}
           <button class="quiet-button danger" data-untranslate="${esc(lang)}" title="${T.translationRemoveHint}">${T.translationRemove}</button></span></div>`);
     }
     const map = await invoke("book_pages", { id: book.id, lang: selected });
@@ -542,7 +710,23 @@ async function renderBookStatus(book) {
       <div class="page-map" id="page-map">${cells}</div>
       <div class="legend"><span class="t">${T.legendT}</span><span class="k">${T.legendK}</span><span>${T.legendN}</span></div>`;
     for (const b of $$("[data-read]", box)) b.onclick = () => go("reader", { id: book.id, lang: b.dataset.read, page: readingPrefs(book.id).page || 1 });
-    for (const b of $$("[data-save]", box)) b.onclick = async () => { const p = await call("save_output", { id: book.id, lang: b.dataset.save }); if (p) toast(T.savedTo(p)); };
+    for (const b of $$("[data-save]", box)) b.onclick = async () => {
+      // A book not translated to the end is saved with its other pages as they were: said first.
+      const lang = b.dataset.save;
+      const done = (await invoke("book_pages", { id: book.id, lang })).length;
+      if (done < fresh.pages && !(await confirm(T.savePartial(done, fresh.pages)))) return;
+      const p = await call("save_output", { id: book.id, lang });
+      if (p) toast(T.savedTo(p), false, [[T.openFile, () => call("open_path", { path: p })], [T.showInFolder, () => call("show_in_folder", { path: p })]]);
+    };
+    for (const b of $$("[data-redo]", box)) b.onclick = async () => {
+      const lang = b.dataset.redo;
+      const pages = (await invoke("book_pages", { id: book.id, lang })).filter(([, k]) => k > 0).map(([p]) => p);
+      if (!pages.length) return;
+      await call("job_create", { bookId: book.id, lang, pages, again: true });
+      toast(T.enqueued);
+      await refreshCounts();
+      renderBookStatus(book);
+    };
     for (const b of $$("[data-untranslate]", box)) b.onclick = async () => {
       const lang = b.dataset.untranslate;
       // In the app the question is answered later than it is asked: nothing is done before the answer.
@@ -645,7 +829,7 @@ function jobRow(job, showBook = true) {
   const stopping = job.status === "running" && state.stopping.has(job.id);
   // A job that failed for a passing reason waits in the queue to be tried again on its own.
   const later = job.status === "queued" && job.retry_at;
-  const why = job.error ? T.errors?.[job.error] || job.error : "";
+  const why = job.error ? errorText(job.error) : "";
   // The model that translates, or translated: while a job runs, the one that is being asked now.
   const model = job.model ? `<span class="job-model${job.status === "running" ? " live" : ""}" title="${esc(job.model)}">${esc(job.model.split("/").pop())}</span>` : "";
   const sub = later
@@ -725,13 +909,31 @@ async function renderSettings(tab) {
       <nav class="settings-tabs">${tabs.map(([k, l]) => `<button data-tab="${k}" class="${k === tab ? "active" : ""}">${l}</button>`).join("")}</nav>
       <div id="tab"></div>
     </div>`;
-  for (const b of $$("[data-tab]")) b.onclick = () => go("settings", { tab: b.dataset.tab });
+  // Changes typed and not saved are not dropped without a word.
+  settingsDirty = false;
+  for (const b of $$("[data-tab]")) b.onclick = async () => {
+    if (settingsDirty && !(await confirm(T.discardChanges))) return;
+    go("settings", { tab: b.dataset.tab });
+  };
   const box = $("#tab");
   if (tab === "general") settingsGeneral(box);
   if (tab === "colors") settingsColors(box);
   if (tab === "models") await settingsModels(box);
-  if (tab === "translation") settingsSimple(box, [["batch_chars", T.batchChars, T.batchCharsHint, "number"], ["answer_wait", T.answerWait, T.answerWaitHint, "number"]], `<div class="setting-row"><div><h3>${T.readable}</h3><p>${T.readableHint}</p></div><span class="caption">70% · 6 pt</span></div>`);
-  if (tab === "fonts") settingsSimple(box, [["fonts_dir", T.fontsDir, T.fontsHint, "text"]]);
+  if (tab === "translation") settingsSimple(box, [["batch_chars", T.batchChars, T.batchCharsHint, "number"], ["answer_wait", T.answerWait, T.answerWaitHint, "number"], ["token_price", T.tokenPrice, T.tokenPriceHint, "text"]]);
+  if (tab === "fonts") {
+    settingsSimple(box, [["fonts_dir", T.fontsDir, T.fontsHint, "text"]], `<div class="form-actions" style="justify-content:flex-start"><button class="quiet-button" id="f-pick">${T.browse}</button><span class="caption" id="f-found"></span></div>`);
+    const field = $("[data-key=fonts_dir]", box);
+    // How many usable fonts the folder holds, as it is typed or picked, so that a wrong folder is seen now and
+    // not when a job fails.
+    const check = async () => {
+      const n = await invoke("fonts_check", { dir: field.value.trim(), lang: state.settings.target_lang || DEFAULT_TARGET }).catch(() => 0);
+      $("#f-found").textContent = n ? T.fontsFound(n) : T.fontsNone;
+      $("#f-found").className = n ? "caption" : "caption error";
+    };
+    field.oninput = check;
+    $("#f-pick").onclick = async () => { const d = await invoke("pick_folder"); if (d) { field.value = d; check(); } };
+    check();
+  }
   if (tab === "storage") await settingsStorage(box);
   if (tab === "connections") await settingsConnections(box);
   if (tab === "about") await settingsAbout(box);
@@ -820,6 +1022,9 @@ function settingsGeneral(box) {
 /** What a number setting may be: the least, the most, and what it is when nothing sensible is typed. */
 const NUMBER_SETTINGS = { batch_chars: [500, 20000, 5000], answer_wait: [20, 600, 180] };
 
+/** Whether a settings page has changes that are not saved yet. */
+let settingsDirty = false;
+
 function settingsSimple(box, fields, extra = "") {
   box.innerHTML = `<section class="card">${fields.map(([k, label, hint, type]) => {
     const [min, max] = NUMBER_SETTINGS[k] || [];
@@ -827,7 +1032,9 @@ function settingsSimple(box, fields, extra = "") {
     <div class="setting-row"><div><h3>${label}</h3><p>${hint}</p></div><input data-key="${k}" type="${type}" ${min ? `min="${min}" max="${max}"` : ""} value="${esc(state.settings[k])}"></div>`;
   }).join("")}${extra}
     <div class="form-actions"><button class="primary-button" id="s-save">${T.save}</button></div></section>`;
+  for (const field of $$("[data-key]", box)) field.addEventListener("input", () => (settingsDirty = true));
   $("#s-save").onclick = () => {
+    settingsDirty = false;
     const values = {};
     for (const field of $$("[data-key]", box)) {
       let value = field.value.trim();
@@ -954,7 +1161,7 @@ async function settingsModels(box) {
       const p = provider();
       // A connection without a model is nothing to save: the field is waiting for one.
       if (p && !input.value.trim()) { input.focus(); return; }
-      await call("task_model_set", { task, providerId: p ? p.id : null, model: p ? input.value.trim() : "" });
+      await call("task_model_set", { task, providerId: p ? p.id : null, model: p ? input.value.trim() : "", uiLang: UI_LANG });
       toast(T.settingsSaved);
       refreshProfile();
     };
@@ -979,7 +1186,9 @@ async function apiConnections(box) {
   for (const b of $$("[data-edit]", box)) b.onclick = () => connectionForm(providers.find((p) => p.id === Number(b.dataset.edit)));
   for (const b of $$("[data-remove]", box)) b.onclick = async () => {
     const p = providers.find((x) => x.id === Number(b.dataset.remove));
-    if (!(await confirm(T.confirmRemoveModel(p.name)))) return;
+    if (!(await confirm(`${T.confirmRemoveModel(p.name)}
+
+${T.removeModelJobsWait}`))) return;
     await call("provider_delete", { id: p.id });
     modelLists.delete(p.id);
     refreshProfile();
@@ -1070,14 +1279,27 @@ async function settingsStorage(box) {
   box.innerHTML = `<section class="card"><dl class="kv">
       <dt>${T.libraryPath}</dt><dd>${esc(s.library)}</dd>
       <dt>${T.libraryBytes}</dt><dd>${fmtBytes(s.library_bytes)}</dd>
-      <dt>${T.database}</dt><dd>${esc(s.database)}</dd>
+      <dt>${T.database}</dt><dd>${esc(s.database)} · ${fmtBytes(s.database_bytes)}</dd>
+      ${s.models_bytes ? `<dt>${T.modelsSize}</dt><dd>${fmtBytes(s.models_bytes)}</dd>` : ""}
       <dt>${T.cache}</dt><dd>${T.cacheText(s.cached_translations, s.cached_chars)}</dd></dl>
-    <div class="form-actions"><button class="quiet-button danger" id="c-clear">${T.clearCache}</button></div></section>`;
+    <div class="form-actions"><button class="quiet-button" id="c-open">${T.openDataFolder}</button><button class="quiet-button danger" id="c-clear">${T.clearCache}</button></div></section>
+    <section class="card stack"><div class="section-heading"><h2>${T.backupTitle}</h2></div>
+      <p class="hint">${T.backupHint}</p>
+      <div class="form-actions"><button class="quiet-button" id="c-backup">${T.backupMake}</button><button class="quiet-button" id="c-restore">${T.backupRestore}</button></div></section>`;
+  $("#c-open").onclick = () => call("show_in_folder", { path: s.data });
   $("#c-clear").onclick = async () => {
     if (!(await confirm(T.confirmClear))) return;
-    await call("cache_clear");
-    toast(T.cleared);
+    const n = await call("cache_clear");
+    toast(T.clearedN(n));
     settingsStorage(box);
+  };
+  $("#c-backup").onclick = async () => {
+    const dir = await call("backup_make");
+    if (dir) toast(T.backupDone(dir), false, [[T.showInFolder, () => call("show_in_folder", { path: dir })]]);
+  };
+  $("#c-restore").onclick = async () => {
+    if (!(await confirm(T.backupRestoreAsk))) return;
+    await call("backup_restore");
   };
 }
 
@@ -1167,15 +1389,29 @@ async function settingsAbout(box) {
       <dt>Instrument Serif</dt><dd>SIL Open Font License 1.1</dd>
       <dt>Tauri</dt><dd>MIT / Apache-2.0</dd>
       <dt>SQLite</dt><dd>Public domain</dd></dl></section>`;
-  if (state.settings.update_check === "0") return;
-  const update = await invoke("update_check").catch(() => undefined);
   const line = $("#about-update");
-  if (update === undefined || !line) return;
-  line.hidden = false;
-  line.innerHTML = update
-    ? `<span class="caption">${esc(T.updateOut(update.version))}</span><button class="primary-button">${update.installs_itself ? T.updateInstall : T.updateGet}</button>`
-    : `<span class="caption">${T.upToDate}</span>`;
-  if (update) $("button", line).onclick = (e) => getUpdate(update, e.currentTarget);
+  // Whether a newer version is out: looked up at once unless looking is turned off, and at any time on request.
+  const look = async () => {
+    line.hidden = false;
+    line.innerHTML = `<span class="caption">${T.updateChecking}</span>`;
+    const update = await invoke("update_check").catch(() => undefined);
+    if (!line.isConnected) return;
+    line.innerHTML = update === undefined
+      ? `<span class="caption error">${T.updateFailed}</span><button class="quiet-button" data-look>${T.updateCheckNow}</button>`
+      : update
+        ? `<span class="caption">${esc(T.updateOut(update.version))}</span><button class="primary-button" data-get>${update.installs_itself ? T.updateInstall : T.updateGet}</button>`
+        : `<span class="caption">${T.upToDate}</span><button class="quiet-button" data-look>${T.updateCheckNow}</button>`;
+    if (update) $("[data-get]", line).onclick = (e) => getUpdate(update, e.currentTarget);
+    const again = $("[data-look]", line);
+    if (again) again.onclick = look;
+  };
+  if (state.settings.update_check === "0") {
+    line.hidden = false;
+    line.innerHTML = `<span class="caption">${T.updateOff}</span><button class="quiet-button" data-look>${T.updateCheckNow}</button>`;
+    $("[data-look]", line).onclick = look;
+    return;
+  }
+  look();
 }
 
 /**
@@ -1271,8 +1507,14 @@ async function renderProfile() {
 
 /* ============================== events ============================== */
 
-listen("book-recognised", ({ payload: id }) => {
-  if (state.route.view === "book" && state.route.id === id && !main.contains(document.activeElement)) go("book", { id });
+listen("book-recognised", async ({ payload: id }) => {
+  if (state.route.view !== "book" || state.route.id !== id) return;
+  if (!main.contains(document.activeElement)) { go("book", { id }); return; }
+  const book = await invoke("book_get", { id });
+  for (const [sel, value] of [["#b-title", book.title], ["#b-author", book.author], ["#b-subject", book.subject], ["#b-source", book.source_lang]]) {
+    const el = $(sel);
+    if (el && el !== document.activeElement && el.defaultValue === el.value) { el.value = value; el.defaultValue = value; }
+  }
 });
 
 listen("library-changed", async () => {
@@ -1287,10 +1529,45 @@ listen("library-changed", async () => {
 
 listen("jobs-changed", () => refreshJobViews());
 
+// While the window is away in the tray, what jobs do is kept, shown on the tray icon, and said when it is back.
+const away = { hidden: false, jobs: [] };
+function awayText() {
+  const done = away.jobs.filter((j) => j.status === "done").length;
+  const failed = away.jobs.filter((j) => j.status === "failed").length;
+  return T.awayNote(done, failed);
+}
+listen("window-hidden", () => (away.hidden = true));
+listen("window-shown", async () => {
+  away.hidden = false;
+  if (!away.jobs.length) return;
+  const text = awayText();
+  const failed = away.jobs.filter((j) => j.status === "failed");
+  away.jobs = [];
+  invoke("tray_status", { text: "" }).catch(() => {});
+  const why = failed.map((j) => `${j.book_title}: ${errorText(j.error || "")}`).join("\n");
+  await window.__TAURI__.dialog?.message?.(why ? `${text}\n\n${why}` : text, { title: "Celsus", kind: failed.length ? "warning" : "info" });
+});
+// The first time the window is closed, it says where Celsus goes, and lets the user quit instead.
+listen("tray-first", async () => {
+  await call("settings_set", { values: { tray_told: "1" } }).catch(() => {});
+  if (await ask(T.trayFirst, T.trayKeep, T.trayQuit)) invoke("app_hide");
+  else quitAsking();
+});
+// Quitting while a translation runs stops it: asked first.
+async function quitAsking() {
+  const busy = state.jobs.some((j) => j.status === "running");
+  if (!busy || (await ask(T.quitBusy, T.quitAnyway, T.keepWorking, "warning"))) invoke("app_quit");
+}
+listen("quit-asked", () => quitAsking());
+
 listen("job-updated", async ({ payload: job }) => {
   if (job.status !== "running") state.stopping.delete(job.id);
+  if (away.hidden && (job.status === "done" || job.status === "failed") && !away.jobs.some((j) => j.id === job.id)) {
+    away.jobs.push(job);
+    invoke("tray_status", { text: awayText() }).catch(() => {});
+  }
   // A job that stopped on its own says why, wherever the user is in the app.
-  if (job.status === "failed" && job.error) toast(T.errors?.[job.error] || job.error, true);
+  if (job.status === "failed" && job.error) toast(errorText(job.error), true);
   await refreshCounts();
   const v = state.route.view;
   if (v === "jobs") renderJobs();
@@ -1305,6 +1582,7 @@ listen("job-updated", async ({ payload: job }) => {
 function liveNote(live) {
   if (!live) return "";
   if (live.message?.startsWith("wait:")) return ` · ${T.waitingS(live.message.slice(5))}`;
+  if (live.message?.startsWith("read:")) return ` · ${T.readingScans(...live.message.slice(5).split("/"))}`;
   const seconds = Math.floor((Date.now() - live.at) / 1000);
   return live.page && seconds >= 8 ? ` · ${T.onPage(live.page, seconds)}` : "";
 }
@@ -1337,9 +1615,11 @@ listen("job-progress", ({ payload: p }) => {
 
 listen("tauri://drag-enter", () => ($("#drop-overlay").hidden = false));
 listen("tauri://drag-leave", () => ($("#drop-overlay").hidden = true));
-listen("tauri://drag-drop", ({ payload }) => {
+listen("tauri://drag-drop", async ({ payload }) => {
   $("#drop-overlay").hidden = true;
-  const pdfs = (payload.paths || []).filter((p) => p.toLowerCase().endsWith(".pdf"));
+  // PDFs inside a folder that was dropped are added too; anything else is said to be left out.
+  const [pdfs, other] = await invoke("pdfs_in", { paths: payload.paths || [] });
+  if (other) toast(T.onlyPdf(other), !pdfs.length);
   if (pdfs.length) addBooks(pdfs);
 });
 

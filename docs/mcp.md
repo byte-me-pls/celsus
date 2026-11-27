@@ -72,7 +72,12 @@ bearer_token_env_var = "CELSUS_API_KEY"
 
 On the server the assistant works as you: it sees the books you can see, and what it translates counts for you.
 `add_book` takes the PDF as base64, `replace_picture` the picture as base64, and `get_output` gives the address the
-translated PDF can be downloaded from with the same credentials.
+translated PDF can be downloaded from with the same credentials. Book ids on the server are text, as `list_books`
+gives them.
+
+The server cannot read the words off scanned pages (pictures of pages without a text layer). Such pages are left
+unfinished rather than written as they are: `get_text_to_translate` lists them in `scanned_pages_without_text` and
+says so in its `note`. The desktop app reads scanned pages; translate those books there.
 
 ## Translating text
 
@@ -85,6 +90,25 @@ Turkish."* The assistant then:
    much shorter than the source, an added explanation or ellipsis, a list with the wrong number of lines) and returns the ones it rejects with the reason; the assistant
    fixes and resends them,
 4. repeats until no blocks are left. `get_output` tells where the translated PDF is.
+
+A translation that a check flags can be sent again with `accept_anyway` on that item when the source really calls
+for it (`accept_anyway` on the whole call still works, for every item). An empty translation is never stored. A
+block whose translation cannot be placed, even at the smallest readable size, keeps its original text:
+`kept_original` names each such block as `page:id`, with the reason, so the assistant can send a shorter one.
+
+Pages that are not in the book (page 0, or past the last page) are refused with the book's page count, rather than
+answered as if they were done. Ids and page numbers may come as numbers or as text (`"3"`). A language is a code;
+a name such as "turkish" is answered with the code to use. A book is not translated into the language it is
+written in (`source_language` in `book_info`).
+
+### Translating pages again
+
+Text Celsus has translated before, in this book or another, is not handed out again. To have pages translated anew
+(a better model, a different style), the assistant calls `translate_again` for them first. Their blocks are then
+handed out again, and each page stays in the translated PDF exactly as it was until every block of it has its new
+translation: then the whole page changes at once. A page given only in part never shows new and old text side by
+side. Translation jobs can translate pages again too: from the reader, and on a server book's page (**Translate
+pages that are translated already again**).
 
 ## Covers and pictures
 
@@ -110,6 +134,7 @@ model chosen in the desktop app under **Settings → Models** to draw it.
 | `book_info` | no | One book's details; with a language, which pages are done |
 | `get_text_to_translate` | no | The next blocks to translate, with instructions and context |
 | `submit_translations` | yes | Checks and stores translations, writes finished pages |
+| `translate_again` | yes | Hands pages out again to be translated anew; they change in the PDF once finished |
 | `get_output` | no | Where the translated PDF is |
 | `list_pictures` | no | Pictures on the given pages, and which are redrawn; the picture model Celsus would use |
 | `get_picture` | no | The picture itself (original, or redrawn in a language) |
@@ -118,4 +143,5 @@ model chosen in the desktop app under **Settings → Models** to draw it.
 | `restore_picture` | yes | Back to the original picture |
 
 Tools that only read are marked read-only, so apps that honour the hint can run them without asking each time.
-Languages are codes such as `tr`, `de`, `ar`, `hi`, `ja`, `zh-hans` or `pt-br`.
+Languages are codes such as `tr`, `de`, `ar`, `hi`, `ja`, `zh-hans` or `pt-br`. The server offers the same tools,
+with base64 in place of file paths.

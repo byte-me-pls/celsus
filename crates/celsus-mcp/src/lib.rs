@@ -88,7 +88,7 @@ fn tools() -> Value {
         },
         {
             "name": "submit_translations",
-            "description": "Send translations back. Each item needs the page and id from get_text_to_translate. Translations that fail Celsus's checks are returned with the problem; fix and send them again, or set accept_anyway if the source really calls for it.",
+            "description": "Send translations back. Each item needs the page and id from get_text_to_translate. Translations that fail Celsus's checks are returned with the problem; fix and send them again, or set accept_anyway on an item if the source really calls for it. kept_original names the blocks (page:id) that were written with their original text, and why.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -101,12 +101,13 @@ fn tools() -> Value {
                             "properties": {
                                 "page": { "type": "integer" },
                                 "id": { "type": "string" },
-                                "text": { "type": "string" }
+                                "text": { "type": "string" },
+                                "accept_anyway": { "type": "boolean", "description": "Store this translation even if a check flags it, when the source really calls for it." }
                             },
                             "required": ["page", "id", "text"]
                         }
                     },
-                    "accept_anyway": { "type": "boolean", "description": "Store translations even if a check flags them." }
+                    "accept_anyway": { "type": "boolean", "description": "Store every translation of this call even if a check flags it. Prefer accept_anyway on the items that need it. An empty translation is never stored." }
                 },
                 "required": ["book_id", "target_language", "translations"]
             }
@@ -199,6 +200,91 @@ fn tools() -> Value {
     ])
 }
 
+/// How long one answer may spend reading scanned pages: a page takes a second or two, and the assistant is not
+/// kept waiting much longer than that for its blocks.
+const READING_TIME: std::time::Duration = std::time::Duration::from_secs(25);
+
+#[derive(Default)]
+struct ScansRead {
+    /// Pages read for this answer.
+    read: usize,
+    /// Scanned pages still to read.
+    left: usize,
+    /// Pages that wait for those to be read, unfinished.
+    later: usize,
+    /// Scanned pages left out because the models that read them are not there.
+    waiting: usize,
+}
+
+/// Read the scanned pages of `pages` (every page when empty) that have no text layer, as many as there is time
+/// for. Gives the pages that can be handed out now: those before the first page still unread, since a page not
+/// read yet would otherwise look empty and be called finished.
+fn read_scans(
+    lib: &Path,
+    book: i64,
+    pages: Vec<usize>,
+    done: &std::collections::BTreeSet<usize>,
+    book_pages: usize,
+) -> Result<(Vec<usize>, ScansRead), String> {
+    let mut unread: Vec<usize> = celsus_ocr::unread_pages(lib, book, &pages)?
+        .into_iter()
+        .filter(|p| !done.contains(p))
+        .collect();
+    // Read from the front, so that what can be handed out meanwhile is the pages before.
+    unread.sort_unstable();
+    if unread.is_empty() {
+        return Ok((pages, ScansRead::default()));
+    }
+    let all: Vec<usize> = if pages.is_empty() {
+        (1..=book_pages).collect()
+    } else {
+        pages
+    };
+    let models = celsus_ocr::models_dir(&celsus_store::data_dir());
+    if !celsus_ocr::ready(&models) {
+        // Without the models the scanned pages wait; the pages with text of their own go on.
+        let waiting: std::collections::BTreeSet<usize> = unread.iter().copied().collect();
+        let now: Vec<usize> = all.into_iter().filter(|p| !waiting.contains(p)).collect();
+        let open = now.iter().filter(|p| !done.contains(p)).count();
+        if open == 0 {
+            return Err(format!(
+                "{} pages of this book are scanned pictures without a text layer, and Celsus needs its OCR \
+                 models ({} MB, downloaded once) to read them. Ask the user to open the Celsus app and start \
+                 translating this book there once: it offers to download them. Then ask for blocks again.",
+                unread.len(),
+                celsus_ocr::download_size().div_ceil(1_000_000)
+            ));
+        }
+        return Ok((
+            now,
+            ScansRead {
+                waiting: unread.len(),
+                later: unread.len(),
+                ..ScansRead::default()
+            },
+        ));
+    }
+    let reader = celsus_ocr::Reader::open(&models)?;
+    let start = std::time::Instant::now();
+    let mut read = 0;
+    celsus_ocr::read_pages(lib, book, &unread, &reader, |n, _| {
+        read = n;
+        n == 0 || start.elapsed() < READING_TIME
+    })?;
+    let mut scans = ScansRead {
+        read,
+        left: unread.len() - read,
+        later: 0,
+        waiting: 0,
+    };
+    let Some(&first) = unread.get(read) else {
+        return Ok((all, scans));
+    };
+    let (now, later): (Vec<usize>, Vec<usize>) = all.into_iter().partition(|&p| p < first);
+    scans.later = later.iter().filter(|p| !done.contains(p)).count();
+    Ok((now, scans))
+}
+
 /// Parse "10-12,15" (or a JSON array of numbers) into page numbers.
 fn parse_pages(v: Option<&Value>) -> Result<Vec<usize>, String> {
     match v {
@@ -206,7 +292,8 @@ fn parse_pages(v: Option<&Value>) -> Result<Vec<usize>, String> {
         Some(Value::Array(a)) => a
             .iter()
             .map(|x| {
-                x.as_u64()
+                number(x)
+                    .filter(|&n| n >= 0)
                     .map(|n| n as usize)
                     .ok_or("pages must be numbers".into())
             })
@@ -235,18 +322,36 @@ fn parse_pages(v: Option<&Value>) -> Result<Vec<usize>, String> {
     }
 }
 
+/// A number, also when it comes as text ("12").
+fn number(v: &Value) -> Option<i64> {
+    match v {
+        Value::Number(n) => n.as_i64(),
+        Value::String(s) => s.trim().parse().ok(),
+        _ => None,
+    }
+}
+
 fn arg_i64(args: &Value, key: &str) -> Result<i64, String> {
-    args[key]
-        .as_i64()
-        .ok_or_else(|| format!("{key} is required"))
+    match &args[key] {
+        Value::Null => Err(format!("{key} is required")),
+        v => number(v).ok_or_else(|| format!("{key} must be a number, such as 3")),
+    }
 }
 
 fn arg_lang(args: &Value) -> Result<Language, String> {
-    args["target_language"]
-        .as_str()
-        .ok_or("target_language is required")?
-        .parse()
-        .map_err(|e: celsus_core::language::InvalidLanguage| e.to_string())
+    celsus_core::assist::parse_language(
+        args["target_language"]
+            .as_str()
+            .ok_or("target_language is required")?,
+    )
+}
+
+/// Refuse to translate a book into the language it is written in.
+fn other_language(source: &str, lang: &Language) -> Result<(), String> {
+    if celsus_core::assist::same_language(source, lang) {
+        return Err(celsus_core::assist::same_language_error(source, lang));
+    }
+    Ok(())
 }
 
 /// A tool's answer: data, and pictures to show.
@@ -270,8 +375,7 @@ const MAX_PICTURE: usize = 8 << 20;
 fn arg_page(args: &Value) -> Result<usize, String> {
     match &args["page"] {
         Value::Null => Ok(1),
-        v => v
-            .as_u64()
+        v => number(v)
             .filter(|&n| n >= 1)
             .map(|n| n as usize)
             .ok_or_else(|| "page must be a page number".into()),
@@ -462,28 +566,73 @@ fn call_text_tool(name: &str, args: &Value) -> Result<Value, String> {
             let book = arg_i64(args, "book_id")?;
             let lang = arg_lang(args)?;
             let pages = parse_pages(args.get("pages"))?;
-            let max = args["max_characters"]
-                .as_u64()
+            other_language(&db::book(&conn, book)?.source_lang, &lang)?;
+            let max = number(&args["max_characters"])
                 .unwrap_or(4000)
                 .clamp(500, 20000) as usize;
+            // Pages to be translated again count as not done: they are handed out again.
+            let redo = db::redo_pages(&conn, book, lang.as_str())?;
+            let done = db::translated_pages(&conn, book, lang.as_str())?
+                .into_iter()
+                .map(|(p, _)| p as usize)
+                .filter(|p| !redo.contains(p))
+                .collect();
+            let book_pages = db::book(&conn, book)?.pages as usize;
+            celsus_core::assist::check_pages(book_pages, &pages)?;
+            let (pages, scans) = read_scans(&lib, book, pages, &done, book_pages)?;
             let p = assistant::pending(&conn, &lib, book, &lang, &pages, max)?;
             let mut v = serde_json::to_value(p).map_err(|e| e.to_string())?;
             v["book_id"] = json!(book);
+            if scans.waiting > 0 {
+                v["pages_left"] = json!(v["pages_left"].as_u64().unwrap_or(0) + scans.later as u64);
+                let note = format!(
+                    "{} scanned pages without a text layer are left out for now: Celsus needs its OCR models \
+                     ({} MB, downloaded once) to read them. When the other pages are done, ask the user to open \
+                     the Celsus app and start translating this book there once: it offers to download them.",
+                    scans.waiting,
+                    celsus_ocr::download_size().div_ceil(1_000_000)
+                );
+                let before = v["note"].as_str().unwrap_or("").to_owned();
+                v["note"] = json!(if before.is_empty() {
+                    note
+                } else {
+                    format!("{before} {note}")
+                });
+            } else if scans.read > 0 || scans.left > 0 {
+                v["pages_left"] = json!(v["pages_left"].as_u64().unwrap_or(0) + scans.later as u64);
+                let mut note = format!(
+                    "{} scanned pages without a text layer were read by OCR for this answer.",
+                    scans.read
+                );
+                if scans.left > 0 {
+                    note += &format!(
+                        " {} more are read on later calls, a few at a time; keep asking for blocks.",
+                        scans.left
+                    );
+                }
+                let before = v["note"].as_str().unwrap_or("").to_owned();
+                v["note"] = json!(if before.is_empty() {
+                    note
+                } else {
+                    format!("{before} {note}")
+                });
+            }
             Ok(v)
         }
         "translate_again" => {
             let book = arg_i64(args, "book_id")?;
             let lang = arg_lang(args)?;
             let pages = parse_pages(args.get("pages"))?;
+            other_language(&db::book(&conn, book)?.source_lang, &lang)?;
             let n = assistant::translate_again(&conn, &lib, book, &lang, &pages)?;
             Ok(json!({ "book_id": book, "pages_to_translate_again": n }))
         }
         "submit_translations" => {
             let book = arg_i64(args, "book_id")?;
             let lang = arg_lang(args)?;
-            let items: Vec<assistant::Submitted> =
-                serde_json::from_value(args["translations"].clone())
-                    .map_err(|e| format!("translations: {e}"))?;
+            other_language(&db::book(&conn, book)?.source_lang, &lang)?;
+            let items: Vec<assistant::Sent> = serde_json::from_value(args["translations"].clone())
+                .map_err(|e| format!("translations: {e}"))?;
             let accept = args["accept_anyway"].as_bool().unwrap_or(false);
             let r = assistant::submit(&conn, &lib, book, &lang, &items, accept)?;
             Ok(serde_json::to_value(r).map_err(|e| e.to_string())?)
