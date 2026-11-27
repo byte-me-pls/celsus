@@ -65,6 +65,10 @@ jobs:
         run: |
           for f in crates/celsus-server/web/web.js crates/celsus-desktop/ui/app.js crates/celsus-desktop/ui/reader.js crates/celsus-desktop/ui/models.js crates/celsus-desktop/ui/i18n/*.js; do node --check "$f"; done
           bash -n install.sh
+      - name: Each interface's scripts load together
+        run: |
+          node scripts/check-ui.js crates/celsus-desktop/ui/index.html
+          node scripts/check-ui.js --shared crates/celsus-desktop/ui crates/celsus-server/web/index.html
       - name: Every interface language matches English
         run: node scripts/check-i18n.js crates/celsus-desktop/ui/i18n
       - name: No inline scripts or styles in the web pages

@@ -282,12 +282,12 @@ const translatedWhole = (book) => Object.keys(book.translated).some((l) => whole
 
 /** Text as it is searched: without accents, without the difference between dotted and dotless i, and in small
  * letters, so that "istanbul" finds "İstanbul" and "kitabi" finds "kitabı". */
-const fold = (text) => text.replace(/[İIı]/g, "i").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+const foldForSearch = (text) => text.replace(/[İIı]/g, "i").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
 function filteredBooks() {
-  const q = fold(state.query.trim());
+  const q = foldForSearch(state.query.trim());
   return state.books.filter((b) => {
-    if (q && !fold(`${b.title} ${b.author} ${b.original_name || ""}`).includes(q)) return false;
+    if (q && !foldForSearch(`${b.title} ${b.author} ${b.original_name || ""}`).includes(q)) return false;
     const begun = Object.keys(b.translated).length > 0;
     const whole = translatedWhole(b);
     if (state.filter === "translated") return whole;

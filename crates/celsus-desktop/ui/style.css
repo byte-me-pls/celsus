@@ -224,9 +224,9 @@ textarea { resize: vertical; }
 .legend .k::before { background: var(--warn); }
 .estimate { display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); gap: 8px; }
 .estimate div[hidden] { display: none; }
-.check-row { display: flex; gap: 10px; align-items: flex-start; font-size: 13px; cursor: pointer; }
-.check-row input { margin-top: 3px; flex: none; }
-.check-row small { display: block; margin-top: 2px; }
+label.check-row { display: flex; flex-direction: row; gap: 10px; align-items: flex-start; flex: none; font-size: 13px; color: var(--ink); cursor: pointer; }
+label.check-row input { width: auto; flex: none; margin: 2px 0 0; padding: 0; accent-color: var(--ember); }
+label.check-row small { display: block; margin-top: 3px; font-size: 11px; color: var(--soft); }
 .estimate div { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
 .estimate b { display: block; font-size: 15px; font-weight: 500; font-variant-numeric: tabular-nums; }
 .estimate small { font-size: 10px; color: var(--soft); }
